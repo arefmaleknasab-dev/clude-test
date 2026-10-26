@@ -67,9 +67,10 @@ const BOX_ROTATE_CURSORS = [180,270,0,90].map(rotationCursor);
 const resizeCursor=(mode:"nw"|"ne"|"sw"|"se"|"n"|"s"|"e"|"w",rotation:number)=>{const base:{[K in typeof mode]:number}={e:0,w:0,n:90,s:90,ne:-45,sw:-45,nw:45,se:45},angle=base[mode]+rotation,svg=`<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g transform="rotate(${angle} 12 12)" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18M3 12l4-4M3 12l4 4M21 12l-4-4M21 12l-4 4" stroke="#000" stroke-width="4"/><path d="M3 12h18M3 12l4-4M3 12l4 4M21 12l-4-4M21 12l-4 4" stroke="#fff" stroke-width="2"/></g></svg>`;return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 12 12, move`;};
 
 const movePolylineSelection=(all:SketchSeg[],ids:number[],dz:number,dr:number)=>{
-  const chosen=new Set(ids),keys=new Set<string>();
-  for(const s of all)if(chosen.has(s.id)&&s.polylineId!=null){keys.add(`${s.polylineId}:${s.a.z}:${s.a.r}`);keys.add(`${s.polylineId}:${s.b.z}:${s.b.r}`);}
-  return all.map(s=>{if(chosen.has(s.id))return moveSeg(s,dz,dr);if(s.polylineId==null)return s;const a=keys.has(`${s.polylineId}:${s.a.z}:${s.a.r}`),b=keys.has(`${s.polylineId}:${s.b.z}:${s.b.r}`);if(!a&&!b)return s;const next={...s,a:a?{z:s.a.z+dz,r:s.a.r+dr}:s.a,b:b?{z:s.b.z+dz,r:s.b.r+dr}:s.b};if(s.kind==="cubic"){if(a&&s.c1)next.c1={z:s.c1.z+dz,r:s.c1.r+dr};if(b&&s.c2)next.c2={z:s.c2.z+dz,r:s.c2.r+dr};}return next;});
+  const chosen=new Set(ids),anchors:{pid:number;p:SPoint}[]=[];
+  for(const s of all)if(chosen.has(s.id)&&s.polylineId!=null){anchors.push({pid:s.polylineId,p:s.a},{pid:s.polylineId,p:s.b});}
+  const hasAnchor=(pid:number,pt:SPoint)=>anchors.some(item=>item.pid===pid&&dist(item.p,pt)<1e-7);
+  return all.map(s=>{if(chosen.has(s.id))return moveSeg(s,dz,dr);if(s.polylineId==null)return s;const a=hasAnchor(s.polylineId,s.a),b=hasAnchor(s.polylineId,s.b);if(!a&&!b)return s;const next={...s,a:a?{z:s.a.z+dz,r:s.a.r+dr}:s.a,b:b?{z:s.b.z+dz,r:s.b.r+dr}:s.b};if(s.kind==="cubic"){if(a&&s.c1)next.c1={z:s.c1.z+dz,r:s.c1.r+dr};if(b&&s.c2)next.c2={z:s.c2.z+dz,r:s.c2.r+dr};}return next;});
 };
 
 export interface EdSettings {
@@ -1722,7 +1723,7 @@ export default function ProfileEditor({
       let best: SnapPoint | null = null;
       let bestD = tolW;
       for (const sp of [...snapPts, ...crossPts]) {
-        if (sp.segId != null && skipIds.includes(sp.segId)) continue;
+        if ((sp.segId != null && skipIds.includes(sp.segId)) || (sp.segId2 != null && skipIds.includes(sp.segId2))) continue;
         const d = dist(sp.p, raw);
         if (d < bestD) {
           bestD = d;
@@ -1738,7 +1739,8 @@ export default function ProfileEditor({
       const p = { z: Math.round(raw.z / g) * g, r: Math.round(raw.r / g) * g };
       return { p, hit: { p, type: "grid" } };
     }
-    return { p: { z: Math.round(raw.z * 10) / 10, r: Math.round(raw.r * 10) / 10 }, hit: null };
+    /* در حالت «شبکه: آزاد» (snap === 0) نقطه بدون پله‌بندی و کاملاً آزاد و پیوسته حرکت می‌کند */
+    return { p: { z: raw.z, r: raw.r }, hit: null };
   };
 
   const toWorld = (clientX: number, clientY: number): SPoint => {
@@ -1941,7 +1943,7 @@ export default function ProfileEditor({
     for (const s of segs) {
       for (const pp of ["a", "b"] as const) {
         if (separated.has(handleKey(s.id, pp))) continue;
-        if (s[pp].z === origin.z && s[pp].r === origin.r) out.push({ segId: s.id, part: pp });
+        if (dist(s[pp], origin) < 1e-7) out.push({ segId: s.id, part: pp });
       }
     }
     return out.length ? out : [{ segId, part }];
@@ -3715,27 +3717,14 @@ const nv = verts.map((v) => {
     if (d.mode === "handle") {
       d.moved = true;
       if ([...separated].some((key) => Number(key.split(":")[0]) === d.ref.segId)) setSeparated(new Set());
+      const refSeg = segs.find((s) => s.id === d.ref.segId);
+      const refPt = refSeg ? refSeg[d.ref.part] : null;
+      if (!refPt) return;
+
       /* اگر نقطهٔ درگ‌شده جزو چند نقطهٔ مستقلِ انتخاب‌شده است، همه با هم جابه‌جا می‌شوند */
       const inMulti = selPoints.length > 1 && d.cluster.some((member) =>
         selPoints.some((point) => point.segId === member.segId && point.part === member.part)
       );
-      const skipIds = inMulti
-        ? [...new Set(selPoints.map((sp) => sp.segId))]
-        : d.cluster.map((c) => c.segId);
-      const snapped = applySnap(raw, skipIds);
-      let p=snapped.p;
-      setSnapHit(snapped.hit);
-
-      const refSeg = segs.find((s) => s.id === d.ref.segId);
-      const refPt = refSeg ? refSeg[d.ref.part] : null;
-      if (!refPt) return;
-      /* Shift روی دستهٔ Bézier فقط طول همان دسته را روی محور فعلی‌اش تغییر
-         می‌دهد؛ جهت ثابت می‌ماند و اتصال الاکلنگی نیز برای Dragهای بعدی حفظ می‌شود. */
-      if(e.shiftKey&&refSeg&&(d.ref.part==="c1"||d.ref.part==="c2")){
-        const anchor=d.ref.part==="c1"?refSeg.a:refSeg.b;
-        const az=refPt.z-anchor.z,ar=refPt.r-anchor.r,length=Math.hypot(az,ar);
-        if(length>1e-9){const uz=az/length,ur=ar/length,nextLength=Math.max(0,(raw.z-anchor.z)*uz+(raw.r-anchor.r)*ur);p={z:anchor.z+uz*nextLength,r:anchor.r+ur*nextLength};setSnapHit(null);}
-      }
 
       /* برای کنترل‌پوینت‌ها مقصد clamp نمی‌شود. کل جابه‌جایی (تکی یا چندانتخابی)
          فقط تا جایی اعمال می‌شود که هندسهٔ واقعی همهٔ منحنی‌های درگیر داخل خام بماند. */
@@ -3764,6 +3753,28 @@ const nv = verts.map((v) => {
         const parts = bySeg.get(h.segId) ?? [];
         if (!parts.includes(h.part)) parts.push(h.part);
         bySeg.set(h.segId, parts);
+      }
+
+      /* همهٔ اضلاع در حال حرکت (شامل دو ضلع متصل به هر رأس Polyline و ضلع هم‌جوار الاکلنگی) از اسنپ به خودشان مستثنی می‌شوند */
+      const skipSet = new Set<number>(bySeg.keys());
+      if (refSeg?.polylineId != null && (d.ref.part === "c1" || d.ref.part === "c2")) {
+        const anchor = d.ref.part === "c1" ? refSeg.a : refSeg.b;
+        for (const s of segs) {
+          if (s.polylineId === refSeg.polylineId && (dist(s.a, anchor) < 1e-7 || dist(s.b, anchor) < 1e-7)) {
+            skipSet.add(s.id);
+          }
+        }
+      }
+      const snapped = applySnap(raw, [...skipSet]);
+      let p = snapped.p;
+      setSnapHit(snapped.hit);
+
+      /* Shift روی دستهٔ Bézier فقط طول همان دسته را روی محور فعلی‌اش تغییر
+         می‌دهد؛ جهت ثابت می‌ماند و اتصال الاکلنگی نیز برای Dragهای بعدی حفظ می‌شود. */
+      if(e.shiftKey&&refSeg&&(d.ref.part==="c1"||d.ref.part==="c2")){
+        const anchor=d.ref.part==="c1"?refSeg.a:refSeg.b;
+        const az=refPt.z-anchor.z,ar=refPt.r-anchor.r,length=Math.hypot(az,ar);
+        if(length>1e-9){const uz=az/length,ur=ar/length,nextLength=Math.max(0,(raw.z-anchor.z)*uz+(raw.r-anchor.r)*ur);p={z:anchor.z+uz*nextLength,r:anchor.r+ur*nextLength};setSnapHit(null);}
       }
       const dz = p.z - refPt.z;
       const dr = p.r - refPt.r;

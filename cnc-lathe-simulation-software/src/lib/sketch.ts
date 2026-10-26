@@ -302,6 +302,7 @@ export interface SnapPoint {
   p: SPoint;
   type: SnapType;
   segId?: number;
+  segId2?: number;
 }
 
 export const SNAP_FA: Record<SnapType, string> = {
@@ -347,12 +348,21 @@ export function intersectionPoints(segs: SketchSeg[]): SnapPoint[] {
   const out: SnapPoint[] = [];
   for (let i = 0; i < polys.length && out.length < 60; i++) {
     for (let j = i + 1; j < polys.length && out.length < 60; j++) {
+      const sA = segs[i];
+      const sB = segs[j];
       const A = polys[i];
       const B = polys[j];
       for (let x = 0; x < A.length - 1; x++) {
         for (let y = 0; y < B.length - 1; y++) {
           const hit = segIntersect(A[x], A[x + 1], B[y], B[y + 1]);
-          if (hit && !out.some((o) => dist(o.p, hit) < 0.4)) out.push({ p: hit, type: "cross" });
+          if (!hit) continue;
+          /* رئوس مشترک دو ضلع متصل (مانند Polyline) نقطه انتها هستند، نه تقاطع مستقل */
+          const onEndA = dist(hit, sA.a) < 1e-6 || dist(hit, sA.b) < 1e-6;
+          const onEndB = dist(hit, sB.a) < 1e-6 || dist(hit, sB.b) < 1e-6;
+          if (onEndA && onEndB) continue;
+          if (!out.some((o) => dist(o.p, hit) < 0.4)) {
+            out.push({ p: hit, type: "cross", segId: sA.id, segId2: sB.id });
+          }
         }
       }
     }
