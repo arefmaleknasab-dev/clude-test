@@ -130,7 +130,7 @@ export function DockPanel({
         title={`${title} — کلیک: باز کردن | کشیدن: جابه‌جایی`}
         className={cn(
           "group relative flex shrink-0 grow-0 cursor-pointer touch-none select-none items-center gap-2 rounded-lg border border-edge bg-panel px-3 py-2 transition-colors hover:border-brass/50",
-          "@4xl:h-full @4xl:w-11 @4xl:flex-col @4xl:justify-start @4xl:px-0 @4xl:py-2",
+          "min-[56rem]:h-full min-[56rem]:w-11 min-[56rem]:flex-col min-[56rem]:justify-start min-[56rem]:px-0 min-[56rem]:py-2",
           isDragSource && "opacity-65 ring-1 ring-brass/50",
           isDropTarget && "border-brass bg-brass/15 ring-2 ring-brass",
           className
@@ -139,7 +139,7 @@ export function DockPanel({
         <span className="grid h-6 w-6 shrink-0 place-items-center rounded text-dim transition-colors group-hover:text-brass2">
           <IconPlus className="h-4 w-4" />
         </span>
-        <span className="truncate text-[12px] font-bold text-mute transition-colors group-hover:text-ink @4xl:[writing-mode:vertical-rl]">
+        <span className="truncate text-[12px] font-bold text-mute transition-colors group-hover:text-ink min-[56rem]:[writing-mode:vertical-rl]">
           {title}
         </span>
       </button>
@@ -157,7 +157,7 @@ export function DockPanel({
       style={sectionStyle}
       className={cn(
         "relative flex min-h-0 min-w-0 flex-col gap-1.5",
-        widthPx != null && "@4xl:w-[var(--dock-w)] @4xl:shrink-0",
+        widthPx != null && "min-[56rem]:w-[var(--dock-w)] min-[56rem]:shrink-0",
         isDragSource && "opacity-70",
         className,
         expandedClassName
@@ -305,7 +305,7 @@ export function DockSplitter({ onResize, onResetSize, orderIndex, title, classNa
       }}
       onDoubleClick={onResetSize}
       className={cn(
-        "group hidden w-[9px] shrink-0 cursor-col-resize touch-none select-none items-stretch justify-center @4xl:flex",
+        "group hidden w-[9px] shrink-0 cursor-col-resize touch-none select-none items-stretch justify-center min-[56rem]:flex",
         className
       )}
     >

@@ -75,12 +75,54 @@ input[type="number"]::-webkit-outer-spin-button {
   margin: 0;
 }
 
-.field-input {
-  @apply w-full rounded-md border border-edge bg-bg/70 px-2 py-1.5 text-[13px] font-medium text-ink outline-none transition-colors;
-}
-.field-input:focus {
-  border-color: rgba(227, 169, 78, 0.7);
-  box-shadow: 0 0 0 3px rgba(227, 169, 78, 0.12);
+@layer components {
+  .field-input {
+    @apply w-full rounded-md border border-edge bg-bg/70 px-2 py-1.5 text-[13px] font-medium text-ink outline-none transition-colors;
+  }
+  .field-input:focus {
+    border-color: rgba(227, 169, 78, 0.7);
+    box-shadow: 0 0 0 3px rgba(227, 169, 78, 0.12);
+  }
+
+  /* ---------- buttons ---------- */
+  .btn {
+    @apply inline-flex items-center gap-1.5 rounded-md border border-edge bg-panel2 px-2.5 py-1.5 text-[12.5px] font-semibold text-ink/90 transition-all select-none;
+  }
+  .btn:hover:not(:disabled) {
+    border-color: var(--color-edge2);
+    background: var(--color-panel3);
+    transform: translateY(-1px);
+  }
+  .btn:active:not(:disabled) {
+    transform: translateY(0);
+  }
+  .btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+  .btn-brass {
+    @apply border-brass/60 bg-brass text-[#241a0c];
+  }
+  .btn-brass:hover:not(:disabled) {
+    @apply border-brass2 bg-brass2;
+    box-shadow: 0 4px 18px rgba(227, 169, 78, 0.35);
+  }
+  .btn-teal {
+    @apply border-teal/50 text-teal;
+  }
+  .btn-teal:hover:not(:disabled) {
+    @apply border-teal bg-teal/10;
+    box-shadow: 0 4px 18px rgba(69, 179, 148, 0.25);
+  }
+
+  .chip-toggle {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-all select-none;
+  }
+
+  /* ---------- gcode ---------- */
+  .gc-line {
+    @apply block whitespace-pre px-3 py-[1px] font-mono text-[11.5px] leading-[1.55] border-r-2 border-transparent;
+  }
 }
 
 /* custom scrubber — always LTR, thumb and fill painted together */
@@ -126,11 +168,11 @@ input[type="number"]::-webkit-outer-spin-button {
   box-shadow: 0 0 8px rgba(227, 169, 78, 0.6);
   transform: translate(-50%, -50%);
   pointer-events: none;
-  transition: scale 0.12s ease;
+  transition: transform 0.12s ease;
 }
 .scrub-track:hover .scrub-thumb,
 .scrub-track:active .scrub-thumb {
-  scale: 1.2;
+  transform: translate(-50%, -50%) scale(1.2);
 }
 .scrub-tip {
   position: absolute;
@@ -151,45 +193,6 @@ input[type="number"]::-webkit-outer-spin-button {
   z-index: 5;
 }
 
-/* ---------- buttons ---------- */
-.btn {
-  @apply inline-flex items-center gap-1.5 rounded-md border border-edge bg-panel2 px-2.5 py-1.5 text-[12.5px] font-semibold text-ink/90 transition-all select-none;
-}
-.btn:hover:not(:disabled) {
-  border-color: var(--color-edge2);
-  background: var(--color-panel3);
-  transform: translateY(-1px);
-}
-.btn:active:not(:disabled) {
-  transform: translateY(0);
-}
-.btn:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-.btn-brass {
-  @apply border-brass/60 bg-brass text-[#241a0c];
-}
-.btn-brass:hover:not(:disabled) {
-  @apply border-brass2 bg-brass2;
-  box-shadow: 0 4px 18px rgba(227, 169, 78, 0.35);
-}
-.btn-teal {
-  @apply border-teal/50 text-teal;
-}
-.btn-teal:hover:not(:disabled) {
-  @apply border-teal bg-teal/10;
-  box-shadow: 0 4px 18px rgba(69, 179, 148, 0.25);
-}
-
-.chip-toggle {
-  @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-all select-none;
-}
-
-/* ---------- gcode ---------- */
-.gc-line {
-  @apply block whitespace-pre px-3 py-[1px] font-mono text-[11.5px] leading-[1.55] border-r-2 border-transparent;
-}
 .gc-tok-g { color: var(--color-brass); font-weight: 700; }
 .gc-tok-m { color: var(--color-copper); font-weight: 700; }
 .gc-tok-ax { color: #63c8ac; }

@@ -154,6 +154,9 @@ const icoBuf = buildIcoFile();
 const iconPath = path.resolve(desktopSrcDir, "icon.ico");
 fs.writeFileSync(iconPath, icoBuf);
 
+/* پاک‌سازی هرگونه dist قبلی پیش از بیلد تا اسکنر Tailwind فایل‌های قدیمی را نبیند */
+fs.rmSync(path.resolve(appRoot, "dist"), { recursive: true, force: true });
+
 /* ---------- ۲. اجرای Vite Build تک‌فایلی کاملاً آفلاین ---------- */
 console.log("[desktop] Building single-file offline web bundle...");
 execFileSync("npx", ["vite", "build"], { cwd: appRoot, stdio: "inherit" });
@@ -170,7 +173,7 @@ if (html.includes("</body>")) {
   html += desktopBridgeSnippet;
 }
 
-/* بررسی نبودِ هرگونه وابستگی اینترنتی در HTML نهایی */
+/* بررسی نبودِ هرگونه وابستگی اینترنتی و نبودِ قوانین CSS ناسازگار با Edge قدیمی ویندوز ۱۰ */
 const externalMatches = [
   ...(html.match(/<link[^>]+href=["']https?:\/\/[^"']+/gi) || []),
   ...(html.match(/<script[^>]+src=["']https?:\/\/[^"']+/gi) || []),
@@ -178,6 +181,30 @@ const externalMatches = [
 ];
 if (externalMatches.length > 0) {
   throw new Error(`External internet URLs found in offline bundle: ${externalMatches.join(", ")}`);
+}
+
+const styleMatch = html.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+if (!styleMatch) {
+  throw new Error("Missing inline <style> block in single-file HTML bundle!");
+}
+const cssWithoutFonts = styleMatch[1].replace(/@font-face\{[^}]*\}/g, "");
+const incompatibleCssChecks = [
+  ["@layer", /(?:^|[^\\])@layer\b/.test(cssWithoutFonts)],
+  ["@container", /(?:^|[^\\])@container\b/.test(cssWithoutFonts)],
+  ["oklch()", /oklch\(/i.test(cssWithoutFonts)],
+  ["inset:", /[;{]\s*inset\s*:/.test(cssWithoutFonts)],
+  ["padding-inline:", /[;{]\s*padding-inline\s*:/.test(cssWithoutFonts)],
+  ["padding-block:", /[;{]\s*padding-block\s*:/.test(cssWithoutFonts)],
+  ["margin-inline:", /[;{]\s*margin-inline\s*:/.test(cssWithoutFonts)],
+  ["margin-block:", /[;{]\s*margin-block\s*:/.test(cssWithoutFonts)],
+  ["translate:", /[;{]\s*translate\s*:/.test(cssWithoutFonts)],
+  ["scale:", /[;{]\s*scale\s*:/.test(cssWithoutFonts)],
+  ["rotate:", /[;{]\s*rotate\s*:/.test(cssWithoutFonts)],
+].filter(([, failed]) => failed);
+if (incompatibleCssChecks.length > 0) {
+  throw new Error(
+    `Incompatible modern CSS found for stock Windows 10 Edge: ${incompatibleCssChecks.map(([k]) => k).join(", ")}`
+  );
 }
 
 const offlineHtmlOut = path.resolve(outDir, "KharraatCode-Offline.html");

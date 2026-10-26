@@ -1414,7 +1414,7 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-full flex-col @container" onDragOver={e=>{if(Array.from(e.dataTransfer.items).some(i=>i.kind==="file")){e.preventDefault();e.dataTransfer.dropEffect="copy";}}} onDrop={e=>{const file=e.dataTransfer.files[0];if(file && (file.name.toLowerCase().endsWith(".kharraat")||file.type==="application/json")){e.preventDefault();void openProjectFile(file);}}}>
+    <div className="flex h-full flex-col" onDragOver={e=>{if(Array.from(e.dataTransfer.items).some(i=>i.kind==="file")){e.preventDefault();e.dataTransfer.dropEffect="copy";}}} onDrop={e=>{const file=e.dataTransfer.files[0];if(file && (file.name.toLowerCase().endsWith(".kharraat")||file.type==="application/json")){e.preventDefault();void openProjectFile(file);}}}>
       <input ref={projectInputRef} type="file" accept=".kharraat,application/json" className="hidden" onChange={e=>{const file=e.target.files?.[0];if(file)void openProjectFile(file);e.currentTarget.value="";}} />
       {showAiImport && <AIImportDialog onClose={() => setShowAiImport(false)} onImport={importAi} />}
       {showPreferences && <PreferencesDialog value={preferences} snapTolerance={settings.snapTolerancePx} onChange={setPreferences} onSnapTolerance={(snapTolerancePx) => setSettings((s) => ({ ...s, snapTolerancePx }))} onClose={() => setShowPreferences(false)} />}
@@ -1498,7 +1498,7 @@ export default function App() {
       {/* ---------- بدنه ---------- */}
       <div
         ref={dockRowRef}
-        className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3 @4xl:flex-row @4xl:gap-2 @4xl:overflow-hidden"
+        className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3 min-[56rem]:flex-row min-[56rem]:gap-2 min-[56rem]:overflow-hidden"
       >
         {layout.controls.open && (
           <DockPanel
@@ -1514,7 +1514,7 @@ export default function App() {
             isDropTarget={panelDrag?.targetId === "controls"}
             onHeaderDragStart={startPanelDrag}
             className="w-full shrink-0"
-            expandedClassName={flexPanelId === "controls" ? "@4xl:w-auto @4xl:min-w-0 @4xl:flex-1" : undefined}
+            expandedClassName={flexPanelId === "controls" ? "min-[56rem]:w-auto min-[56rem]:min-w-0 min-[56rem]:flex-1" : undefined}
           >
             {!layout.controls.collapsed && (
               <ControlsPanel
@@ -1552,7 +1552,7 @@ export default function App() {
             isDropTarget={panelDrag?.targetId === "view3d"}
             onHeaderDragStart={startPanelDrag}
             className="w-full shrink-0"
-            expandedClassName={cn("h-[420px] @4xl:h-auto", flexPanelId === "view3d" && "@4xl:w-auto @4xl:min-w-0 @4xl:flex-1")}
+            expandedClassName={cn("h-[420px] min-[56rem]:h-auto", flexPanelId === "view3d" && "min-[56rem]:w-auto min-[56rem]:min-w-0 min-[56rem]:flex-1")}
           >
             {view3dActive && view3dSketch && (
               <Lathe3DView
@@ -1580,7 +1580,7 @@ export default function App() {
             isDropTarget={panelDrag?.targetId === "editor"}
             onHeaderDragStart={startPanelDrag}
             className="min-w-0"
-            expandedClassName="h-[54vh] flex-1 @4xl:h-auto"
+            expandedClassName="h-[54vh] flex-1 min-[56rem]:h-auto"
           >
             {mode === "design" ? (
             <ProfileEditor
@@ -1636,7 +1636,7 @@ export default function App() {
             data-dock-panel-id="editor"
             style={{ order: slotOrder("editor") }}
             className={cn(
-              "relative grid min-h-[220px] min-w-0 flex-1 place-items-center rounded-lg border border-dashed bg-panel/40 p-6 text-center @4xl:h-auto",
+              "relative grid min-h-[220px] min-w-0 flex-1 place-items-center rounded-lg border border-dashed bg-panel/40 p-6 text-center min-[56rem]:h-auto",
               panelDrag?.targetId === "editor" ? "border-brass bg-brass/10 ring-2 ring-brass" : "border-edge2"
             )}
           >
@@ -1664,7 +1664,7 @@ export default function App() {
             isDropTarget={panelDrag?.targetId === "gcode"}
             onHeaderDragStart={startPanelDrag}
             className="w-full shrink-0"
-            expandedClassName={cn("h-[420px] @4xl:h-auto", flexPanelId === "gcode" && "@4xl:w-auto @4xl:min-w-0 @4xl:flex-1")}
+            expandedClassName={cn("h-[420px] min-[56rem]:h-auto", flexPanelId === "gcode" && "min-[56rem]:w-auto min-[56rem]:min-w-0 min-[56rem]:flex-1")}
           >
             {!layout.gcode.collapsed && <GCodePanel gen={gen} activeLine={activeLine} onLineClick={selectFromGCode} />}
           </DockPanel>
