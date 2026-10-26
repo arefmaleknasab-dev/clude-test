@@ -1366,7 +1366,7 @@ export default function ProfileEditor({
     if (!el) return;
     const ro = new ResizeObserver(() => {
       const r = el.getBoundingClientRect();
-      setSize({ w: r.width, h: r.height });
+      setSize((prev) => (prev.w === r.width && prev.h === r.height ? prev : { w: r.width, h: r.height }));
       if (r.width > 40 && r.height > 40) setCam((c) => c ?? fit(r.width, r.height));
     });
     ro.observe(el);
@@ -4826,11 +4826,11 @@ const nv = verts.map((v) => {
       <input ref={imageInputRef} type="file" accept="image/*,.webp,.avif,.svg,.tif,.tiff" multiple hidden onChange={e=>{void importReferenceFiles([...(e.target.files??[])]);e.currentTarget.value="";}}/>
       <svg
         ref={svgRef}
-        width={size.w}
-        height={size.h}
+        width="100%"
+        height="100%"
         style={{...(imageDragCursor?{cursor:imageDragCursor}:{}),"--point-scale":pointScale} as CSSProperties}
         className={cn(
-          "canvas-point-scale block touch-none select-none",
+          "canvas-point-scale block h-full w-full touch-none select-none",
           disableSelectionGlow && "disable-selection-glow",
           panMode
             ? "cursor-grab"

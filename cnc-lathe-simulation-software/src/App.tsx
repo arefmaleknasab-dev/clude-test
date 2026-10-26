@@ -2,7 +2,7 @@ import "./point-scale.css";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ControlsPanel from "./components/ControlsPanel";
 import AIImportDialog from "./components/AIImportDialog";
-import { DockPanel, DockSplitter, MAX_PANEL, MIN_PANEL, WindowMenu, defaultLayout, normalizeLayout } from "./components/Dock";
+import { DockPanel, DockSplitter, MAX_PANEL, MIN_PANEL, PANEL_IDS, WindowMenu, defaultLayout, normalizeLayout } from "./components/Dock";
 import type { LayoutState, PanelId, PanelState, PanelVis, WindowMenuItem } from "./components/Dock";
 import GCodePanel from "./components/GCodePanel";
 import ProfileEditor, { type EdSettings, type ReferenceImage } from "./components/ProfileEditor";
@@ -18,6 +18,73 @@ import { autoSplitPoint, branchPathPoints, branchPoints, chainPolyline, flattenS
 import { cn } from "./utils/cn";
 
 const STORE_KEY = "kharraatcode-v1";
+const MIN_EDITOR_W = 180;
+
+/* محاسبهٔ بودجهٔ دقیق عرض پنل‌های کناری بر اساس عرض واقعی ردیف فلکس تا هیچ پنلی (از جمله جی‌کد در سمت چپ) از کادر بیرون نزند */
+function computeSideBudget(l: LayoutState, rowW: number) {
+  const order = Array.isArray(l.order) ? l.order : PANEL_IDS;
+  const sideOpen = order.filter((id) => id !== "editor" && l[id].open && !l[id].collapsed);
+  const flexPanelId: PanelId | null = !l.editor.collapsed
+    ? "editor"
+    : sideOpen.length > 0
+      ? sideOpen[sideOpen.length - 1]
+      : null;
+  const openSideIds = sideOpen.filter((id) => id !== flexPanelId);
+  const collapsedCount = order.filter((id) => l[id].open && l[id].collapsed).length;
+  const activeSlotsCount = order.filter((id) => (id === "editor" ? !l.editor.collapsed : l[id].open && !l[id].collapsed)).length;
+  const splitterCount = Math.max(0, activeSlotsCount - 1);
+  const renderedPanels = order.filter((id) => id === "editor" || l[id].open).length;
+  const visItems = renderedPanels + splitterCount;
+  const gapsW = Math.max(0, visItems - 1) * 8;
+  const splittersW = splitterCount * 9;
+  const collapsedW = collapsedCount * 44;
+  const flexReserve = flexPanelId === "editor" ? MIN_EDITOR_W : flexPanelId ? MIN_PANEL : 0;
+  /* ۲۴ پیکسل padding افقی (p-3) + ۲ پیکسل حاشیه اطمینان برای رندینگ زیرپیکسلی مرورگر */
+  const innerAvail = rowW - 26 - gapsW - splittersW - collapsedW - flexReserve;
+  const minEach =
+    openSideIds.length > 0
+      ? Math.min(MIN_PANEL, Math.max(110, Math.floor(innerAvail / openSideIds.length)))
+      : MIN_PANEL;
+  const maxSideSum = Math.max(openSideIds.length * minEach, innerAvail);
+  return { openSideIds, flexPanelId, maxSideSum, minEach };
+}
+
+function getEffectiveSideSizes(l: LayoutState, rowW: number, isRow: boolean): Record<PanelId, number> {
+  const out: Record<PanelId, number> = {
+    controls: l.controls.size,
+    view3d: l.view3d.size,
+    editor: 0,
+    gcode: l.gcode.size,
+  };
+  if (!isRow) return out;
+  const { openSideIds, maxSideSum, minEach } = computeSideBudget(l, rowW);
+  if (openSideIds.length === 0) return out;
+  for (const id of openSideIds) {
+    out[id] = Math.max(minEach, Math.min(MAX_PANEL, Math.round(out[id])));
+  }
+  const sum = openSideIds.reduce((acc, id) => acc + out[id], 0);
+  if (sum <= maxSideSum) return out;
+
+  const excess = sum - maxSideSum;
+  const shrinkable = openSideIds.reduce((acc, id) => acc + Math.max(0, out[id] - minEach), 0);
+  if (shrinkable <= 0) {
+    for (const id of openSideIds) out[id] = minEach;
+    return out;
+  }
+  for (const id of openSideIds) {
+    const cap = Math.max(0, out[id] - minEach);
+    const take = Math.min(cap, Math.round((excess * cap) / shrinkable));
+    out[id] -= take;
+  }
+  let rem = openSideIds.reduce((acc, id) => acc + out[id], 0) - maxSideSum;
+  for (const id of openSideIds) {
+    if (rem <= 0) break;
+    const canTake = Math.min(rem, Math.max(0, out[id] - minEach));
+    out[id] -= canTake;
+    rem -= canTake;
+  }
+  return out;
+}
 
 /** نگاشت معکوس انتخاب Edit Path به سطر متن G-code، شامل خطوط تکراری و Bridgeها. */
 function editLineGCodeIndex(lineId: number, editLines: ELine[], gen: GenResult): number {
@@ -470,14 +537,32 @@ export default function App() {
     setHistVer((v) => v + 1);
   }, [gen, params, sketch]);
 
-  /* ذخیره محلی */
+  /* ذخیره محلی (با تأخیر کوتاه تا کشیدن جداکننده پنجره‌ها بدون مکث اجرا شود) */
+  const latestPersistRef = useRef("");
   useEffect(() => {
-    try {
-      localStorage.setItem(STORE_KEY, JSON.stringify({ sketch, params, settings, preferences, activePreset, layout, gcodeOvr, referenceImages, version: SAVE_VERSION }));
-    } catch {
-      /* ignore */
-    }
+    latestPersistRef.current = JSON.stringify({ sketch, params, settings, preferences, activePreset, layout, gcodeOvr, referenceImages, version: SAVE_VERSION });
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.setItem(STORE_KEY, latestPersistRef.current);
+      } catch {
+        /* ignore */
+      }
+    }, 180);
+    return () => window.clearTimeout(timer);
   }, [sketch, params, settings, preferences, activePreset, layout, gcodeOvr, referenceImages]);
+
+  useEffect(() => {
+    const flushStore = () => {
+      if (!latestPersistRef.current) return;
+      try {
+        localStorage.setItem(STORE_KEY, latestPersistRef.current);
+      } catch {
+        /* ignore */
+      }
+    };
+    window.addEventListener("beforeunload", flushStore);
+    return () => window.removeEventListener("beforeunload", flushStore);
+  }, []);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -773,6 +858,26 @@ export default function App() {
   }, [showToast]);
 
   /* ---------- چیدمان داک (پنجره‌ها) ---------- */
+  const dockRowRef = useRef<HTMLDivElement>(null);
+  const [dockRowState, setDockRowState] = useState<{ width: number; isRow: boolean }>(() => {
+    const w = typeof window !== "undefined" ? window.innerWidth : 1280;
+    return { width: w, isRow: w >= 896 };
+  });
+  useEffect(() => {
+    const el = dockRowRef.current;
+    if (!el) return;
+    const sync = () => {
+      const w = el.clientWidth;
+      if (w <= 0) return;
+      const isRow = getComputedStyle(el).flexDirection.startsWith("row");
+      setDockRowState((prev) => (prev.width === w && prev.isRow === isRow ? prev : { width: w, isRow }));
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const setPanel = useCallback((id: PanelId, patch: Partial<PanelState>) => {
     setLayout((l) => ({ ...l, [id]: { ...l[id], ...patch } }));
   }, []);
@@ -782,16 +887,97 @@ export default function App() {
   const toggleCollapse = useCallback((id: PanelId) => {
     setLayout((l) => ({ ...l, [id]: { ...l[id], collapsed: !l[id].collapsed } }));
   }, []);
-  const resizePanel = useCallback((id: PanelId, dx: number) => {
+  const resizePanel = useCallback((id: PanelId, dx: number, neighborId?: PanelId) => {
+    if (id === "editor") return;
+    const el = dockRowRef.current;
+    const rowW = el?.clientWidth || window.innerWidth;
+    const isRow = el ? getComputedStyle(el).flexDirection.startsWith("row") : rowW >= 896;
     setLayout((l) => {
-      const max = Math.max(360, window.innerWidth - 560);
-      const size = Math.min(Math.min(MAX_PANEL, max), Math.max(MIN_PANEL, Math.round(l[id].size + dx)));
-      if (size === l[id].size) return l;
-      return { ...l, [id]: { ...l[id], size } };
+      if (!isRow) {
+        const size = Math.min(MAX_PANEL, Math.max(MIN_PANEL, Math.round(l[id].size + dx)));
+        return size === l[id].size ? l : { ...l, [id]: { ...l[id], size } };
+      }
+      const eff = getEffectiveSideSizes(l, rowW, true);
+      const { openSideIds, maxSideSum, minEach } = computeSideBudget(l, rowW);
+      if (!openSideIds.includes(id)) return l;
+
+      const cur = eff[id];
+      const otherIds = openSideIds.filter((p) => p !== id);
+      /* اولویت قرض‌گرفتن فضا: ابتدا پنلِ همسایهٔ مستقیم، سپس عریض‌ترین پنل‌های کناری */
+      otherIds.sort((a, b) => {
+        if (a === neighborId) return -1;
+        if (b === neighborId) return 1;
+        return eff[b] - eff[a];
+      });
+
+      const maxPossibleForId = Math.max(minEach, Math.min(MAX_PANEL, maxSideSum - otherIds.length * minEach));
+      const nextIdSize = Math.max(minEach, Math.min(maxPossibleForId, Math.round(cur + dx)));
+      if (nextIdSize === cur && openSideIds.every((p) => eff[p] === l[p].size)) return l;
+
+      const nextSizes: Record<PanelId, number> = { ...eff, [id]: nextIdSize };
+      const total = openSideIds.reduce((acc, p) => acc + nextSizes[p], 0);
+
+      /* جلوگیری قطعی از بیرون‌زدن پنل‌ها (مانند جی‌کد در سمت چپ) از کادر صفحه */
+      if (total > maxSideSum && otherIds.length > 0) {
+        let overflow = total - maxSideSum;
+        for (const oid of otherIds) {
+          if (overflow <= 0) break;
+          const give = Math.min(overflow, Math.max(0, nextSizes[oid] - minEach));
+          nextSizes[oid] -= give;
+          overflow -= give;
+        }
+        if (overflow > 0) {
+          nextSizes[id] = Math.max(minEach, nextSizes[id] - overflow);
+        }
+      }
+
+      let changed = false;
+      const nextLayout: LayoutState = { ...l };
+      for (const p of openSideIds) {
+        if (nextLayout[p].size !== nextSizes[p]) {
+          nextLayout[p] = { ...nextLayout[p], size: nextSizes[p] };
+          changed = true;
+        }
+      }
+      return changed ? nextLayout : l;
     });
   }, []);
+  const swapPanels = useCallback((a: PanelId, b: PanelId) => {
+    if (a === b) return;
+    setLayout((l) => {
+      const cur = Array.isArray(l.order) ? l.order : PANEL_IDS;
+      const ia = cur.indexOf(a);
+      const ib = cur.indexOf(b);
+      if (ia < 0 || ib < 0) return l;
+      const nextOrder = [...cur];
+      nextOrder[ia] = b;
+      nextOrder[ib] = a;
+      return { ...l, order: nextOrder };
+    });
+  }, []);
+  useEffect(() => {
+    if (!Array.isArray(layout.order)) {
+      setLayout((l) => normalizeLayout(l));
+    }
+  }, [layout]);
   const resetPanelSize = useCallback((id: PanelId) => {
-    setLayout((l) => ({ ...l, [id]: { ...l[id], size: defaultLayout()[id].size } }));
+    const defSize = defaultLayout()[id].size;
+    const el = dockRowRef.current;
+    const rowW = el?.clientWidth || window.innerWidth;
+    const isRow = el ? getComputedStyle(el).flexDirection.startsWith("row") : rowW >= 896;
+    setLayout((l) => {
+      if (!isRow) return { ...l, [id]: { ...l[id], size: defSize } };
+      const { openSideIds, maxSideSum, minEach } = computeSideBudget(l, rowW);
+      if (!openSideIds.includes(id)) return { ...l, [id]: { ...l[id], size: defSize } };
+      const eff = getEffectiveSideSizes(l, rowW, true);
+      const otherSum = openSideIds.filter((p) => p !== id).reduce((acc, p) => acc + eff[p], 0);
+      const clamped = Math.max(minEach, Math.min(defSize, Math.max(minEach, maxSideSum - otherSum)));
+      const nextLayout: LayoutState = { ...l };
+      for (const p of openSideIds) {
+        nextLayout[p] = { ...nextLayout[p], size: p === id ? clamped : eff[p] };
+      }
+      return nextLayout;
+    });
   }, []);
   const resetLayout = useCallback(() => {
     setLayout(defaultLayout());
@@ -799,6 +985,90 @@ export default function App() {
   }, [showToast]);
   const panelVis = (id: PanelId): PanelVis =>
     !layout[id].open ? "closed" : layout[id].collapsed ? "collapsed" : "open";
+
+  /* درگ نوار بالای پنجره‌ها برای جابه‌جایی جای دو پنجره با هم */
+  const [panelDrag, setPanelDrag] = useState<{
+    sourceId: PanelId;
+    targetId: PanelId | null;
+    x: number;
+    y: number;
+  } | null>(null);
+  const panelDragRef = useRef<{
+    sourceId: PanelId;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    active: boolean;
+    targetId: PanelId | null;
+    prevCursor: string;
+    prevSelect: string;
+  } | null>(null);
+
+  const startPanelDrag = useCallback((id: PanelId, e: React.PointerEvent<HTMLElement>) => {
+    panelDragRef.current = {
+      sourceId: id,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      active: false,
+      targetId: null,
+      prevCursor: document.body.style.cursor,
+      prevSelect: document.body.style.userSelect,
+    };
+  }, []);
+
+  useEffect(() => {
+    const clearDrag = () => {
+      const d = panelDragRef.current;
+      if (!d) return;
+      if (d.active) {
+        document.body.style.cursor = d.prevCursor;
+        document.body.style.userSelect = d.prevSelect;
+      }
+      panelDragRef.current = null;
+      setPanelDrag(null);
+    };
+    const onMove = (e: PointerEvent) => {
+      const d = panelDragRef.current;
+      if (!d || e.pointerId !== d.pointerId) return;
+      if (!d.active) {
+        if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < 5) return;
+        d.active = true;
+        document.body.style.cursor = "grabbing";
+        document.body.style.userSelect = "none";
+      }
+      let over: PanelId | null = null;
+      for (const el of document.elementsFromPoint(e.clientX, e.clientY)) {
+        if (el instanceof HTMLElement && el.dataset.dockPanelId) {
+          const pid = el.dataset.dockPanelId as PanelId;
+          if (pid !== d.sourceId) over = pid;
+          break;
+        }
+      }
+      d.targetId = over;
+      setPanelDrag({ sourceId: d.sourceId, targetId: over, x: e.clientX, y: e.clientY });
+    };
+    const onUp = (e: PointerEvent) => {
+      const d = panelDragRef.current;
+      if (!d || e.pointerId !== d.pointerId) return;
+      const shouldSwap = d.active && d.targetId && d.targetId !== d.sourceId ? [d.sourceId, d.targetId] as const : null;
+      clearDrag();
+      if (shouldSwap) swapPanels(shouldSwap[0], shouldSwap[1]);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && panelDragRef.current) clearDrag();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [swapPanels]);
 
   /* تغییر اسکچ — با commit=false تغییر زنده (کشیدن) و با true ثبت در تاریخچه */
   const onSketchChange = useCallback((next: SketchSeg[], commit: boolean) => {
@@ -1070,16 +1340,71 @@ export default function App() {
     window.addEventListener("keydown",onProjectKey);return()=>window.removeEventListener("keydown",onProjectKey);
   });
 
-  /* منبع زندهٔ نمای سه‌بعدی: هر تغییر طرح (حتی هنگام کشیدن نقطه) بلافاصله اعمال می‌شود */
-  const view3dSketch = editOpen && editBuf ? editBuf.sketch : sketch;
+  /* وقتی پنجره نمای سه‌بعدی بسته یا جمع شده است، هیچ محاسبه مش، پروفایل سه‌بعدی یا WebGL اجرا نمی‌شود */
+  const view3dActive = layout.view3d.open && !layout.view3d.collapsed;
+  const view3dSketch = view3dActive ? (editOpen && editBuf ? editBuf.sketch : sketch) : null;
 
   const editorTitle = mode === "design" ? "طراحی پروفایل" : "شبیه‌سازی تراش";
-  const menuItems: WindowMenuItem[] = [
-    { id: "controls", label: "تنظیمات", vis: panelVis("controls") },
-    { id: "editor", label: editorTitle, vis: panelVis("editor") },
-    { id: "view3d", label: "نمای سه‌بعدی", vis: panelVis("view3d") },
-    { id: "gcode", label: "جی‌کد", vis: panelVis("gcode") },
-  ];
+  const panelTitleMap: Record<PanelId, string> = {
+    controls: "تنظیمات",
+    view3d: "نمای سه‌بعدی",
+    editor: editorTitle,
+    gcode: "جی‌کد",
+  };
+  const panelOrder = Array.isArray(layout.order) ? layout.order : PANEL_IDS;
+  const menuItems: WindowMenuItem[] = panelOrder.map((id) => ({
+    id,
+    label: panelTitleMap[id],
+    vis: panelVis(id),
+  }));
+  const slotOrder = (id: PanelId) => panelOrder.indexOf(id) * 2;
+  const { flexPanelId } = computeSideBudget(layout, dockRowState.width);
+  const effectiveSideSizes = getEffectiveSideSizes(layout, dockRowState.width, dockRowState.isRow);
+  const panelWidthPx = (id: PanelId): number | undefined =>
+    dockRowState.isRow && flexPanelId === id ? undefined : effectiveSideSizes[id];
+
+  const dockSplitters = (() => {
+    const activeSlots: number[] = [];
+    panelOrder.forEach((id, idx) => {
+      const resizable = id === "editor" ? !layout.editor.collapsed : panelVis(id) === "open";
+      if (resizable) activeSlots.push(idx);
+    });
+    const flexIdx = flexPanelId ? panelOrder.indexOf(flexPanelId) : -1;
+    const items: {
+      key: string;
+      orderIndex: number;
+      targetId: PanelId;
+      neighborId?: PanelId;
+      sign: 1 | -1;
+      title: string;
+    }[] = [];
+    for (let k = 0; k < activeSlots.length - 1; k++) {
+      const rSlot = activeSlots[k];
+      const lSlot = activeSlots[k + 1];
+      const rId = panelOrder[rSlot];
+      const lId = panelOrder[lSlot];
+      if (flexIdx === -1 || lSlot <= flexIdx) {
+        items.push({
+          key: `split-${rId}-r`,
+          orderIndex: rSlot * 2 + 1,
+          targetId: rId,
+          neighborId: lId !== flexPanelId ? lId : undefined,
+          sign: -1,
+          title: `تغییر عرض پنل ${panelTitleMap[rId]} (دابل‌کلیک: اندازه پیش‌فرض)`,
+        });
+      } else {
+        items.push({
+          key: `split-${lId}-l`,
+          orderIndex: lSlot * 2 - 1,
+          targetId: lId,
+          neighborId: rId !== flexPanelId ? rId : undefined,
+          sign: 1,
+          title: `تغییر عرض پنل ${panelTitleMap[lId]} (دابل‌کلیک: اندازه پیش‌فرض)`,
+        });
+      }
+    }
+    return items;
+  })();
 
   const clearRecentProjects = () => {
     const hasUnsaved = recentProjects.some(tab => tab.savedSnapshot !== projectSnapshot(tab.sketch, tab.params, tab.gcodeOvr, tab.referenceImages));
@@ -1171,51 +1496,90 @@ export default function App() {
       </header>
 
       {/* ---------- بدنه ---------- */}
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3 @4xl:flex-row @4xl:gap-2 @4xl:overflow-hidden">
-        <DockPanel
-          title="تنظیمات"
-          icon={<IconLayers className="h-3.5 w-3.5" />}
-          state={layout.controls}
-          onCollapse={() => toggleCollapse("controls")}
-          onClose={() => setPanel("controls", { open: false })}
-          widthPx={layout.controls.size}
-          className="order-2 w-full shrink-0 @4xl:order-1"
-        >
-          <ControlsPanel
-            params={generationParams}
-            holder2Draft={editOpen && editBuf ? editBuf.holder2 : null}
-            onHolder2={onHolder2SettingsCb}
-            onParams={onParamsCb}
-            points={points}
-            outerDisplayPoints={outerFinishPoints}
-            innerPoints={innerPoints}
-            splitInfo={splitInfo}
-            onAutoSplit={autoSplit}
-            activePreset={activePreset}
-            onApplyPreset={applyPreset}
-            onStrategy={onStrategyCb}
-            isolatedOpId={isolatedOpId}
-            onIsolate={setIsolatedOpId}
-            onNotify={showToast}
-          />
-        </DockPanel>
-
-        {panelVis("controls") === "open" && panelVis("editor") === "open" && (
-          <DockSplitter
-            className="@4xl:order-2"
-            onResize={(dx) => resizePanel("controls", -dx)}
-            onResetSize={() => resetPanelSize("controls")}
-            title="تغییر عرض پنل تنظیمات (دابل‌کلیک: اندازه پیش‌فرض)"
-          />
+      <div
+        ref={dockRowRef}
+        className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3 @4xl:flex-row @4xl:gap-2 @4xl:overflow-hidden"
+      >
+        {layout.controls.open && (
+          <DockPanel
+            panelId="controls"
+            title="تنظیمات"
+            icon={<IconLayers className="h-3.5 w-3.5" />}
+            state={layout.controls}
+            onCollapse={() => toggleCollapse("controls")}
+            onClose={() => setPanel("controls", { open: false })}
+            widthPx={panelWidthPx("controls")}
+            orderIndex={slotOrder("controls")}
+            isDragSource={panelDrag?.sourceId === "controls"}
+            isDropTarget={panelDrag?.targetId === "controls"}
+            onHeaderDragStart={startPanelDrag}
+            className="w-full shrink-0"
+            expandedClassName={flexPanelId === "controls" ? "@4xl:w-auto @4xl:min-w-0 @4xl:flex-1" : undefined}
+          >
+            {!layout.controls.collapsed && (
+              <ControlsPanel
+                params={generationParams}
+                holder2Draft={editOpen && editBuf ? editBuf.holder2 : null}
+                onHolder2={onHolder2SettingsCb}
+                onParams={onParamsCb}
+                points={points}
+                outerDisplayPoints={outerFinishPoints}
+                innerPoints={innerPoints}
+                splitInfo={splitInfo}
+                onAutoSplit={autoSplit}
+                activePreset={activePreset}
+                onApplyPreset={applyPreset}
+                onStrategy={onStrategyCb}
+                isolatedOpId={isolatedOpId}
+                onIsolate={setIsolatedOpId}
+                onNotify={showToast}
+              />
+            )}
+          </DockPanel>
         )}
+
+        {layout.view3d.open && (
+          <DockPanel
+            panelId="view3d"
+            title="نمای سه‌بعدی"
+            icon={<IconCube className="h-3.5 w-3.5" />}
+            state={layout.view3d}
+            onCollapse={() => toggleCollapse("view3d")}
+            onClose={() => setPanel("view3d", { open: false })}
+            widthPx={panelWidthPx("view3d")}
+            orderIndex={slotOrder("view3d")}
+            isDragSource={panelDrag?.sourceId === "view3d"}
+            isDropTarget={panelDrag?.targetId === "view3d"}
+            onHeaderDragStart={startPanelDrag}
+            className="w-full shrink-0"
+            expandedClassName={cn("h-[420px] @4xl:h-auto", flexPanelId === "view3d" && "@4xl:w-auto @4xl:min-w-0 @4xl:flex-1")}
+          >
+            {view3dActive && view3dSketch && (
+              <Lathe3DView
+                key={activeProjectId}
+                projectId={activeProjectId}
+                sketch={view3dSketch}
+                blankD={params.blankD}
+                blankL={params.blankL}
+                split={params.split.enabled}
+              />
+            )}
+          </DockPanel>
+        )}
+
         {layout.editor.open ? (
           <DockPanel
+            panelId="editor"
             title={editorTitle}
             icon={mode === "design" ? <IconPen className="h-3.5 w-3.5" /> : <IconSim className="h-3.5 w-3.5" />}
             state={layout.editor}
             onCollapse={() => toggleCollapse("editor")}
             onClose={() => setPanel("editor", { open: false })}
-            className="order-1 min-w-0 @4xl:order-3"
+            orderIndex={slotOrder("editor")}
+            isDragSource={panelDrag?.sourceId === "editor"}
+            isDropTarget={panelDrag?.targetId === "editor"}
+            onHeaderDragStart={startPanelDrag}
+            className="min-w-0"
             expandedClassName="h-[54vh] flex-1 @4xl:h-auto"
           >
             {mode === "design" ? (
@@ -1268,7 +1632,14 @@ export default function App() {
             )}
           </DockPanel>
         ) : (
-          <div className="order-1 grid min-h-[220px] flex-1 place-items-center rounded-lg border border-dashed border-edge2 bg-panel/40 p-6 text-center @4xl:order-3 @4xl:h-auto">
+          <div
+            data-dock-panel-id="editor"
+            style={{ order: slotOrder("editor") }}
+            className={cn(
+              "relative grid min-h-[220px] min-w-0 flex-1 place-items-center rounded-lg border border-dashed bg-panel/40 p-6 text-center @4xl:h-auto",
+              panelDrag?.targetId === "editor" ? "border-brass bg-brass/10 ring-2 ring-brass" : "border-edge2"
+            )}
+          >
             <div>
               <p className="text-[13px] font-bold text-mute">پنجره ویرایشگر بسته است</p>
               <p className="mt-1 text-[11.5px] text-dim">از منوی «پنجره» بالای صفحه دوباره بازش کنید</p>
@@ -1279,55 +1650,52 @@ export default function App() {
           </div>
         )}
 
-        {panelVis("editor") === "open" && panelVis("view3d") === "open" && (
-          <DockSplitter
-            className="@4xl:order-4"
-            onResize={(dx) => resizePanel("view3d", dx)}
-            onResetSize={() => resetPanelSize("view3d")}
-            title="تغییر عرض نمای سه‌بعدی (دابل‌کلیک: اندازه پیش‌فرض)"
-          />
+        {layout.gcode.open && (
+          <DockPanel
+            panelId="gcode"
+            title="جی‌کد"
+            icon={<IconCode className="h-3.5 w-3.5" />}
+            state={layout.gcode}
+            onCollapse={() => toggleCollapse("gcode")}
+            onClose={() => setPanel("gcode", { open: false })}
+            widthPx={panelWidthPx("gcode")}
+            orderIndex={slotOrder("gcode")}
+            isDragSource={panelDrag?.sourceId === "gcode"}
+            isDropTarget={panelDrag?.targetId === "gcode"}
+            onHeaderDragStart={startPanelDrag}
+            className="w-full shrink-0"
+            expandedClassName={cn("h-[420px] @4xl:h-auto", flexPanelId === "gcode" && "@4xl:w-auto @4xl:min-w-0 @4xl:flex-1")}
+          >
+            {!layout.gcode.collapsed && <GCodePanel gen={gen} activeLine={activeLine} onLineClick={selectFromGCode} />}
+          </DockPanel>
         )}
-        <DockPanel
-          title="نمای سه‌بعدی"
-          icon={<IconCube className="h-3.5 w-3.5" />}
-          state={layout.view3d}
-          onCollapse={() => toggleCollapse("view3d")}
-          onClose={() => setPanel("view3d", { open: false })}
-          widthPx={layout.view3d.size}
-          className="order-3 w-full shrink-0 @4xl:order-5"
-          expandedClassName="h-[420px] @4xl:h-auto"
-        >
-          <Lathe3DView
-            key={activeProjectId}
-            sketch={view3dSketch}
-            blankD={params.blankD}
-            blankL={params.blankL}
-            split={params.split.enabled}
-          />
-        </DockPanel>
 
-        {((panelVis("view3d") === "open" && panelVis("gcode") === "open") ||
-          (panelVis("editor") === "open" && panelVis("view3d") !== "open" && panelVis("gcode") === "open")) && (
+        {dockSplitters.map((sp) => (
           <DockSplitter
-            className="@4xl:order-6"
-            onResize={(dx) => resizePanel("gcode", dx)}
-            onResetSize={() => resetPanelSize("gcode")}
-            title="تغییر عرض پنل جی‌کد (دابل‌کلیک: اندازه پیش‌فرض)"
+            key={sp.key}
+            orderIndex={sp.orderIndex}
+            onResize={(dx) => resizePanel(sp.targetId, dx * sp.sign, sp.neighborId)}
+            onResetSize={() => resetPanelSize(sp.targetId)}
+            title={sp.title}
           />
-        )}
-        <DockPanel
-          title="جی‌کد"
-          icon={<IconCode className="h-3.5 w-3.5" />}
-          state={layout.gcode}
-          onCollapse={() => toggleCollapse("gcode")}
-          onClose={() => setPanel("gcode", { open: false })}
-          widthPx={layout.gcode.size}
-          className="order-4 w-full shrink-0 @4xl:order-7"
-          expandedClassName="h-[420px] @4xl:h-auto"
-        >
-          <GCodePanel gen={gen} activeLine={activeLine} onLineClick={selectFromGCode} />
-        </DockPanel>
+        ))}
       </div>
+
+      {/* پیش‌نمایش شناور هنگام درگ نوار بالای پنجره برای جابه‌جایی */}
+      {panelDrag && (
+        <div
+          dir="rtl"
+          style={{ left: panelDrag.x + 14, top: panelDrag.y + 14 }}
+          className="pointer-events-none fixed z-[200] flex items-center gap-2 rounded-lg border border-brass/80 bg-panel/95 px-3 py-1.5 text-[12px] font-bold text-brass2 shadow-2xl shadow-black/70 backdrop-blur"
+        >
+          <span>{panelTitleMap[panelDrag.sourceId]}</span>
+          {panelDrag.targetId && (
+            <span className="text-[11px] font-medium text-teal">
+              ⇄ {panelTitleMap[panelDrag.targetId]}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* ---------- توست ---------- */}
       {toast && (

@@ -111,7 +111,7 @@ export default function GCodePanel({ gen, activeLine, onLineClick }: Props) {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col rounded-lg border border-edge bg-panel">
+    <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-edge bg-panel">
       {/* آمار */}
       <div className="grid grid-cols-4 gap-px border-b border-edge bg-edge">
         <Stat label="زمان تخمینی" value={fmtTime(gen.timeSec)} accent />
@@ -120,7 +120,7 @@ export default function GCodePanel({ gen, activeLine, onLineClick }: Props) {
         <Stat label="عملیات خشن" value={String(gen.roughLayers)} />
       </div>
 
-      <div ref={bodyRef} onScroll={onScroll} onCopy={onCopyFull} className="min-h-0 flex-1 overflow-auto" dir="ltr">
+      <div ref={bodyRef} onScroll={onScroll} onCopy={onCopyFull} className="min-h-0 min-w-0 flex-1 overflow-auto" dir="ltr">
         <div style={{ height: highlighted.length * ROW_H, position: "relative" }}>
           {highlighted.slice(start, end).map((parts, k) => (
             <GCodeLine key={start + k} ln={start + k} parts={parts} active={start + k === activeLine} top={(start + k) * ROW_H} onClick={onLineClick} />
@@ -134,9 +134,9 @@ export default function GCodePanel({ gen, activeLine, onLineClick }: Props) {
 
 function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
   return (
-    <div className="bg-panel px-2.5 py-1.5">
-      <div className="text-[9.5px] font-semibold text-dim">{label}</div>
-      <div className={cn("font-mono text-[12.5px] font-bold", accent ? "text-brass2" : "text-ink/90")} dir="ltr" style={{ textAlign: "right" }}>
+    <div className="min-w-0 overflow-hidden bg-panel px-2 py-1.5">
+      <div className="truncate text-[9.5px] font-semibold text-dim">{label}</div>
+      <div className={cn("truncate font-mono text-[12px] font-bold", accent ? "text-brass2" : "text-ink/90")} dir="ltr" style={{ textAlign: "right" }}>
         {value}
       </div>
     </div>

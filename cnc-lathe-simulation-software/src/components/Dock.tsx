@@ -4,7 +4,7 @@ import { IconMinus, IconPlus, IconReset, IconWindow, IconX } from "./icons";
 
 /* ---------- مدل چیدمان ---------- */
 
-export type PanelId = "controls" | "editor" | "view3d" | "gcode";
+export type PanelId = "controls" | "view3d" | "editor" | "gcode";
 
 export interface PanelState {
   open: boolean;
@@ -12,19 +12,23 @@ export interface PanelState {
   size: number; // عرض (px) در چیدمان دسکتاپ — برای پنل‌های کناری
 }
 
-export type LayoutState = Record<PanelId, PanelState>;
+export type LayoutState = Record<PanelId, PanelState> & {
+  order: PanelId[];
+};
 
-export const PANEL_IDS: PanelId[] = ["controls", "editor", "view3d", "gcode"];
+/* چیدمان پیش‌فرض در RTL (از راست به چپ): تنظیمات ← نمای سه‌بعدی ← طراحی پروفایل ← جی‌کد */
+export const PANEL_IDS: PanelId[] = ["controls", "view3d", "editor", "gcode"];
 
-export const MIN_PANEL = 180;
+export const MIN_PANEL = 150;
 export const MAX_PANEL = 640;
 
 export function defaultLayout(): LayoutState {
   return {
-    controls: { open: true, collapsed: false, size: 272 },
+    controls: { open: true, collapsed: false, size: 256 },
+    view3d: { open: true, collapsed: false, size: 330 },
     editor: { open: true, collapsed: false, size: 0 },
-    view3d: { open: true, collapsed: false, size: 400 },
-    gcode: { open: true, collapsed: false, size: 330 },
+    gcode: { open: true, collapsed: false, size: 290 },
+    order: [...PANEL_IDS],
   };
 }
 
@@ -42,12 +46,21 @@ export function normalizeLayout(saved: unknown): LayoutState {
     if (typeof o.size === "number" && Number.isFinite(o.size))
       out[id].size = Math.min(MAX_PANEL, Math.max(MIN_PANEL, Math.round(o.size)));
   }
+  if (Array.isArray(rec.order)) {
+    const valid = rec.order.filter((x): x is PanelId => typeof x === "string" && (PANEL_IDS as string[]).includes(x));
+    const unique = Array.from(new Set(valid));
+    for (const id of PANEL_IDS) {
+      if (!unique.includes(id)) unique.push(id);
+    }
+    out.order = unique;
+  }
   return out;
 }
 
-/* ---------- قاب پنل: نوار عنوان + جمع‌شدن + بستن ---------- */
+/* ---------- قاب پنل: نوار عنوان قابل‌درگ + جمع‌شدن + بستن ---------- */
 
 interface DockPanelProps {
+  panelId: PanelId;
   title: string;
   icon?: ReactNode;
   state: PanelState;
@@ -55,7 +68,12 @@ interface DockPanelProps {
   onClose: () => void;
   /** عرض ثابت در دسکتاپ (فقط پنل‌های کناری) */
   widthPx?: number;
-  /** کلاس‌های ساختاری (order/width) — هم در حالت باز هم جمع‌شده */
+  /** ترتیب نمایش در فلکس برای جابه‌جایی بدون بازسازی DOM */
+  orderIndex?: number;
+  isDragSource?: boolean;
+  isDropTarget?: boolean;
+  onHeaderDragStart?: (id: PanelId, e: React.PointerEvent<HTMLElement>) => void;
+  /** کلاس‌های ساختاری — هم در حالت باز هم جمع‌شده */
   className?: string;
   /** کلاس‌های اضافی فقط در حالت باز (ارتفاع موبایل، flex و...) */
   expandedClassName?: string;
@@ -63,28 +81,58 @@ interface DockPanelProps {
 }
 
 export function DockPanel({
+  panelId,
   title,
   icon,
   state,
   onCollapse,
   onClose,
   widthPx,
+  orderIndex,
+  isDragSource = false,
+  isDropTarget = false,
+  onHeaderDragStart,
   className,
   expandedClassName,
   children,
 }: DockPanelProps) {
+  const collapsedDragRef = useRef<{ x: number; y: number; dragged: boolean } | null>(null);
+
   if (!state.open) return null;
 
-  /* نوار باریکِ جمع‌شده: کلیک = باز شدن */
+  /* نوار باریکِ جمع‌شده: کلیک = باز شدن، کشیدن = جابه‌جایی پنجره */
   if (state.collapsed) {
     return (
       <button
         type="button"
-        onClick={onCollapse}
-        title={`${title} — باز کردن`}
+        data-dock-panel-id={panelId}
+        style={orderIndex != null ? { order: orderIndex } : undefined}
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          collapsedDragRef.current = { x: e.clientX, y: e.clientY, dragged: false };
+          onHeaderDragStart?.(panelId, e);
+        }}
+        onPointerMove={(e) => {
+          const st = collapsedDragRef.current;
+          if (st && !st.dragged && Math.hypot(e.clientX - st.x, e.clientY - st.y) >= 5) {
+            st.dragged = true;
+          }
+        }}
+        onClick={(e) => {
+          if (collapsedDragRef.current?.dragged) {
+            e.preventDefault();
+            collapsedDragRef.current = null;
+            return;
+          }
+          collapsedDragRef.current = null;
+          onCollapse();
+        }}
+        title={`${title} — کلیک: باز کردن | کشیدن: جابه‌جایی`}
         className={cn(
-          "group flex shrink-0 grow-0 cursor-pointer items-center gap-2 rounded-lg border border-edge bg-panel px-3 py-2 transition-colors hover:border-brass/50",
+          "group relative flex shrink-0 grow-0 cursor-pointer touch-none select-none items-center gap-2 rounded-lg border border-edge bg-panel px-3 py-2 transition-colors hover:border-brass/50",
           "@4xl:h-full @4xl:w-11 @4xl:flex-col @4xl:justify-start @4xl:px-0 @4xl:py-2",
+          isDragSource && "opacity-65 ring-1 ring-brass/50",
+          isDropTarget && "border-brass bg-brass/15 ring-2 ring-brass",
           className
         )}
       >
@@ -98,17 +146,44 @@ export function DockPanel({
     );
   }
 
+  const sectionStyle: CSSProperties = {
+    ...(widthPx != null ? ({ "--dock-w": `${Math.round(widthPx)}px` } as CSSProperties) : {}),
+    ...(orderIndex != null ? { order: orderIndex } : {}),
+  };
+
   return (
     <section
-      style={widthPx != null ? ({ "--dock-w": `${Math.round(widthPx)}px` } as CSSProperties) : undefined}
+      data-dock-panel-id={panelId}
+      style={sectionStyle}
       className={cn(
-        "flex min-h-0 min-w-0 flex-col gap-1.5",
+        "relative flex min-h-0 min-w-0 flex-col gap-1.5",
         widthPx != null && "@4xl:w-[var(--dock-w)] @4xl:shrink-0",
+        isDragSource && "opacity-70",
         className,
         expandedClassName
       )}
     >
-      <div className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-edge bg-panel2/70 px-2">
+      <div
+        onPointerDown={(e) => {
+          if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
+          onHeaderDragStart?.(panelId, e);
+        }}
+        title="برای جابه‌جایی پنجره، نوار بالا را بکشید و روی پنجرهٔ دیگر رها کنید"
+        className={cn(
+          "flex h-8 shrink-0 cursor-grab touch-none select-none items-center gap-1.5 rounded-lg border bg-panel2/70 px-2 transition-colors active:cursor-grabbing",
+          isDropTarget ? "border-brass bg-brass/15" : isDragSource ? "border-brass/60" : "border-edge hover:border-edge2"
+        )}
+      >
+        <span className="grid h-4 w-3 shrink-0 place-items-center text-dim/70" aria-hidden="true">
+          <svg viewBox="0 0 8 14" className="h-3 w-2" fill="currentColor">
+            <circle cx="2" cy="2.5" r="1.1" />
+            <circle cx="6" cy="2.5" r="1.1" />
+            <circle cx="2" cy="7" r="1.1" />
+            <circle cx="6" cy="7" r="1.1" />
+            <circle cx="2" cy="11.5" r="1.1" />
+            <circle cx="6" cy="11.5" r="1.1" />
+          </svg>
+        </span>
         {icon && <span className="grid h-5 w-5 shrink-0 place-items-center text-brass">{icon}</span>}
         <h2 className="truncate text-[12px] font-bold text-mute">{title}</h2>
         <span className="flex-1" />
@@ -116,7 +191,7 @@ export function DockPanel({
           type="button"
           onClick={onCollapse}
           title="جمع‌کردن پنل"
-          className="grid h-6 w-6 shrink-0 place-items-center rounded text-dim transition-colors hover:bg-panel3 hover:text-ink"
+          className="grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded text-dim transition-colors hover:bg-panel3 hover:text-ink"
         >
           <IconMinus className="h-3.5 w-3.5" />
         </button>
@@ -124,28 +199,56 @@ export function DockPanel({
           type="button"
           onClick={onClose}
           title="بستن پنل (بازگشایی از منوی پنجره)"
-          className="grid h-6 w-6 shrink-0 place-items-center rounded text-dim transition-colors hover:bg-panel3 hover:text-danger"
+          className="grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded text-dim transition-colors hover:bg-panel3 hover:text-danger"
         >
           <IconX className="h-3.5 w-3.5" />
         </button>
       </div>
       <div className="min-h-0 min-w-0 flex-1">{children}</div>
+      {isDropTarget && (
+        <div className="pointer-events-none absolute inset-0 z-40 grid place-items-center rounded-lg border-2 border-brass bg-brass/10 backdrop-blur-[1px]">
+          <span className="rounded-md border border-brass/70 bg-panel/95 px-3 py-1.5 text-[11.5px] font-bold text-brass2 shadow-lg">
+            رها کنید تا جای پنجره‌ها عوض شود
+          </span>
+        </div>
+      )}
     </section>
   );
 }
 
-/* ---------- جداکننده کشویی بین دو پنل (تغییر اندازه با درگ) ---------- */
+/* ---------- جداکننده کشویی بین دو پنل (تغییر اندازه با درگ بدون پرش) ---------- */
 
 interface DockSplitterProps {
   onResize: (dxPx: number) => void;
   onResetSize?: () => void;
+  orderIndex?: number;
   title?: string;
   className?: string;
 }
 
-export function DockSplitter({ onResize, onResetSize, title, className }: DockSplitterProps) {
+export function DockSplitter({ onResize, onResetSize, orderIndex, title, className }: DockSplitterProps) {
   const dragX = useRef<number | null>(null);
+  const pendingDx = useRef(0);
+  const rafRef = useRef<number | null>(null);
+  const onResizeRef = useRef(onResize);
+  onResizeRef.current = onResize;
   const [dragging, setDragging] = useState(false);
+
+  const flush = () => {
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    const dx = pendingDx.current;
+    pendingDx.current = 0;
+    if (dx !== 0) onResizeRef.current(dx);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!dragging) return;
@@ -163,6 +266,7 @@ export function DockSplitter({ onResize, onResetSize, title, className }: DockSp
     <div
       role="separator"
       aria-orientation="vertical"
+      style={orderIndex != null ? { order: orderIndex } : undefined}
       title={title ?? "تغییر اندازه (دابل‌کلیک: اندازه پیش‌فرض)"}
       onPointerDown={(e) => {
         try {
@@ -171,19 +275,31 @@ export function DockSplitter({ onResize, onResetSize, title, className }: DockSp
           /* ignore */
         }
         dragX.current = e.clientX;
+        pendingDx.current = 0;
         setDragging(true);
       }}
       onPointerMove={(e) => {
         if (dragX.current == null) return;
         const dx = e.clientX - dragX.current;
         dragX.current = e.clientX;
-        if (dx !== 0) onResize(dx);
+        if (dx === 0) return;
+        pendingDx.current += dx;
+        if (rafRef.current == null) {
+          rafRef.current = requestAnimationFrame(() => {
+            rafRef.current = null;
+            const total = pendingDx.current;
+            pendingDx.current = 0;
+            if (total !== 0) onResizeRef.current(total);
+          });
+        }
       }}
       onPointerUp={() => {
+        flush();
         dragX.current = null;
         setDragging(false);
       }}
       onPointerCancel={() => {
+        flush();
         dragX.current = null;
         setDragging(false);
       }}

@@ -67,7 +67,8 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const [size, setSize] = useState({ w: 0, h: 0 });
+  const sizeRef = useRef({ w: 0, h: 0 });
+  const drawNowRef = useRef<(() => void) | null>(null);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(2);
   const [panning, setPanning] = useState(false);
@@ -172,16 +173,30 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => {
+    const syncSize = () => {
       const r = el.getBoundingClientRect();
-      setSize({ w: r.width, h: r.height });
+      if (r.width <= 0 || r.height <= 0) return;
+      sizeRef.current = { w: r.width, h: r.height };
       const pad = 64;
       /* دوربین طوری تنظیم می‌شود که پوشش دورانی (دورترین گوشه) نیز جا شود */
       const envD = rotationalEnvelope(params.blankD, params.blankShape).maxRotD;
       const s = Math.min((r.width - pad * 2) / params.blankL, (r.height - pad * 2) / envD);
       fitScaleRef.current = Math.max(0.0001, s);
       camRef.current = { s, ox: (r.width - params.blankL * s) / 2, oy: r.height / 2 };
-    });
+      const cv = canvasRef.current;
+      if (cv) {
+        const dpr = window.devicePixelRatio || 1;
+        const bw = Math.max(1, Math.round(r.width * dpr));
+        const bh = Math.max(1, Math.round(r.height * dpr));
+        if (cv.width !== bw || cv.height !== bh) {
+          cv.width = bw;
+          cv.height = bh;
+        }
+        drawNowRef.current?.();
+      }
+    };
+    syncSize();
+    const ro = new ResizeObserver(syncSize);
     ro.observe(el);
     return () => ro.disconnect();
   }, [params.blankL, params.blankD, params.blankShape]);
@@ -211,14 +226,6 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
-
-  useEffect(() => {
-    const cv = canvasRef.current;
-    if (!cv || size.w === 0) return;
-    const dpr = window.devicePixelRatio || 1;
-    cv.width = size.w * dpr;
-    cv.height = size.h * dpr;
-  }, [size]);
 
   const setPlay = (v: boolean) => {
     if (v && progRef.current >= totalRef.current - 1e-6) {
@@ -398,8 +405,9 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
       const ctx = cv.getContext("2d");
       if (!ctx) return;
       const dpr = window.devicePixelRatio || 1;
-      const w = size.w;
-      const h = size.h;
+      const w = sizeRef.current.w;
+      const h = sizeRef.current.h;
+      if (w <= 0 || h <= 0) return;
       const { s, ox, oy } = camRef.current;
       const p = paramsRef.current;
       const g = genRef.current;
@@ -700,9 +708,22 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
       raf = requestAnimationFrame(step);
     };
 
+    drawNowRef.current = () => {
+      const tNow = progRef.current;
+      if (tNow + 1e-9 < appliedTRef.current) replayTo(tNow);
+      else if (tNow > appliedTRef.current + 1e-9) advanceTo(tNow);
+      const toolNow = toolAt(progRef.current);
+      draw(0, toolNow);
+      syncDom(toolNow);
+    };
+    drawNowRef.current();
+
     raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [size]);
+    return () => {
+      drawNowRef.current = null;
+      cancelAnimationFrame(raf);
+    };
+  }, []);
 
   /* --- تعامل اسکرابر --- */
   const seekToRatio = (ratio: number) => {
@@ -784,7 +805,7 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
         onPointerCancel={finishCanvasPan}
         onContextMenu={(e) => e.preventDefault()}
       >
-        <canvas ref={canvasRef} style={{ width: size.w, height: size.h }} className="pointer-events-none block" />
+        <canvas ref={canvasRef} className="pointer-events-none block h-full w-full" />
       </div>
 
       {/* DRO */}
