@@ -2441,16 +2441,6 @@ export default function ProfileEditor({
   const pathEndVid = lines[lines.length - 1]?.vb ?? null;
   const vById = useMemo(() => new Map(verts.map((v) => [v.id, v])), [verts]);
   const lineById = useMemo(() => new Map(lines.map((l) => [l.id, l])), [lines]);
-  const editSplitVertexId = useMemo(() => {
-    if (!split.enabled || !edit || !edit.verts.length) return null;
-    return edit.verts.reduce((best, vertex) => {
-      const current = edit.verts.find((item) => item.id === best)!;
-      const d = (vertex.z - split.z) ** 2 + (vertex.x / 2 - split.r) ** 2;
-      const bd = (current.z - split.z) ** 2 + (current.x / 2 - split.r) ** 2;
-      return d < bd ? vertex.id : best;
-    }, edit.verts[0].id);
-  }, [edit, split.enabled, split.z, split.r]);
-  const splitEditVertexConnected = (vid: number) => editSplitVertexId != null && vid === editSplitVertexId;
   const editInnerSplitPoint = useMemo(() => {
     if (!editOpen || !split.enabled || !edit) return null;
     const holder2 = edit.holder2 ?? params.holder2;
@@ -3163,7 +3153,6 @@ export default function ProfileEditor({
         focusEditVertexInGCode(endpointCandidate);
         setHitPicker(null);
         setPickerHover(null);
-        if (splitEditVertexConnected(endpointCandidate)) { drag.current = null; return; }
         drag.current = {
           mode: "evert",
           vids: chosen,
@@ -3268,10 +3257,6 @@ export default function ProfileEditor({
         selectEditLines(ids, bl, true);
         setSelV([]);
         const selectedLines = ids.map((id) => lineById.get(id)).filter((line): line is ELine => !!line);
-        if (editSplitVertexId != null && selectedLines.some((line) => line.va === editSplitVertexId || line.vb === editSplitVertexId)) {
-          drag.current = null;
-          return;
-        }
         const vset = new Set<number>();
         for (const l of selectedLines) { vset.add(l.va); vset.add(l.vb); }
         const base = new Map<number, EVert>();
@@ -5405,11 +5390,11 @@ const nv = verts.map((v) => {
 
         {/* نقطه Split */}
         {split.enabled && (
-          <g>
+          <g pointerEvents={editOpen ? "none" : undefined}>
             {(() => {
               const [x, y] = P(split.z, split.r);
               return (
-                <g style={{ cursor: "pointer" }}>
+                <g style={editOpen ? undefined : { cursor: "pointer" }}>
                   {(splitSelected || splitHovered || marqueeSplitHit) && (
                     <circle
                       cx={x}
