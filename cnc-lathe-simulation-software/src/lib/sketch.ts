@@ -893,6 +893,8 @@ export function normalizeSketch(raw: unknown): SketchSeg[] | null {
       arcDivisions: typeof s.arcDivisions === "number" && Number.isFinite(s.arcDivisions)
         ? Math.max(2, Math.min(500, Math.round(s.arcDivisions)))
         : undefined,
+      independentA: typeof s.independentA === "boolean" ? s.independentA : undefined,
+      independentB: typeof s.independentB === "boolean" ? s.independentB : undefined,
     });
   }
   for (const s of out) segUid = Math.max(segUid, s.id);

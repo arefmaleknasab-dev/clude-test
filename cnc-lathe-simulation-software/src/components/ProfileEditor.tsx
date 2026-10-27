@@ -783,6 +783,107 @@ function scaleSegment(segment: SketchSeg, origin: SPoint, factor: number): Sketc
   };
 }
 
+function moveChordAttachedPoint(
+  pt: SPoint,
+  oldA: SPoint,
+  oldB: SPoint,
+  newA: SPoint,
+  newB: SPoint
+): SPoint {
+  const vx = oldB.z - oldA.z, vy = oldB.r - oldA.r;
+  const len2 = vx * vx + vy * vy;
+  if (len2 < 1e-12) {
+    return {
+      z: pt.z + ((newA.z - oldA.z) + (newB.z - oldB.z)) * 0.5,
+      r: pt.r + ((newA.r - oldA.r) + (newB.r - oldB.r)) * 0.5,
+    };
+  }
+  const qx = pt.z - oldA.z, qy = pt.r - oldA.r;
+  const alpha = (qx * vx + qy * vy) / len2;
+  const beta = (qx * -vy + qy * vx) / len2;
+  const nvx = newB.z - newA.z, nvy = newB.r - newA.r;
+  if (nvx * nvx + nvy * nvy < 1e-12) return { ...newA };
+  return {
+    z: newA.z + alpha * nvx + beta * -nvy,
+    r: newA.r + alpha * nvy + beta * nvx,
+  };
+}
+
+/* اعمال تبدیل چرخش/مقیاس روی المان‌های انتخابی با حفظ اتصال هندسی نقاط مشترک به المان‌های مجاور */
+function transformConnectedSegments(
+  base: SketchSeg[],
+  ids: number[],
+  separatedKeys: ReadonlySet<string>,
+  transformSeg: (seg: SketchSeg) => SketchSeg
+): SketchSeg[] {
+  const chosen = new Set(ids);
+  if (!chosen.size) return base;
+
+  const transformedById = new Map<number, SketchSeg>();
+  const movedAnchors: { oldPt: SPoint; newPt: SPoint }[] = [];
+
+  for (const s of base) {
+    if (!chosen.has(s.id)) continue;
+    const t = transformSeg(s);
+    transformedById.set(s.id, t);
+    if (!separatedKeys.has(`${s.id}:a`)) {
+      movedAnchors.push({ oldPt: s.a, newPt: t.a });
+    }
+    if (!separatedKeys.has(`${s.id}:b`)) {
+      movedAnchors.push({ oldPt: s.b, newPt: t.b });
+    }
+  }
+
+  const findMovedAnchor = (segId: number, part: "a" | "b", pt: SPoint): SPoint | null => {
+    if (separatedKeys.has(`${segId}:${part}`)) return null;
+    for (const anchor of movedAnchors) {
+      if (dist(pt, anchor.oldPt) < 1e-7) return anchor.newPt;
+    }
+    return null;
+  };
+
+  return base.map((s) => {
+    const direct = transformedById.get(s.id);
+    if (direct) return direct;
+
+    const nextA = findMovedAnchor(s.id, "a", s.a);
+    const nextB = findMovedAnchor(s.id, "b", s.b);
+    if (!nextA && !nextB) return s;
+
+    const a = nextA ? { ...nextA } : s.a;
+    const b = nextB ? { ...nextB } : s.b;
+    const dzA = a.z - s.a.z, drA = a.r - s.a.r;
+    const dzB = b.z - s.b.z, drB = b.r - s.b.r;
+
+    if (s.kind === "cubic") {
+      return {
+        ...s,
+        a,
+        b,
+        c1: nextA && s.c1 ? { z: s.c1.z + dzA, r: s.c1.r + drA } : s.c1,
+        c2: nextB && s.c2 ? { z: s.c2.z + dzB, r: s.c2.r + drB } : s.c2,
+      };
+    }
+    if (s.kind === "quad") {
+      return {
+        ...s,
+        a,
+        b,
+        c1: s.c1 ? moveChordAttachedPoint(s.c1, s.a, s.b, a, b) : undefined,
+      };
+    }
+    if (s.kind === "arc") {
+      return {
+        ...s,
+        a,
+        b,
+        via: s.via ? moveChordAttachedPoint(s.via, s.a, s.b, a, b) : undefined,
+      };
+    }
+    return { ...s, a, b };
+  });
+}
+
 type MirrorSession = {
   ids: number[];
   base: SketchSeg[];
@@ -2271,8 +2372,12 @@ export default function ProfileEditor({
         if(segment.polylineId!==source.polylineId||segment.kind!=="cubic")return segment;
         const atA=dist(segment.a,vertex)<1e-8,atB=dist(segment.b,vertex)<1e-8;if(!atA&&!atB)return segment;
         const c1=atA?{...segment.a}:segment.c1,c2=atB?{...segment.b}:segment.c2;
+        const nextIndA = atA ? undefined : segment.independentA;
+        const nextIndB = atB ? undefined : segment.independentB;
         const noStart=!c1||dist(c1,segment.a)<1e-8,noEnd=!c2||dist(c2,segment.b)<1e-8;
-        return noStart&&noEnd?{...segment,kind:"line" as const,c1:undefined,c2:undefined}:{...segment,c1,c2};
+        return noStart&&noEnd
+          ? {...segment,kind:"line" as const,c1:undefined,c2:undefined,independentA:undefined,independentB:undefined}
+          : {...segment,c1,c2,independentA:nextIndA,independentB:nextIndB};
       });
     }
     /* تغییر نوع رأس نباید انتخاب فعلی Polyline را از بین ببرد. */
@@ -2289,14 +2394,16 @@ export default function ProfileEditor({
   const convertPolylineEdge=(id:number,kind:"line"|"arc"|"cubic")=>{
     commit(segs.map(segment=>{
       if(segment.id!==id||segment.polylineId==null)return segment;
-      if(kind==="line") return {...segment,kind:"line" as const,c1:undefined,c2:undefined,via:undefined};
+      if(kind==="line") return {...segment,kind:"line" as const,c1:undefined,c2:undefined,via:undefined,independentA:undefined,independentB:undefined};
       if(kind==="cubic"){
         const [c1,c2]=defaultCubicHandles(segment.a,segment.b);
-        return {...segment,kind:"cubic" as const,c1,c2,via:undefined};
+        /* تبدیل مستقیم یک ضلع Polyline به منحنی کنترلی باید دسته‌های کاملاً مستقل بسازد
+           تا با جابه‌جایی دسته‌های آن، دستهٔ منحنی کنترلی کناری هم‌راستا نشود. */
+        return {...segment,kind:"cubic" as const,c1,c2,via:undefined,independentA:true,independentB:true};
       }
       const dz=segment.b.z-segment.a.z,dr=segment.b.r-segment.a.r,length=Math.hypot(dz,dr);
       const via={z:(segment.a.z+segment.b.z)/2-(length?dr/length:0)*length*.18,r:(segment.a.r+segment.b.r)/2+(length?dz/length:0)*length*.18};
-      return {...segment,kind:"arc" as const,via,c1:undefined,c2:undefined};
+      return {...segment,kind:"arc" as const,via,c1:undefined,c2:undefined,independentA:undefined,independentB:undefined};
     }));
     onSelected([id]);setSelPoints([]);setSegmentCtxMenu(null);
   };
@@ -2986,14 +3093,22 @@ export default function ProfileEditor({
       if (!selected.length) { const hit=hitSeg(raw); if(hit) onSelected(sketchObjectIds(hit.id)); return; }
       const source=segs.filter(s=>selected.includes(s.id)), bounds=source.map(segBounds);
       if(!bounds.length)return;
+      const center = applySnap(raw).p;
       const centroid={z:(Math.min(...bounds.map(b=>b.minZ))+Math.max(...bounds.map(b=>b.maxZ)))/2,r:(Math.min(...bounds.map(b=>b.minR))+Math.max(...bounds.map(b=>b.maxR)))/2};
-      const startAngle=Math.atan2(centroid.r-raw.r,centroid.z-raw.z);
+      const startAngle=Math.atan2(centroid.r-center.r,centroid.z-center.z);
       const rect=wrapRef.current!.getBoundingClientRect();
-      setRotateSession({ids:[...selected],base:segs.map(s=>({...s})),center:raw,startAngle,pointer:centroid,angle:0,mode:"angle",step:15});
+      setRotateSession({ids:[...selected],base:segs.map(s=>({...s})),center,startAngle,pointer:centroid,angle:0,mode:"angle",step:15});
       setRotateBox({x:Math.min(rect.width-72,Math.max(4,e.clientX-rect.left+12)),y:Math.min(rect.height-48,Math.max(4,e.clientY-rect.top-48)),value:"",error:""});
+      setSnapHit(null);
       return;
     }
     if (tool === "boxscale" && e.button === 0 && !editOpen) {
+      if (boxRotateSession) {
+        onSegs(segs, true);
+        setBoxRotateSession(null);
+        setBoxRotateBox(null);
+        return;
+      }
       if (!selected.length) {
         const hit = hitSeg(raw);
         if (hit) onSelected(sketchObjectIds(hit.id));
@@ -3012,7 +3127,7 @@ export default function ProfileEditor({
           return;
         }
         const ids = [...selected];
-        const origin = raw;
+        const origin = applySnap(raw).p;
         setScaleSession({ ids, base: segs.map((segment) => ({ ...segment })), origin });
         setSnapHit(null);
         return;
@@ -3661,14 +3776,16 @@ export default function ProfileEditor({
       const entered=rotateBox?.value.match(/^-?(?:\d+(?:\.\d*)?|\.\d+)$/)?Math.abs(Number(rotateBox.value)):null;
       if(e.shiftKey) angle=Math.round(angle/90)*90;
       else if(rotateSession.mode==="step"){const step=entered&&entered>0?entered:rotateSession.step;angle=Math.round(angle/step)*step;}
-      onSegs(rotateSession.base.map(s=>rotateSession.ids.includes(s.id)?rotateSegment(s,rotateSession.center,angle):s),false);
+      onSegs(transformConnectedSegments(rotateSession.base, rotateSession.ids, separated, (s) => rotateSegment(s, rotateSession.center, angle)), false);
       setRotateSession({...rotateSession,pointer:raw,angle});
       const rect=wrapRef.current!.getBoundingClientRect();
       setRotateBox(box=>box?{...box,x:Math.min(rect.width-72,Math.max(4,e.clientX-rect.left+12)),y:Math.min(rect.height-48,Math.max(4,e.clientY-rect.top-48))}:box);
       return;
     }
     if (tool === "boxscale" && boxPivotDrag.current) {
-      setBoxScalePivot(raw);
+      const snapped = applySnap(raw);
+      setBoxScalePivot(snapped.p);
+      setSnapHit(snapped.hit);
       return;
     }
     if (tool === "boxscale" && boxRotateDrag.current) {
@@ -3678,7 +3795,7 @@ export default function ProfileEditor({
       if(e.shiftKey) angle=Math.round(angle/90)*90;
       d.angle=angle;
       setBoxRotateSession({base:d.base,ids:d.ids,pivot:d.pivot,angle});
-      onSegs(d.base.map(s=>d.ids.includes(s.id)?rotateSegment(s,d.pivot,angle):s),false);
+      onSegs(transformConnectedSegments(d.base, d.ids, separated, (s) => rotateSegment(s, d.pivot, angle)), false);
       setBoxRotateBox(box=>box?{...box,value:box.value,x:Math.max(4,e.clientX-wrapRef.current!.getBoundingClientRect().left+12),y:Math.max(4,e.clientY-wrapRef.current!.getBoundingClientRect().top-48)}:box);
       return;
     }
@@ -3706,7 +3823,7 @@ export default function ProfileEditor({
         sx = sy = f;
       }
       sx = Math.max(.001, sx); sy = Math.max(.001, sy);
-      onSegs(d.base.map((segment) => d.ids.includes(segment.id) ? scaleSegmentXY(segment, anchor, sx, sy) : segment), false);
+      onSegs(transformConnectedSegments(d.base, d.ids, separated, (segment) => scaleSegmentXY(segment, anchor, sx, sy)), false);
       return;
     }
     if (tool === "scale" && scaleSession && !scaleSession.reference && !editOpen) {
@@ -3719,7 +3836,7 @@ export default function ProfileEditor({
         : dist(scaleSession.origin, raw);
       const factor = targetLength / scaleSession.referenceLength;
       if (Number.isFinite(factor) && factor > 0) {
-        onSegs(scaleSession.base.map((segment) => scaleSession.ids.includes(segment.id) ? scaleSegment(segment, scaleSession.origin, factor) : segment), false);
+        onSegs(transformConnectedSegments(scaleSession.base, scaleSession.ids, separated, (segment) => scaleSegment(segment, scaleSession.origin, factor)), false);
       }
       setScaleSession({ ...scaleSession, pointer: raw });
       const rect = wrapRef.current!.getBoundingClientRect();
@@ -4249,7 +4366,10 @@ export default function ProfileEditor({
         const movedRef=merged.find(s=>s.id===d.ref.segId);
         if(movedRef?.polylineId!=null){
           const anchor=d.ref.part==="c1"?movedRef.a:movedRef.b,handle=movedRef[d.ref.part];
-          const refIndependent=d.ref.part==="c1"?movedRef.independentA:movedRef.independentB;
+          /* فقط در صورتی که هر دو طرف از طریق «تبدیل رأس به منحنی کنترلی» صراحتاً به شکل
+             جفتِ نرم (independent === false) ساخته شده باشند، هم‌راستایی الاکلنگی اعمال می‌شود؛
+             ضلع‌هایی که مستقیماً به منحنی کنترلی تبدیل شده‌اند کاملاً مستقل حرکت می‌کنند. */
+          const refSmoothLinked=d.ref.part==="c1"?movedRef.independentA===false:movedRef.independentB===false;
           if((e.ctrlKey||e.metaKey)&&handle){
             /* Ctrl در نخستین Drag اتصال الاکلنگی این رأس را دائماً می‌شکند؛
                پس از رهاکردن Ctrl نیز هر دو دسته مستقل باقی می‌مانند. */
@@ -4261,9 +4381,9 @@ export default function ProfileEditor({
             });
           }else if(e.shiftKey&&handle){
             /* تغییر موقت طول فقط روی دستهٔ فعال؛ وضعیت پیوند شکسته نمی‌شود. */
-          }else if(handle&&!refIndependent){
+          }else if(handle&&refSmoothLinked){
             const other=merged.find(s=>s.id!==movedRef.id&&s.polylineId===movedRef.polylineId&&s.kind==="cubic"&&
-              ((dist(s.a,anchor)<1e-8&&!s.independentA)||(dist(s.b,anchor)<1e-8&&!s.independentB)));
+              ((dist(s.a,anchor)<1e-8&&s.independentA===false)||(dist(s.b,anchor)<1e-8&&s.independentB===false)));
             if(other){
               const part=dist(other.a,anchor)<1e-8?"c1":"c2",otherHandle=other[part];
               const oldActive=refSeg?.[d.ref.part],oldActiveLength=oldActive?dist(anchor,oldActive):0;
@@ -4432,7 +4552,7 @@ export default function ProfileEditor({
   const onPointerUp = (e: React.PointerEvent<SVGSVGElement>) => {
     if (tool === "polyline" && e.detail === 2) { setDraft([]); drag.current = null; return; }
     if(imageDrag.current){const preview=imageTransformPreviewRef.current;if(imagePreviewFrame.current!=null){cancelAnimationFrame(imagePreviewFrame.current);imagePreviewFrame.current=null;}if(preview)onReferenceImages(referenceImages.map(img=>img.id===preview.id?preview:img));imageDrag.current=null;imageGestureBase.current=null;imageTransformPreviewRef.current=null;setImageTransformPreview(null);setImageDragCursor(null);lastRotationCursorStep.current=null;if(svgRef.current)svgRef.current.style.cursor="";return;}
-    if (boxPivotDrag.current) { boxPivotDrag.current=false; return; }
+    if (boxPivotDrag.current) { boxPivotDrag.current=false; setSnapHit(null); return; }
     if (boxRotateDrag.current) { boxRotateDrag.current=null; requestAnimationFrame(()=>{boxRotateInputRef.current?.focus();boxRotateInputRef.current?.select();}); return; }
     if (boxScaleDrag.current) {
       const handle = boxScaleDrag.current.handle;
@@ -4772,11 +4892,23 @@ export default function ProfileEditor({
           if (needsGroup) onSegs(segs.map(s => objectIds.includes(s.id) ? { ...s, polylineId: group } : s), false);
         }
         if (e.shiftKey) {
-          onSelected(selected.includes(id)
-            ? selected.filter((x) => !objectIds.includes(x))
-            : [...selected, ...objectIds.filter((item) => !selected.includes(item))]);
+          const selectedInObject = objectIds.filter((item) => selected.includes(item)).length;
+          const partialPolylineSelected = objectIds.length > 1 && selectedInObject > 0 && selectedInObject < objectIds.length;
+          if (partialPolylineSelected) {
+            onSelected(selected.includes(id)
+              ? selected.filter((x) => x !== id)
+              : [...selected, id]);
+          } else {
+            onSelected(selected.includes(id)
+              ? selected.filter((x) => !objectIds.includes(x))
+              : [...selected, ...objectIds.filter((item) => !selected.includes(item))]);
+          }
         } else if (e.ctrlKey || e.metaKey) {
-          onSelected(selected.filter((x) => !objectIds.includes(x)));
+          const selectedInObject = objectIds.filter((item) => selected.includes(item)).length;
+          const partialPolylineSelected = objectIds.length > 1 && selectedInObject > 0 && selectedInObject < objectIds.length;
+          onSelected(partialPolylineSelected
+            ? selected.filter((x) => x !== id)
+            : selected.filter((x) => !objectIds.includes(x)));
         } else {
           const wholePolyline=objectIds.length>1&&objectIds.every(item=>selected.includes(item));
           onSelected(wholePolyline?[id]:objectIds);
@@ -6036,8 +6168,8 @@ export default function ProfileEditor({
           const handles = [{h:"nw",x:x0,y:yTop},{h:"n",x:(x0+x1)/2,y:yTop},{h:"ne",x:x1,y:yTop},{h:"e",x:x1,y:(yTop+yBottom)/2},{h:"se",x:x1,y:yBottom},{h:"s",x:(x0+x1)/2,y:yBottom},{h:"sw",x:x0,y:yBottom},{h:"w",x:x0,y:(yTop+yBottom)/2}];
           return <g pointerEvents="all">
             <rect x={x0} y={yTop} width={x1-x0} height={yBottom-yTop} fill="none" stroke="#28dfc2" strokeWidth={1.2} strokeDasharray="5 4" />
-            {handles.map(({h,x,y})=><rect key={h} x={x-4} y={y-4} width={8} height={8} rx={1} fill="#071018" stroke="#28dfc2" strokeWidth={1.5} style={{cursor:`${h}-resize`}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation(); svgRef.current?.setPointerCapture?.(e.pointerId); boxScaleLastHandle.current=h; boxScaleDrag.current={handle:h,base:segs.map(s=>({...s})),ids:[...selected],bounds:{...b}};}} />)}
-            {[{x:x0-7,y:yTop-7},{x:x1+7,y:yTop-7},{x:x1+7,y:yBottom+7},{x:x0-7,y:yBottom+7}].map((p,i)=><circle key={`rh-${i}`} cx={p.x} cy={p.y} r={5} fill="transparent" stroke="none" style={{cursor:BOX_ROTATE_CURSORS[i]}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation();svgRef.current?.setPointerCapture?.(e.pointerId);const pivot=boxScalePivot??{z:(b.minZ+b.maxZ)/2,r:(b.minR+b.maxR)/2};const w=toWorld(e.clientX,e.clientY);const session={base:segs.map(s=>({...s})),ids:[...selected],pivot,angle:0};boxRotateDrag.current={...session,startAngle:Math.atan2(w.r-pivot.r,w.z-pivot.z)};setBoxRotateSession(session);const rect=wrapRef.current!.getBoundingClientRect();setBoxRotateBox({x:e.clientX-rect.left+12,y:e.clientY-rect.top-48,value:"",error:""});}}/>)}
+            {handles.map(({h,x,y})=><rect key={h} x={x-4} y={y-4} width={8} height={8} rx={1} fill="#071018" stroke="#28dfc2" strokeWidth={1.5} style={{cursor:`${h}-resize`}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation(); if(boxRotateSession){onSegs(segs,true);setBoxRotateSession(null);setBoxRotateBox(null);} svgRef.current?.setPointerCapture?.(e.pointerId); boxScaleLastHandle.current=h; boxScaleDrag.current={handle:h,base:segs.map(s=>({...s})),ids:[...selected],bounds:{...b}};}} />)}
+            {[{x:x0-7,y:yTop-7},{x:x1+7,y:yTop-7},{x:x1+7,y:yBottom+7},{x:x0-7,y:yBottom+7}].map((p,i)=><circle key={`rh-${i}`} cx={p.x} cy={p.y} r={5} fill="transparent" stroke="none" style={{cursor:BOX_ROTATE_CURSORS[i]}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation();if(boxRotateSession){onSegs(segs,true);}svgRef.current?.setPointerCapture?.(e.pointerId);const pivot=boxScalePivot??{z:(b.minZ+b.maxZ)/2,r:(b.minR+b.maxR)/2};const w=toWorld(e.clientX,e.clientY);const session={base:segs.map(s=>({...s})),ids:[...selected],pivot,angle:0};boxRotateDrag.current={...session,startAngle:Math.atan2(w.r-pivot.r,w.z-pivot.z)};setBoxRotateSession(session);const rect=wrapRef.current!.getBoundingClientRect();setBoxRotateBox({x:e.clientX-rect.left+12,y:e.clientY-rect.top-48,value:"",error:""});}}/>)}
             {(()=>{const pivot=boxScalePivot??{z:(b.minZ+b.maxZ)/2,r:(b.minR+b.maxR)/2};const [px,py]=P(pivot.z,pivot.r);return <g style={{cursor:"move"}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation();svgRef.current?.setPointerCapture?.(e.pointerId);boxPivotDrag.current=true;}}><circle cx={px} cy={py} r={9} fill="transparent"/><path d={`M${px-6} ${py}H${px+6}M${px} ${py-6}V${py+6}`} stroke="#28dfc2" strokeWidth={1.8}/></g>;})()}
           </g>;
         })()}
@@ -6180,12 +6312,12 @@ export default function ProfileEditor({
       </div>})()}
 
       {boxRotateBox && boxRotateSession && <div className="absolute z-50" style={{left:boxRotateBox.x,top:boxRotateBox.y,width:`${Math.max(72,28+boxRotateBox.value.length*8)}px`}} dir="ltr">
-        <input ref={boxRotateInputRef} value={boxRotateBox.value} placeholder="Angle" className="h-[30px] w-full rounded-[5px] border border-[#00a9c7] bg-[#071018]/95 px-2 text-center font-mono text-xs text-[#d9f7f5] outline-none" onChange={e=>{const value=latinDigits(e.target.value).replace(/[^0-9.\-]/g,"");setBoxRotateBox({...boxRotateBox,value,error:""});const n=Number(value);if(boxScaleLive&&value&&Number.isFinite(n)){onSegs(boxRotateSession.base.map(s=>boxRotateSession.ids.includes(s.id)?rotateSegment(s,boxRotateSession.pivot,n):s),false);setBoxRotateSession({...boxRotateSession,angle:n});}}} onKeyDown={e=>{e.stopPropagation();if(e.key==="Escape"){onSegs(boxRotateSession.base,false);setBoxRotateSession(null);setBoxRotateBox(null);return;}if(e.key!=="Enter"&&e.code!=="Space")return;e.preventDefault();const n=boxRotateBox.value?Number(boxRotateBox.value):boxRotateSession.angle;if(!Number.isFinite(n))return;onSegs(boxRotateSession.base.map(s=>boxRotateSession.ids.includes(s.id)?rotateSegment(s,boxRotateSession.pivot,n):s),true);setBoxRotateSession(null);setBoxRotateBox(null);}}/>
+        <input ref={boxRotateInputRef} value={boxRotateBox.value} placeholder="Angle" className="h-[30px] w-full rounded-[5px] border border-[#00a9c7] bg-[#071018]/95 px-2 text-center font-mono text-xs text-[#d9f7f5] outline-none" onChange={e=>{const value=latinDigits(e.target.value).replace(/[^0-9.\-]/g,"");setBoxRotateBox({...boxRotateBox,value,error:""});const n=Number(value);if(boxScaleLive&&value&&Number.isFinite(n)){onSegs(transformConnectedSegments(boxRotateSession.base,boxRotateSession.ids,separated,s=>rotateSegment(s,boxRotateSession.pivot,n)),false);setBoxRotateSession({...boxRotateSession,angle:n});}}} onKeyDown={e=>{e.stopPropagation();if(e.key==="Escape"){onSegs(boxRotateSession.base,false);setBoxRotateSession(null);setBoxRotateBox(null);return;}if(e.key!=="Enter"&&e.code!=="Space")return;e.preventDefault();const n=boxRotateBox.value?Number(boxRotateBox.value):boxRotateSession.angle;if(!Number.isFinite(n))return;onSegs(transformConnectedSegments(boxRotateSession.base,boxRotateSession.ids,separated,s=>rotateSegment(s,boxRotateSession.pivot,n)),true);setBoxRotateSession(null);setBoxRotateBox(null);}}/>
         <div className="mt-1 text-center font-mono text-[10px] font-bold text-[#26e6c7]">{concise(boxRotateSession.angle)}°</div>
       </div>}
 
       {rotateBox && rotateSession && <div className="absolute z-50" style={{left:rotateBox.x,top:rotateBox.y,width:`${Math.max(72,28+rotateBox.value.length*8)}px`}} dir="ltr">
-        <input ref={rotateInputRef} value={rotateBox.value} placeholder={rotateSession.mode==="angle"?"Angle":"Step"} className={cn("h-[30px] w-full rounded-[5px] border bg-[#071018]/95 px-2 text-center font-mono text-xs text-[#d9f7f5] outline-none",rotateBox.error?"border-danger":"border-[#00a9c7]")} onChange={e=>{const value=latinDigits(e.target.value).replace(/[^0-9.\-]/g,"");setRotateBox({...rotateBox,value,error:""});const n=Number(value);if(rotateLive&&rotateSession.mode==="angle"&&value&&Number.isFinite(n)){onSegs(rotateSession.base.map(s=>rotateSession.ids.includes(s.id)?rotateSegment(s,rotateSession.center,n):s),false);setRotateSession({...rotateSession,angle:n});}}} onKeyDown={e=>{e.stopPropagation();if(e.key==="Tab"){e.preventDefault();setRotateSession({...rotateSession,mode:rotateSession.mode==="angle"?"step":"angle"});return;}if(e.key==="Escape"){onSegs(rotateSession.base,false);setRotateSession(null);setRotateBox(null);chooseTool("select");return;}if(e.key!=="Enter")return;let angle=rotateSession.angle;if(rotateSession.mode==="angle"&&rotateBox.value){const n=Number(rotateBox.value);if(!Number.isFinite(n)){setRotateBox({...rotateBox,error:"نامعتبر"});return;}angle=n;}onSegs(rotateSession.base.map(s=>rotateSession.ids.includes(s.id)?rotateSegment(s,rotateSession.center,angle):s),true);setRotateSession(null);setRotateBox(null);chooseTool("select");}}/>
+        <input ref={rotateInputRef} value={rotateBox.value} placeholder={rotateSession.mode==="angle"?"Angle":"Step"} className={cn("h-[30px] w-full rounded-[5px] border bg-[#071018]/95 px-2 text-center font-mono text-xs text-[#d9f7f5] outline-none",rotateBox.error?"border-danger":"border-[#00a9c7]")} onChange={e=>{const value=latinDigits(e.target.value).replace(/[^0-9.\-]/g,"");setRotateBox({...rotateBox,value,error:""});const n=Number(value);if(rotateLive&&rotateSession.mode==="angle"&&value&&Number.isFinite(n)){onSegs(transformConnectedSegments(rotateSession.base,rotateSession.ids,separated,s=>rotateSegment(s,rotateSession.center,n)),false);setRotateSession({...rotateSession,angle:n});}}} onKeyDown={e=>{e.stopPropagation();if(e.key==="Tab"){e.preventDefault();setRotateSession({...rotateSession,mode:rotateSession.mode==="angle"?"step":"angle"});return;}if(e.key==="Escape"){onSegs(rotateSession.base,false);setRotateSession(null);setRotateBox(null);chooseTool("select");return;}if(e.key!=="Enter")return;let angle=rotateSession.angle;if(rotateSession.mode==="angle"&&rotateBox.value){const n=Number(rotateBox.value);if(!Number.isFinite(n)){setRotateBox({...rotateBox,error:"نامعتبر"});return;}angle=n;}onSegs(transformConnectedSegments(rotateSession.base,rotateSession.ids,separated,s=>rotateSegment(s,rotateSession.center,angle)),true);setRotateSession(null);setRotateBox(null);chooseTool("select");}}/>
         <div className="mt-1 whitespace-nowrap text-center font-mono text-[10px] font-bold text-[#26e6c7]">{concise(rotateSession.angle)}° · {rotateSession.mode==="angle"?"زاویه":"پله"}</div>
       </div>}
 
@@ -6366,6 +6498,8 @@ export default function ProfileEditor({
           if (!(value>0)) return;
           const source=boxScaleNumericBase.current ?? {segs,bounds:b};
           const sb=source.bounds, sw=sb.maxZ-sb.minZ, sh=sb.maxR-sb.minR;
+          const denom = axis==="x" ? sw : sh;
+          if (!(denom > 1e-9)) return;
           const handle=boxScaleLastHandle.current;
           const anchor={
             z: (axis==="x" || effectiveLock) && handle?.includes("e") ? sb.minZ
@@ -6375,13 +6509,21 @@ export default function ProfileEditor({
               : (axis==="y" || effectiveLock) && handle?.includes("s") ? sb.maxR
               : (sb.minR+sb.maxR)/2,
           };
-          const f=axis==="x"?value/sw:value/sh;
-          onSegs(source.segs.map(s=>selected.includes(s.id)?scaleSegmentXY(s,anchor,axis==="x"||effectiveLock?f:1,axis==="y"||effectiveLock?f:1):s),commit);
+          const f=value/denom;
+          onSegs(
+            transformConnectedSegments(
+              source.segs,
+              selected,
+              separated,
+              (s) => scaleSegmentXY(s, anchor, axis==="x"||effectiveLock?f:1, axis==="y"||effectiveLock?f:1)
+            ),
+            commit
+          );
         };
         const lockIcon=effectiveLock?<svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>:<svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M16 10V7a4 4 0 0 0-7.5-2"/></svg>;
         return <>
-          <input ref={boxScaleWidthInputRef} value={boxScaleWidthText ?? concise(width)} title="عرض افقی" className="absolute z-50 w-16 rounded border border-teal/60 bg-[#071018]/95 px-1 py-0.5 text-center font-mono text-[10px] text-teal outline-none" style={{left:(x0+x1)/2-32,top:yTop-27}} onFocus={e=>{boxScaleNumericBase.current={segs:segs.map(s=>({...s})),bounds:{...b}};e.currentTarget.select();}} onChange={e=>{const v=e.currentTarget.value;setBoxScaleWidthText(v);if(boxScaleLive)applyDimension("x",Number(v),false);}} onKeyDown={e=>{if(e.key==="Enter")e.currentTarget.blur();}} onBlur={e=>{applyDimension("x",Number(e.currentTarget.value),true);setBoxScaleWidthText(null);boxScaleNumericBase.current=null;}}/>
-          <input ref={boxScaleHeightInputRef} value={boxScaleHeightText ?? concise(height)} title="ارتفاع عمودی" className="absolute z-50 w-16 rounded border border-teal/60 bg-[#071018]/95 px-1 py-0.5 text-center font-mono text-[10px] text-teal outline-none" style={{left:x1+9,top:(yTop+yBottom)/2-11}} onFocus={e=>{boxScaleNumericBase.current={segs:segs.map(s=>({...s})),bounds:{...b}};e.currentTarget.select();}} onChange={e=>{const v=e.currentTarget.value;setBoxScaleHeightText(v);if(boxScaleLive)applyDimension("y",Number(v),false);}} onKeyDown={e=>{if(e.key==="Enter")e.currentTarget.blur();}} onBlur={e=>{applyDimension("y",Number(e.currentTarget.value),true);setBoxScaleHeightText(null);boxScaleNumericBase.current=null;}}/>
+          <input ref={boxScaleWidthInputRef} value={boxScaleWidthText ?? concise(width)} title="عرض افقی" className="absolute z-50 w-16 rounded border border-teal/60 bg-[#071018]/95 px-1 py-0.5 text-center font-mono text-[10px] text-teal outline-none" style={{left:(x0+x1)/2-32,top:yTop-27}} onFocus={e=>{boxScaleNumericBase.current={segs:segs.map(s=>({...s})),bounds:{...b}};e.currentTarget.select();}} onChange={e=>{const v=e.currentTarget.value;setBoxScaleWidthText(v);if(boxScaleLive)applyDimension("x",Number(v),false);}} onKeyDown={e=>{if(e.key==="Enter")e.currentTarget.blur();}} onBlur={()=>{if(boxScaleWidthText!=null)applyDimension("x",Number(boxScaleWidthText),true);setBoxScaleWidthText(null);boxScaleNumericBase.current=null;}}/>
+          <input ref={boxScaleHeightInputRef} value={boxScaleHeightText ?? concise(height)} title="ارتفاع عمودی" className="absolute z-50 w-16 rounded border border-teal/60 bg-[#071018]/95 px-1 py-0.5 text-center font-mono text-[10px] text-teal outline-none" style={{left:x1+9,top:(yTop+yBottom)/2-11}} onFocus={e=>{boxScaleNumericBase.current={segs:segs.map(s=>({...s})),bounds:{...b}};e.currentTarget.select();}} onChange={e=>{const v=e.currentTarget.value;setBoxScaleHeightText(v);if(boxScaleLive)applyDimension("y",Number(v),false);}} onKeyDown={e=>{if(e.key==="Enter")e.currentTarget.blur();}} onBlur={()=>{if(boxScaleHeightText!=null)applyDimension("y",Number(boxScaleHeightText),true);setBoxScaleHeightText(null);boxScaleNumericBase.current=null;}}/>
           <button title={boxScaleLocked?"باز کردن نسبت":shiftDown?"قفل موقت با Shift":"قفل نسبت"} className="absolute z-50 grid h-6 w-6 place-items-center rounded border border-edge bg-panel/95 text-mute" style={{left:x0-29,top:yTop-29}} onClick={()=>setBoxScaleLocked(v=>!v)}>{lockIcon}</button>
         </>;
       })()}
@@ -6399,7 +6541,7 @@ export default function ProfileEditor({
               const amount = value.match(/^(?:\d+(?:\.\d*)?|\.\d+)$/) ? Number(value) : null;
               if (amount != null && amount > 0) {
                 const factor = amount / scaleSession.referenceLength!;
-                onSegs(scaleSession.base.map((segment) => scaleSession.ids.includes(segment.id) ? scaleSegment(segment, scaleSession.origin, factor) : segment), false);
+                onSegs(transformConnectedSegments(scaleSession.base, scaleSession.ids, separated, (segment) => scaleSegment(segment, scaleSession.origin, factor)), false);
               }
               setScaleBox({ ...scaleBox, value, error: "" });
             }}
@@ -6413,7 +6555,7 @@ export default function ProfileEditor({
               const amount = scaleBox.value ? Number(scaleBox.value) : dist(scaleSession.origin, scaleSession.pointer ?? scaleSession.reference!);
               if (!Number.isFinite(amount) || amount <= 0) { setScaleBox({ ...scaleBox, error: "مقدار نامعتبر" }); return; }
               const factor = amount / scaleSession.referenceLength!;
-              const next = scaleSession.base.map((segment) => scaleSession.ids.includes(segment.id) ? scaleSegment(segment, scaleSession.origin, factor) : segment);
+              const next = transformConnectedSegments(scaleSession.base, scaleSession.ids, separated, (segment) => scaleSegment(segment, scaleSession.origin, factor));
               onSegs(next, true); setScaleSession(null); setScaleBox(null); chooseTool("select");
             }}
           />
