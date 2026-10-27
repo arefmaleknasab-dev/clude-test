@@ -42,6 +42,7 @@ static std::atomic<ULONGLONG> g_lastActivityTick{0};
 static std::atomic<bool> g_clientEverConnected{false};
 static std::atomic<int> g_openSessions{0};
 static std::atomic<ULONGLONG> g_lastCloseTick{0};
+static std::atomic<int> g_activeRequests{0};
 
 static bool fileExistsW(const std::wstring& path) {
   DWORD attr = GetFileAttributesW(path.c_str());
@@ -163,7 +164,10 @@ static HANDLE launchDesktopWindow(int port) {
       + L" --no-default-browser-check"
       + L" --disable-background-mode"
       + L" --disable-sync"
-      + L" --disable-features=Translate,msEdgeSidebarV2,EdgeCollections";
+      + L" --overscroll-history-navigation=0"
+      + L" --disable-background-timer-throttling"
+      + L" --disable-renderer-backgrounding"
+      + L" --disable-features=Translate,msEdgeSidebarV2,EdgeCollections,CalculateNativeWinOcclusion,IntensiveWakeUpThrottling";
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
@@ -207,6 +211,14 @@ static bool checkRunningInstance(int port) {
   return ok;
 }
 
+static int findRunningInstancePort() {
+  for (int i = 0; i < MAX_PORT_TRIES; ++i) {
+    int p = BASE_PORT + i;
+    if (checkRunningInstance(p)) return p;
+  }
+  return -1;
+}
+
 static void sendAll(SOCKET c, const char* data, size_t len) {
   size_t off = 0;
   while (off < len) {
@@ -217,8 +229,15 @@ static void sendAll(SOCKET c, const char* data, size_t len) {
   }
 }
 
+struct ActiveRequestGuard {
+  ~ActiveRequestGuard() {
+    g_activeRequests.fetch_sub(1);
+  }
+};
+
 static void handleClient(SOCKET client) {
-  DWORD timeoutMs = 4000;
+  ActiveRequestGuard reqGuard;
+  DWORD timeoutMs = 8000;
   setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
   setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
 
@@ -245,6 +264,8 @@ static void handleClient(SOCKET client) {
   ULONGLONG now = GetTickCount64();
 
   if (path == "/__health") {
+    g_lastCloseTick.store(0);
+    g_lastActivityTick.store(now);
     const char* body = "KharraatCode-Desktop-OK";
     char hdr[256];
     int hlen = std::snprintf(
@@ -349,8 +370,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     return 1;
   }
 
-  if (checkRunningInstance(BASE_PORT)) {
-    HANDLE h = launchDesktopWindow(BASE_PORT);
+  int runningPort = findRunningInstancePort();
+  if (runningPort > 0) {
+    HANDLE h = launchDesktopWindow(runningPort);
     if (h) CloseHandle(h);
     WSACleanup();
     return 0;
@@ -403,8 +425,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     if (sel > 0 && FD_ISSET(listenSock, &readSet)) {
       SOCKET client = accept(listenSock, nullptr, nullptr);
       if (client != INVALID_SOCKET) {
+        g_activeRequests.fetch_add(1);
+        g_lastCloseTick.store(0);
+        g_lastActivityTick.store(GetTickCount64());
         std::thread(handleClient, client).detach();
       }
+    }
+
+    if (g_activeRequests.load() > 0) {
+      continue;
     }
 
     ULONGLONG now = GetTickCount64();
@@ -416,15 +445,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     }
 
     if (!g_clientEverConnected.load()) {
-      // Allow up to 60 seconds for slow HDD cold-start on Windows 10
-      if (now - startTick > 60000) break;
+      // Allow up to 90 seconds for slow HDD cold-start on Windows 10
+      if (now - startTick > 90000) break;
     } else {
       ULONGLONG closeTick = g_lastCloseTick.load();
-      if (closeTick != 0 && g_openSessions.load() <= 0 && (now - closeTick > 3000)) {
+      if (closeTick != 0 && g_openSessions.load() <= 0 && (now - closeTick > 8000)) {
         break;
       }
-      // Fallback: if browser crashed without sendBeacon and no ping for 20s
-      if ((childProc == nullptr || childExited) && (now - g_lastActivityTick.load() > 20000)) {
+      // Fallback: if browser crashed without sendBeacon and no ping for 10 minutes
+      if ((childProc == nullptr || childExited) && (now - g_lastActivityTick.load() > 600000)) {
         break;
       }
     }

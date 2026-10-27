@@ -165,7 +165,7 @@ const distHtmlPath = path.resolve(appRoot, "dist/index.html");
 let html = fs.readFileSync(distHtmlPath, "utf8");
 
 /* اسکریپت سبک مدیریت چرخهٔ حیات پنجره دسکتاپ (فقط روی 127.0.0.1 فعال می‌شود) */
-const desktopBridgeSnippet = `<script>(function(){if(location.hostname!=="127.0.0.1")return;var p=Number(location.port);if(!(p>=45820&&p<45840))return;fetch("/__open",{method:"POST",cache:"no-store"}).catch(function(){});setInterval(function(){fetch("/__ping",{method:"POST",cache:"no-store"}).catch(function(){});},2500);window.addEventListener("pagehide",function(){try{navigator.sendBeacon("/__close","1");}catch(e){}});})();</script>`;
+const desktopBridgeSnippet = `<script>(function(){if(location.hostname!=="127.0.0.1")return;var p=Number(location.port);if(!(p>=45820&&p<45840))return;var ping=function(){fetch("/__ping",{method:"POST",cache:"no-store"}).catch(function(){});};fetch("/__open",{method:"POST",cache:"no-store"}).catch(function(){});try{var b=new Blob(["setInterval(function(){postMessage(1)},4000)"],{type:"application/javascript"});var w=new Worker(URL.createObjectURL(b));w.onmessage=ping;}catch(e){setInterval(ping,4000);}document.addEventListener("visibilitychange",function(){if(!document.hidden)ping();});window.addEventListener("mouseup",function(e){if(e.button===3||e.button===4)e.preventDefault();},true);window.addEventListener("keydown",function(e){if(e.altKey&&(e.key==="ArrowLeft"||e.key==="ArrowRight"))e.preventDefault();},true);window.addEventListener("pagehide",function(){try{navigator.sendBeacon("/__close","1");}catch(e){}});})();</script>`;
 
 if (html.includes("</body>")) {
   html = html.replace("</body>", `${desktopBridgeSnippet}</body>`);

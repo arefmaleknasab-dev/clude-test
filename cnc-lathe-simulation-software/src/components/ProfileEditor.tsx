@@ -898,7 +898,10 @@ export default function ProfileEditor({
   const [tool, setTool] = useState<Tool>("select");
   const paintStorageKey=`kharraat-canvas-paint-v1:${projectId}`;
   const [paintEdges,setPaintEdges]=useState<PaintEdge[]>(()=>{
-    try{return JSON.parse(localStorage.getItem(paintStorageKey)||"[]") as PaintEdge[];}catch{return [];}
+    try{
+      const parsed = JSON.parse(localStorage.getItem(paintStorageKey)||"[]");
+      return Array.isArray(parsed) ? (parsed as PaintEdge[]) : [];
+    }catch{return [];}
   });
   const [paintMenu,setPaintMenu]=useState<{id:number;x:number;y:number}|null>(null);
   const [selectedImageId,setSelectedImageId]=useState<number|null>(null);
@@ -949,7 +952,27 @@ export default function ProfileEditor({
   const [paintMarqueeHits,setPaintMarqueeHits]=useState<number[]>([]);
   const [paintMarqueePoints,setPaintMarqueePoints]=useState<Array<{id:number;point:"a"|"b"}>>([]);
   const paintDrag=useRef<{ids:number[];point?:"a"|"b";pointId?:number;points?:Array<{id:number;point:"a"|"b"}>;start:SPoint;base:PaintEdge[];moved?:boolean}|null>(null);
-  useEffect(()=>{localStorage.setItem(paintStorageKey,JSON.stringify(paintEdges));},[paintEdges,paintStorageKey]);
+  useEffect(()=>{
+    try{
+      if(paintEdges.length===0){
+        localStorage.removeItem(paintStorageKey);
+      }else{
+        localStorage.setItem(paintStorageKey,JSON.stringify(paintEdges));
+      }
+    }catch{
+      try{
+        for(let i=localStorage.length-1;i>=0;i--){
+          const k=localStorage.key(i);
+          if(k && k.startsWith("kharraat-canvas-paint-v1:") && k!==paintStorageKey){
+            localStorage.removeItem(k);
+          }
+        }
+        if(paintEdges.length>0) localStorage.setItem(paintStorageKey,JSON.stringify(paintEdges));
+      }catch{
+        /* quota full — keep paint edges in memory without crashing React */
+      }
+    }
+  },[paintEdges,paintStorageKey]);
   const importReferenceFiles=async(files:File[],drop?:SPoint)=>{const valid=files.filter(file=>file.type.startsWith("image/")||/\.(avif|bmp|gif|jpe?g|png|svg|webp|ico|tiff?)$/i.test(file.name)),added=await Promise.all(valid.map(file=>new Promise<ReferenceImage|null>(resolve=>{const reader=new FileReader();reader.onerror=()=>resolve(null);reader.onload=()=>{const src=String(reader.result||""),probe=new Image();probe.onerror=()=>resolve(null);probe.onload=()=>{const width=100,height=100*(probe.naturalHeight||1)/(probe.naturalWidth||1);resolve({id:Date.now()+Math.random(),src,name:file.name,z:drop?drop.z-width/2:(params.blankL-width)/2,r:drop?drop.r+height/2:height/2,width,height,locked:false,black:0,gamma:1,white:255,opacity:.65,aspectLocked:true,originalRatio:width/height,grayscale:false});};probe.src=src;};reader.readAsDataURL(file);})));const images=added.filter((x):x is ReferenceImage=>!!x);if(images.length){commitImages([...referenceImages,...images]);setSelectedImageId(images[images.length-1].id);}};
   const addPaintDraft=(points:SPoint[])=>{
     if(points.length<2)return;
@@ -1517,7 +1540,7 @@ export default function ProfileEditor({
       /* در Polyline، Backspace و Ctrl+Z فقط یک رأس تأییدشده از Draft کم می‌کنند؛
          تا پیش از Enter هیچ History سراسری ساخته نشده است. */
       if (!editOpen && (tool === "polyline" || tool === "paint") && draft.length &&
-          ((e.key === "Backspace" && !lineLengthText) || ((e.ctrlKey || e.metaKey) && (e.code === "KeyZ" || e.key.toLowerCase() === "z")))) {
+          ((e.key === "Backspace" && !lineLengthText) || ((e.ctrlKey || e.metaKey) && (e.code === "KeyZ" || (e.key ?? "").toLowerCase() === "z")))) {
         e.preventDefault();
         setDraft((points) => points.slice(0, -1));
         setLineLengthText("");
@@ -1582,7 +1605,9 @@ export default function ProfileEditor({
       }
       /* میانبر ابزارها بر پایه موقعیت فیزیکی کلید است تا با فارسی، عربی و
          سایر Layoutها نیز همان کلید لاتین تنظیم‌شده عمل کند. */
-      const k = /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase() : e.key.toLowerCase();
+      const rawCode = typeof e.code === "string" ? e.code : "";
+      const rawKey = typeof e.key === "string" ? e.key : "";
+      const k = /^Key[A-Z]$/.test(rawCode) ? rawCode.slice(3).toLowerCase() : rawKey.toLowerCase();
       const undoKey = e.code === "KeyZ" || k === "z";
       const redoKey = e.code === "KeyY" || k === "y";
       if ((e.ctrlKey || e.metaKey) && undoKey && !e.shiftKey) {

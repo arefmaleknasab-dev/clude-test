@@ -563,66 +563,84 @@ function Lathe3DViewInner({ projectId = "default", sketch, blankD, blankL, split
     if (rafRef.current == null) rafRef.current = requestAnimationFrame(draw);
   }, [draw]);
 
+  const [glEpoch, setGlEpoch] = useState(0);
+
   /* ---- راه‌اندازی WebGL ---- */
   useEffect(() => {
-    const canvas = canvasRef.current!;
-    const gl = canvas.getContext("webgl2", { antialias: true, alpha: false, preserveDrawingBuffer: true, powerPreference: "high-performance" });
-    if (!gl) {
-      setError("WebGL2 در این مرورگر یا کارت گرافیک فعال نیست.");
-      return;
-    }
-    try {
-      const vs = compile(gl, gl.VERTEX_SHADER, VS);
-      const fs = compile(gl, gl.FRAGMENT_SHADER, FS);
-      const prog = gl.createProgram()!;
-      gl.attachShader(prog, vs);
-      gl.attachShader(prog, fs);
-      gl.linkProgram(prog);
-      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || "link error");
-      const u: Record<string, WebGLUniformLocation | null> = {};
-      for (const n of ["uVP", "uModel", "uEye", "uCut", "uCutCS", "uMode", "uColor"]) u[n] = gl.getUniformLocation(prog, n);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const initGl = () => {
+      const gl = canvas.getContext("webgl2", { antialias: true, alpha: false, preserveDrawingBuffer: true });
+      if (!gl || gl.isContextLost()) {
+        setError("WebGL2 در این مرورگر یا کارت گرافیک فعال نیست.");
+        return;
+      }
+      try {
+        const vs = compile(gl, gl.VERTEX_SHADER, VS);
+        const fs = compile(gl, gl.FRAGMENT_SHADER, FS);
+        const prog = gl.createProgram();
+        if (!prog) throw new Error("program allocation failed");
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || "link error");
+        const u: Record<string, WebGLUniformLocation | null> = {};
+        for (const n of ["uVP", "uModel", "uEye", "uCut", "uCutCS", "uMode", "uColor"]) u[n] = gl.getUniformLocation(prog, n);
 
-      const vbo = gl.createBuffer()!;
-      const ibo = gl.createBuffer()!;
-      const wibo = gl.createBuffer()!;
-      const sbo = gl.createBuffer()!;
-      const mk = (index: WebGLBuffer) => {
-        const vao = gl.createVertexArray()!;
-        gl.bindVertexArray(vao);
-        gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+        const vbo = gl.createBuffer();
+        const ibo = gl.createBuffer();
+        const wibo = gl.createBuffer();
+        const sbo = gl.createBuffer();
+        if (!vbo || !ibo || !wibo || !sbo) throw new Error("buffer allocation failed");
+        const mk = (index: WebGLBuffer) => {
+          const vao = gl.createVertexArray();
+          if (!vao) throw new Error("vao allocation failed");
+          gl.bindVertexArray(vao);
+          gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+          gl.enableVertexAttribArray(0);
+          gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+          gl.enableVertexAttribArray(1);
+          gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index);
+          return vao;
+        };
+        const meshVao = mk(ibo);
+        const wireVao = mk(wibo);
+        const sceneVao = gl.createVertexArray();
+        if (!sceneVao) throw new Error("scene vao allocation failed");
+        gl.bindVertexArray(sceneVao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, sbo);
         gl.enableVertexAttribArray(0);
-        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
-        gl.enableVertexAttribArray(1);
-        gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index);
-        return vao;
-      };
-      const meshVao = mk(ibo);
-      const wireVao = mk(wibo);
-      const sceneVao = gl.createVertexArray()!;
-      gl.bindVertexArray(sceneVao);
-      gl.bindBuffer(gl.ARRAY_BUFFER, sbo);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
-      gl.vertexAttrib3f(1, 0, 1, 0);
-      gl.bindVertexArray(null);
-      gl.bindBuffer(gl.ARRAY_BUFFER, sbo);
-      gl.bufferData(gl.ARRAY_BUFFER, sceneRef.current!.data, gl.STATIC_DRAW);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+        gl.vertexAttrib3f(1, 0, 1, 0);
+        gl.bindVertexArray(null);
+        gl.bindBuffer(gl.ARRAY_BUFFER, sbo);
+        if (sceneRef.current) {
+          gl.bufferData(gl.ARRAY_BUFFER, sceneRef.current.data, gl.STATIC_DRAW);
+        }
 
-      glRef.current = { gl, prog, vs, fs, u, meshVao, wireVao, sceneVao, vbo, ibo, wibo, sbo, triCount: 0, wireCount: 0 };
-      setError(null);
-      requestRender();
-    } catch (e) {
-      setError("خطا در راه‌اندازی نمای سه‌بعدی: " + (e as Error).message);
-    }
+        glRef.current = { gl, prog, vs, fs, u, meshVao, wireVao, sceneVao, vbo, ibo, wibo, sbo, triCount: 0, wireCount: 0 };
+        setError(null);
+        setGlEpoch((v) => v + 1);
+        requestRender();
+      } catch (e) {
+        setError("خطا در راه‌اندازی نمای سه‌بعدی: " + (e as Error).message);
+      }
+    };
+    initGl();
     const lost = (e: Event) => {
       e.preventDefault();
       glRef.current = null;
-      setError("ارتباط با کارت گرافیک قطع شد. پنل را ببندید و دوباره باز کنید.");
+      setError("ارتباط با کارت گرافیک موقتاً قطع شد؛ در حال بازیابی خودکار...");
+    };
+    const restored = () => {
+      initGl();
     };
     canvas.addEventListener("webglcontextlost", lost);
+    canvas.addEventListener("webglcontextrestored", restored);
     return () => {
       canvas.removeEventListener("webglcontextlost", lost);
+      canvas.removeEventListener("webglcontextrestored", restored);
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
       animRef.current = null;
@@ -663,7 +681,7 @@ function Lathe3DViewInner({ projectId = "default", sketch, blankD, blankL, split
     st.triCount = mesh.triCount;
     st.wireCount = mesh.wire.length;
     requestRender();
-  }, [mesh, requestRender, error]);
+  }, [mesh, requestRender, error, glEpoch]);
 
   /* ---- ابعاد خام عوض شد: صحنه و دوربین بازنشانی ---- */
   useEffect(() => {
