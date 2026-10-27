@@ -296,7 +296,7 @@ export function cloneSeg(s: SketchSeg, dz = 0, dr = 0): SketchSeg {
 
 /* ---------------- اسنپ هوشمند ---------------- */
 
-export type SnapType = "end" | "mid" | "center" | "ctrl" | "cross" | "axis" | "grid";
+export type SnapType = "end" | "mid" | "center" | "ctrl" | "cross" | "axis" | "grid" | "split";
 
 export interface SnapPoint {
   p: SPoint;
@@ -313,6 +313,7 @@ export const SNAP_FA: Record<SnapType, string> = {
   cross: "تقاطع",
   axis: "محور",
   grid: "شبکه",
+  split: "نقطهٔ Split",
 };
 
 /** نقاط مهم هندسی برای چسبندگی (به‌جز شبکه که پویا محاسبه می‌شود) */

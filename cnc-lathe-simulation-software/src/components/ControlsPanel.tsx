@@ -619,6 +619,8 @@ function ControlsPanel({
           <Num label="برداشت اضافه از هر طرف" unit="mm" value={params.extraCutEachSide} min={0} max={10} step={0.5} onChange={(v) => onParams({ extraCutEachSide: Math.min(10, Math.max(0, v)) })} />
 
           <Num label="فاصله امن" unit="mm" value={params.safety} min={1} max={20} step={1} onChange={(v) => onParams({ safety: v })} />
+          <Num label="جابجایی جی‌کد محور X" unit="mm" value={params.gcodeShiftX} step={0.5} onChange={(v) => onParams({ gcodeShiftX: v })} />
+          <Num label="جابجایی جی‌کد محور Y" unit="mm" value={params.gcodeShiftY} step={0.5} onChange={(v) => onParams({ gcodeShiftY: v })} />
         </div>
         <div className="mt-2 rounded-md border border-edge bg-panel2 p-2.5">
           <label className="flex cursor-pointer items-center gap-2 text-[10.5px] font-semibold text-ink">
@@ -1185,13 +1187,18 @@ function Num({
   /* اگر min/max داده نشده باشد، عدد هیچ محدودیتی ندارد */
   const clamp = (v: number) => {
     let r = Math.round(v * 100) / 100;
+    if (Object.is(r, -0)) r = 0;
     if (min !== undefined) r = Math.max(min, r);
     if (max !== undefined) r = Math.min(max, r);
     return r;
   };
 
   const commit = (raw: string) => {
-    const v = parseFloat(raw.replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))));
+    const normalized = raw
+      .replace(/[−–—]/g, "-")
+      .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+      .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)));
+    const v = parseFloat(normalized);
     if (!Number.isNaN(v) && Number.isFinite(v)) {
       onChange(clamp(v));
     }
@@ -1203,7 +1210,7 @@ function Num({
       <div className="relative">
         <input
           type="text"
-          inputMode="decimal"
+          inputMode={min !== undefined && min >= 0 ? "decimal" : undefined}
           className="field-input pl-12"
           value={text}
           dir="ltr"

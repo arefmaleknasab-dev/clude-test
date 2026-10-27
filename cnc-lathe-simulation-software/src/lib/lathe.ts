@@ -130,6 +130,8 @@ export interface Params {
   bottomRoughOverlap: number; // همپوشانی خشن شعاعی و کف‌تراشی
   bottomOffsetClearance: number; // فاصله کف‌تراشی در +X از بلندترین قله آفست داخل
   extraCutEachSide: number; // برداشت اضافه گردکردن/خشن شعاعی بیرون از هر سر خام
+  gcodeShiftX: number; // جابه‌جایی سراسری کل جی‌کد در راستای محور X (طولی)
+  gcodeShiftY: number; // جابه‌جایی سراسری کل جی‌کد در راستای محور Y (شعاعی)
   smartTransferEnabled: boolean; // جابه‌جایی مستطیلی G0 و برش معکوس خطوط در بازه زاویه
   smartTransferAngleMin: number; // حد پایین زاویه خط نسبت به محور X طراحی
   smartTransferAngleMax: number; // حد بالای زاویه خط نسبت به محور X طراحی
@@ -366,6 +368,8 @@ export const DEFAULT_PARAMS: Params = {
   bottomRoughOverlap: 3,
   bottomOffsetClearance: 0,
   extraCutEachSide: 2,
+  gcodeShiftX: 0,
+  gcodeShiftY: 0,
   smartTransferEnabled: false,
   smartTransferAngleMin: 20,
   smartTransferAngleMax: 80,
@@ -404,7 +408,7 @@ export function normalizeParams(
     holder2: { ...DEFAULT_HOLDER2 },
   };
   if (!raw) return base;
-  const keys: (keyof Params)[] = ["blankD", "blankL", "doc", "innerDoc", "offsetDist", "innerOffsetDist", "innerStartClearance", "innerEndTravel", "bottomRoughOverlap", "bottomOffsetClearance", "extraCutEachSide", "smartTransferEnabled", "smartTransferAngleMin", "smartTransferAngleMax", "feedRough", "feedFinish", "rpm", "safety", "lineNumbers", "ramp", "safeBottomInnerLink", "simpleFeed", "spreadG0"];
+  const keys: (keyof Params)[] = ["blankD", "blankL", "doc", "innerDoc", "offsetDist", "innerOffsetDist", "innerStartClearance", "innerEndTravel", "bottomRoughOverlap", "bottomOffsetClearance", "extraCutEachSide", "gcodeShiftX", "gcodeShiftY", "smartTransferEnabled", "smartTransferAngleMin", "smartTransferAngleMax", "feedRough", "feedFinish", "rpm", "safety", "lineNumbers", "ramp", "safeBottomInnerLink", "simpleFeed", "spreadG0"];
   for (const k of keys) {
     const v = raw[k];
     if (typeof v === "number" && Number.isFinite(v)) (base[k] as number) = v as number;
@@ -2534,6 +2538,8 @@ export function generate(pts: PPoint[], p: Params, innerPts?: PPoint[], outerFin
      فقط گروه‌های چندعضوی باز می‌شوند (تک‌خط‌ها سر جای واقعی می‌مانند).
      فیدرها، حرکات شعاعی/مورب، پله‌های پل و حرکات داخل حفره دست‌نخورده‌اند. */
   if (p.spreadG0) {
+    const sx = p.gcodeShiftX ?? 0;
+    const sy = p.gcodeShiftY ?? 0;
     const groups = new Map<string, number[]>();
     segs.forEach((s, i) => {
       if (s.motion !== 0) return;
@@ -2542,7 +2548,7 @@ export function generate(pts: PPoint[], p: Params, innerPts?: PPoint[], outerFin
       if (Math.hypot(b.u - a.u, b.v - a.v) < 1e-9) return; // صفر
       if (Math.abs(b.u - a.u) < 1e-9) return; // شعاعی/مورب: نه
       if (Math.abs(b.v - a.v) >= 1e-9) return; // فقط طولیِ محوری
-      if (s.holder === 2 && a.v < retractX - p.holder2.yOff - 1e-9) return; // حفره: نه
+      if (s.holder === 2 && a.v < retractX - p.holder2.yOff + sy - 1e-9) return; // حفره: نه
       const key = b.v.toFixed(2);
       const arr = groups.get(key);
       if (arr) arr.push(i);
@@ -2557,7 +2563,7 @@ export function generate(pts: PPoint[], p: Params, innerPts?: PPoint[], outerFin
           const pa = machineUV(sg.z1, sg.x1, sg.holder, p);
           /* کریدور ورود عملیات داخل اکنون روی قطر صفر است؛ مقدار قدیمی 1.2
              باعث می‌شد حرکتِ واقعی محور، اشتباهاً از مسیر امن کنار گذاشته شود. */
-          const funnelV = 0 - (sg.holder === 2 ? p.holder2.yOff : 0);
+          const funnelV = 0 - (sg.holder === 2 ? p.holder2.yOff : 0) + sy;
           if (Math.abs(pa.v - funnelV) >= 1.0) sg.fan = 3;
         }
         continue;
@@ -2580,7 +2586,7 @@ export function generate(pts: PPoint[], p: Params, innerPts?: PPoint[], outerFin
       const b = machineUV(sg.z2, sg.x2, sg.holder, p);
       if (Math.hypot(b.u - a.u, b.v - a.v) < 1e-9) return;
       if (Math.abs(b.u - a.u) >= 1e-9) return;
-      const faceU = p.blankL + (sg.holder === 2 ? p.holder2.xOff : 0);
+      const faceU = p.blankL + (sg.holder === 2 ? p.holder2.xOff : 0) + sx;
       if (a.u < faceU - 1e-9) return;
       /* استثنای پله ورود/خروج (درخواست کاربر): شعاعیِ زنجیره ورود/خروج
          (فیدر در فاصله ≤۲ سگمنت: پلانج/رترکت مستقیم یا کریدور دهانه پشت
@@ -2681,8 +2687,10 @@ function normFeed(sg: Seg, p: Params): number {
    u = محور طولی (modal X / std Z)، v = محور قطری (modal Y / std X) */
 /* خروجی شعاعی: Y = شعاع (مثل پیش‌نمایش و DXF)؛ آفست‌ها واحد ماشین‌اند و دست نمی‌خورند */
 export function machineUV(zw: number, xw: number, holder: 1 | 2, p: Params): { u: number; v: number } {
-  if (holder === 2) return { u: zw + p.holder2.xOff, v: xw / 2 - p.holder2.yOff };
-  return { u: zw, v: xw / 2 };
+  const sx = p.gcodeShiftX ?? 0;
+  const sy = p.gcodeShiftY ?? 0;
+  if (holder === 2) return { u: zw + p.holder2.xOff + sx, v: xw / 2 - p.holder2.yOff + sy };
+  return { u: zw + sx, v: xw / 2 + sy };
 }
 
 /* مختصات اجراشده یک سر سگمنت = مختصات ماشین + گسترش G0 (اگر روشن باشد).
@@ -3454,6 +3462,8 @@ export interface EditBuf {
   off: Record<number, OffPatch>; // ویرایش مستقل منحنی‌های افست (کلید = id قطعهٔ پروفایل)
   /** آفست کاری H2؛ تا زمان «تأیید» پیش‌نویس است و Params/فایل را تغییر نمی‌دهد. */
   holder2: Holder2State;
+  /** نقطه Split کاری در ویرایش مسیر؛ تا زمان «تأیید» پیش‌نویس است. */
+  split?: SplitState;
   /** انتخاب Segment جزئی از تاریخچهٔ اصلی است تا Undo/Redo آن را نیز بازیابی کند. */
   selLines: number[];
   activeLine: number | null;
@@ -3698,8 +3708,10 @@ export function deriveGcodeOvr(verts: EVert[], lines: ELine[], baseSegs: Seg[], 
       const g = groups.get(l.key); if (g) g.push(l); else groups.set(l.key, [l]);
     }
   }
+  const sx = p.gcodeShiftX ?? 0;
+  const sy = p.gcodeShiftY ?? 0;
   const toWorld = (z: number, x: number, sg: Seg) => {
-    const u = z - (sg.fanU ?? 0), v = x / 2 - (sg.fan ?? 0);
+    const u = z - (sg.fanU ?? 0) - sx, v = x / 2 - (sg.fan ?? 0) - sy;
     return sg.holder === 2 ? { z: u - p.holder2.xOff, x: 2 * (v + p.holder2.yOff) } : { z: u, x: 2 * v };
   };
   for (const [key, group] of groups) {

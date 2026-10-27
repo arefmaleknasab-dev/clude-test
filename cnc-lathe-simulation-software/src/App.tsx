@@ -12,7 +12,7 @@ import PreferencesDialog, { DEFAULT_PREFERENCES, type AppPreferences } from "./c
 import { IconArrowLeft, IconArrowRight, IconCheck, IconCode, IconCube, IconDownload, IconLayers, IconPen, IconSim, IconSettings, IconSpindle, IconWarn } from "./components/icons";
 import { buildDxf } from "./lib/dxf";
 import { MIN_HOLDER2_OFFSET, PRESETS, STRATEGIES, applyGcodeOvr, deriveGcodeOvr, generate, makeOps, normalizeParams, presetPoints, seedGcodeEdit, translateHolder2Edit } from "./lib/lathe";
-import type { EditBuf, ELine, GcodeOvrMap, GenResult, Holder2State, OpType, Params, PPoint, Preset } from "./lib/lathe";
+import type { EditBuf, ELine, GcodeOvrMap, GenResult, Holder2State, OpType, Params, PPoint, Preset, SplitState } from "./lib/lathe";
 import type { SketchSeg } from "./lib/sketch";
 import { autoSplitPoint, branchPathPoints, branchPoints, chainPolyline, flattenSketch, normalizeSketch, orderChain, segMid, sketchFromPoints, sketchFromWall, splitChainAt } from "./lib/sketch";
 import { cn } from "./utils/cn";
@@ -235,6 +235,18 @@ export default function App() {
       } : {}),
       shortcuts: { ...DEFAULT_PREFERENCES.shortcuts, ...(saved?.shortcuts ?? {}) },
       operationFeeds: { ...DEFAULT_PREFERENCES.operationFeeds, ...(saved?.operationFeeds ?? {}) },
+      defaultGcodeShiftX: typeof saved?.defaultGcodeShiftX === "number" && Number.isFinite(saved.defaultGcodeShiftX)
+        ? saved.defaultGcodeShiftX
+        : DEFAULT_PREFERENCES.defaultGcodeShiftX,
+      defaultGcodeShiftY: typeof saved?.defaultGcodeShiftY === "number" && Number.isFinite(saved.defaultGcodeShiftY)
+        ? saved.defaultGcodeShiftY
+        : DEFAULT_PREFERENCES.defaultGcodeShiftY,
+      defaultHolder2XOff: typeof saved?.defaultHolder2XOff === "number" && Number.isFinite(saved.defaultHolder2XOff)
+        ? Math.max(MIN_HOLDER2_OFFSET, saved.defaultHolder2XOff)
+        : DEFAULT_PREFERENCES.defaultHolder2XOff,
+      defaultHolder2YOff: typeof saved?.defaultHolder2YOff === "number" && Number.isFinite(saved.defaultHolder2YOff)
+        ? Math.max(MIN_HOLDER2_OFFSET, saved.defaultHolder2YOff)
+        : DEFAULT_PREFERENCES.defaultHolder2YOff,
     };
   });
   const [sketch, setSketch] = useState<SketchSeg[]>(() => {
@@ -250,7 +262,19 @@ export default function App() {
      هندسه همان فریم لازم است، نه همه وضعیت‌های میانی که هرگز نمایش داده نمی‌شوند. */
   const generationFrameRef = useRef<number | null>(null);
   const pendingGenerationSketchRef = useRef<SketchSeg[] | null>(null);
-  const [params, setParams] = useState<Params>(() => normalizeParams(SAVED?.params, IS_LEGACY));
+  const [params, setParams] = useState<Params>(() => {
+    const base = normalizeParams(SAVED?.params, IS_LEGACY);
+    /* در هر بار باز شدن نرم‌افزار، مقادیر پیش‌فرض جابجایی جی‌کد و افست هلدر دوم از Preferences اعمال می‌شوند. */
+    return {
+      ...base,
+      gcodeShiftX: preferences.defaultGcodeShiftX,
+      gcodeShiftY: preferences.defaultGcodeShiftY,
+      holder2: {
+        xOff: Math.max(MIN_HOLDER2_OFFSET, preferences.defaultHolder2XOff),
+        yOff: Math.max(MIN_HOLDER2_OFFSET, preferences.defaultHolder2YOff),
+      },
+    };
+  });
   const [settings, setSettings] = useState<EdSettings>(() => {
     const s = SAVED?.settings;
     const legacyShowBore = (s as (Partial<EdSettings> & { showBore?: boolean }) | undefined)?.showBore;
@@ -312,7 +336,14 @@ export default function App() {
   const initialProjectId = useRef(`project-${Date.now()}`);
   const [activeProjectId, setActiveProjectId] = useState(initialProjectId.current);
   const [projectTabs, setProjectTabs] = useState<ProjectTab[]>([{ id: initialProjectId.current, name: PRESETS.find(p=>p.id===activePreset)?.name ?? "پروژه بدون نام", sketch, params, gcodeOvr: normGcodeOvr(SAVED?.gcodeOvr), referenceImages, activePreset, savedSnapshot: null, past: [], future: [] }]);
-  const [recentProjects, setRecentProjects] = useState<ProjectTab[]>(() => { try { return JSON.parse(localStorage.getItem("kharraat-recent-projects") || "[]") as ProjectTab[]; } catch { return []; } });
+  const [recentProjects, setRecentProjects] = useState<ProjectTab[]>(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem("kharraat-recent-projects") || "[]") as ProjectTab[];
+      return parsed.map((tab) => ({ ...tab, params: normalizeParams(tab.params, false) }));
+    } catch {
+      return [];
+    }
+  });
   const [welcomeOpen, setWelcomeOpen] = useState(true);
   const [confirmClearRecent, setConfirmClearRecent] = useState(false);
   const initialProjectSnapshot = useRef(projectSnapshot(sketch, params, normGcodeOvr(SAVED?.gcodeOvr), referenceImages));
@@ -413,7 +444,20 @@ export default function App() {
     const diameter=Number(newProjectDraft.diameter),length=Number(newProjectDraft.length),name=newProjectDraft.name.trim();
     if(!(diameter>=0.01&&diameter<=10000)||!(length>=0.01&&length<=10000)){showToast("قطر و طول قطعه باید بین ۰٫۰۱ تا ۱۰۰۰۰ میلی‌متر باشند","warn");return;}
     const id=`project-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
-    const nextParams=normalizeParams({...params,blankD:diameter,blankL:length,split:{...params.split,enabled:false},innerZoneOrder:[],innerZoneBounds:[]},false);
+    const nextParams=normalizeParams({
+      ...params,
+      blankD:diameter,
+      blankL:length,
+      gcodeShiftX:preferences.defaultGcodeShiftX,
+      gcodeShiftY:preferences.defaultGcodeShiftY,
+      holder2:{
+        xOff:Math.max(MIN_HOLDER2_OFFSET,preferences.defaultHolder2XOff),
+        yOff:Math.max(MIN_HOLDER2_OFFSET,preferences.defaultHolder2YOff),
+      },
+      split:{...params.split,enabled:false},
+      innerZoneOrder:[],
+      innerZoneBounds:[],
+    },false);
     /* پروژه تازه در لحظه ایجاد وضعیت تمیز دارد؛ هشدار فقط پس از نخستین تغییر
        واقعی نسبت به همین Snapshot نمایش داده می‌شود. */
     const initialSnapshot=projectSnapshot([],nextParams,{},[]);
@@ -482,8 +526,8 @@ export default function App() {
   const editChanges = useMemo(() => {
     if (!editOpen || !editBuf) return 0;
     /* Pan، Zoom، Scroll و انتخاب‌ها جزو هندسه پیش‌نویس نیستند. Dirty فقط از
-       رأس‌ها، خطوط، Sketch و آفست هلدر محاسبه می‌شود و با Seed لحظه ورود سنجیده می‌شود. */
-    const geometry=JSON.stringify({verts:editBuf.verts,lines:editBuf.lines,sketch:editBuf.sketch,holder2:editBuf.holder2});
+       رأس‌ها، خطوط، Sketch، Split و آفست هلدر محاسبه می‌شود و با Seed لحظه ورود سنجیده می‌شود. */
+    const geometry=JSON.stringify({verts:editBuf.verts,lines:editBuf.lines,sketch:editBuf.sketch,holder2:editBuf.holder2,split:editBuf.split});
     return geometry===editBaselineRef.current?0:1;
   }, [editOpen, editBuf]);
 
@@ -497,9 +541,12 @@ export default function App() {
     pendingParamRebaseRef.current = null;
     setEditBuf((buf) => {
       if (!buf) return buf;
+      const wasClean = JSON.stringify({ verts: buf.verts, lines: buf.lines, sketch: buf.sketch, holder2: buf.holder2, split: buf.split }) === editBaselineRef.current;
       /* آفست H2 در حالت ادیت بخشی از پیش‌نویس است. هنگام تغییر پارامترهای دیگر
          نباید به override هندسی تبدیل یا با مقدار تأییدشده بازنویسی شود. */
       const draftHolder2 = buf.holder2 ?? pending.params.holder2;
+      const splitChangedExternally = JSON.stringify(params.split) !== JSON.stringify(pending.params.split);
+      const nextSplit = splitChangedExternally ? { ...params.split } : (buf.split ?? { ...params.split });
       const oldDraftParams: Params = { ...pending.params, holder2: draftHolder2 };
       const newDraftParams: Params = { ...params, holder2: draftHolder2 };
       const draftOvr = deriveGcodeOvr(buf.verts, buf.lines, pending.genBase.segs, pending.gcodeOvr, oldDraftParams);
@@ -526,7 +573,11 @@ export default function App() {
         if (selectedTokens.has(token)) selLines.push(line.id);
         if (token === activeToken) activeLine = line.id;
       }
-      return { ...buf, verts: seed.verts, lines: seed.lines, selLines, activeLine };
+      const nextBuf: EditBuf = { ...buf, verts: seed.verts, lines: seed.lines, selLines, activeLine, split: nextSplit };
+      if (wasClean) {
+        editBaselineRef.current = JSON.stringify({ verts: nextBuf.verts, lines: nextBuf.lines, sketch: nextBuf.sketch, holder2: nextBuf.holder2, split: nextBuf.split });
+      }
+      return nextBuf;
     });
     setHistVer((v) => v + 1);
   }, [genBase, params]);
@@ -537,8 +588,8 @@ export default function App() {
     if (!presetReseedRef.current) return;
     presetReseedRef.current = false;
     const seed = seedGcodeEdit(gen.segs, params);
-    const nextEdit: EditBuf = { verts: seed.verts, lines: seed.lines, sketch, off: {}, holder2: { ...params.holder2 }, selLines: [], activeLine: null };
-    editBaselineRef.current = JSON.stringify({ verts: nextEdit.verts, lines: nextEdit.lines, sketch: nextEdit.sketch, holder2: nextEdit.holder2 });
+    const nextEdit: EditBuf = { verts: seed.verts, lines: seed.lines, sketch, off: {}, holder2: { ...params.holder2 }, split: { ...params.split }, selLines: [], activeLine: null };
+    editBaselineRef.current = JSON.stringify({ verts: nextEdit.verts, lines: nextEdit.lines, sketch: nextEdit.sketch, holder2: nextEdit.holder2, split: nextEdit.split });
     setEditBuf(nextEdit);
     commitRef.current = null;
     setHistVer((v) => v + 1);
@@ -694,8 +745,8 @@ export default function App() {
     }
     pushPast(snap());
     const seed = seedGcodeEdit(gen.segs, params);
-    const nextEdit: EditBuf = { verts: seed.verts, lines: seed.lines, sketch, off: {}, holder2: { ...params.holder2 }, selLines: [], activeLine: null };
-    editBaselineRef.current = JSON.stringify({ verts: nextEdit.verts, lines: nextEdit.lines, sketch: nextEdit.sketch, holder2: nextEdit.holder2 });
+    const nextEdit: EditBuf = { verts: seed.verts, lines: seed.lines, sketch, off: {}, holder2: { ...params.holder2 }, split: { ...params.split }, selLines: [], activeLine: null };
+    editBaselineRef.current = JSON.stringify({ verts: nextEdit.verts, lines: nextEdit.lines, sketch: nextEdit.sketch, holder2: nextEdit.holder2, split: nextEdit.split });
     setEditBuf(nextEdit);
     setEditOpen(true);
     setHistVer((v) => v + 1);
@@ -729,26 +780,36 @@ export default function App() {
     const eb = editBufRef.current;
     if (!eb) return;
     const draftHolder2 = eb.holder2 ?? params.holder2;
+    const draftSplit = eb.split ?? params.split;
     const draftParams: Params = { ...params, holder2: draftHolder2 };
     const holder2Changed =
       draftHolder2.xOff !== params.holder2.xOff || draftHolder2.yOff !== params.holder2.yOff;
+    const splitChanged =
+      draftSplit.enabled !== params.split.enabled ||
+      draftSplit.z !== params.split.z ||
+      draftSplit.r !== params.split.r ||
+      draftSplit.swapped !== params.split.swapped;
     /* آفست H2 روی هندسهٔ ورود امن مولد نیز اثر دارد (گوشهٔ افقی→عمودی).
        مقایسه با پایهٔ قدیمی آن گوشه را اشتباهاً override می‌کرد؛ پایهٔ پیش‌نویس
        دقیقاً با آفست زنده ساخته می‌شود تا جابه‌جایی خالص، override نسازد. */
     const draftGenBase = holder2Changed ? generate(points, { ...draftParams, rpm: preferences.spindleSpeed, format: preferences.gcodeFormat, lineNumbers: preferences.sequenceNumbers, ramp: preferences.continuousPaths, safeBottomInnerLink: preferences.safeBottomInnerLink, innerBoundaryRoutingMode: preferences.innerBoundaryRoutingMode, simpleFeed: preferences.optimizeFeeds, spreadG0: preferences.spreadRapid, feedByKind: { ...preferences.operationFeeds, roughz: preferences.operationFeeds.rough, copy: preferences.operationFeeds.rough } }, innerPoints, outerFinishPoints) : genBase;
     const next = deriveGcodeOvr(eb.verts, eb.lines, draftGenBase.segs, gcodeOvr, draftParams);
     const sketchChanged = eb.sketch !== sketch;
-    if (!sketchChanged && !holder2Changed && JSON.stringify(next) === JSON.stringify(gcodeOvr)) {
+    if (!sketchChanged && !holder2Changed && !splitChanged && JSON.stringify(next) === JSON.stringify(gcodeOvr)) {
       showToast("تغییری برای ثبت نیست", "warn");
       return;
     }
     pushPast(snap());
     setGcodeOvr(next);
-    if (holder2Changed) {
+    if (holder2Changed || splitChanged) {
       /* عمداً از onParamsCb عبور نمی‌کند: بافر از قبل با همین آفست در فضای
          ماشین جابه‌جا شده و rebase دوباره باعث دوبرابرشدن حرکت می‌شود. */
       pendingParamRebaseRef.current = null;
-      setParams((p) => ({ ...p, holder2: { ...draftHolder2 } }));
+      setParams((p) => ({
+        ...p,
+        ...(holder2Changed ? { holder2: { ...draftHolder2 } } : {}),
+        ...(splitChanged ? { split: { ...draftSplit } } : {}),
+      }));
     }
     if (sketchChanged) {
       setActivePreset(null);
@@ -758,7 +819,7 @@ export default function App() {
     /* تأیید، وضعیت فعلی را به Baseline جدید تبدیل می‌کند. کپی سطحی EditBuf
        وابستگی useMemo را نیز تغییر می‌دهد تا editChanges همان لحظه صفر شود و
        خروج بعد از تأیید، هشدار تغییرات تأییدنشده نشان ندهد. */
-    editBaselineRef.current = JSON.stringify({ verts: eb.verts, lines: eb.lines, sketch: eb.sketch, holder2: eb.holder2 });
+    editBaselineRef.current = JSON.stringify({ verts: eb.verts, lines: eb.lines, sketch: eb.sketch, holder2: eb.holder2, split: eb.split });
     setEditBuf({ ...eb });
     setHistVer((v) => v + 1);
     showToast(holder2Changed
@@ -1081,21 +1142,32 @@ export default function App() {
   }, [swapPanels]);
 
   /* تغییر اسکچ — با commit=false تغییر زنده (کشیدن) و با true ثبت در تاریخچه */
-  const onSketchChange = useCallback((next: SketchSeg[], commit: boolean) => {
+  const onSketchChange = useCallback((next: SketchSeg[], commit: boolean, splitPatch?: SplitState) => {
     /* در حالت ادیت، ویرایش پروفایل روی کپیِ کاریِ بافر می‌نشیند (فایل تا «تأیید» عوض نمی‌شود) */
     if (editOpenRef.current && editBufRef.current) {
       if (!commit && !commitRef.current) commitRef.current = snap();
-      onEditBuf({ ...editBufRef.current, sketch: next }, commit);
+      onEditBuf({ ...editBufRef.current, sketch: next, ...(splitPatch ? { split: splitPatch } : {}) }, commit);
       return;
     }
     if (commit) {
-      pushPast(commitRef.current ?? { sketch, gcodeOvr, editBuf: null, editOpen: false, params });
+      pushPast(commitRef.current ?? snap());
       commitRef.current = null;
       setActivePreset(null);
     } else if (!commitRef.current) {
-      commitRef.current = { sketch, gcodeOvr, editBuf: null, editOpen: false, params }; // وضعیت پیش از شروع کشیدن
+      commitRef.current = snap(); // وضعیت پیش از شروع کشیدن
+    } else if (
+      JSON.stringify(next) === JSON.stringify(commitRef.current.sketch) &&
+      JSON.stringify(splitPatch ?? stateRef.current.params.split) === JSON.stringify(commitRef.current.params.split)
+    ) {
+      commitRef.current = null;
     }
     setSketch(next);
+    if (splitPatch) {
+      if (editBufRef.current && !pendingParamRebaseRef.current) {
+        pendingParamRebaseRef.current = { genBase, params: stateRef.current.params, gcodeOvr: stateRef.current.gcodeOvr };
+      }
+      setParams((p) => ({ ...p, split: splitPatch }));
+    }
     if (commit) {
       if (generationFrameRef.current != null) cancelAnimationFrame(generationFrameRef.current);
       generationFrameRef.current = null;pendingGenerationSketchRef.current = null;
@@ -1111,11 +1183,79 @@ export default function App() {
     /* اگر پیش‌نویس پنهان وجود دارد، اسکچ جدید را نیز در آن همگام نگه می‌داریم
        تا بازگشت و تأیید بعدی، تغییرات تازهٔ طراحی را بازنویسی نکند. */
     if (editBufRef.current && !editOpenRef.current) {
-      setEditBuf({ ...editBufRef.current, sketch: next });
+      setEditBuf({ ...editBufRef.current, sketch: next, ...(splitPatch ? { split: splitPatch } : {}) });
     }
     setHistVer((v) => v + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sketch, gcodeOvr, allProfileLayersHidden]);
+  }, [sketch, gcodeOvr, genBase, allProfileLayersHidden]);
+
+  const onSplitChange = useCallback((nextSplit: SplitState, commit = true) => {
+    if (editOpenRef.current && editBufRef.current) {
+      onEditBuf({ ...editBufRef.current, split: nextSplit }, commit);
+      return;
+    }
+    if (!commit) {
+      if (!commitRef.current) {
+        commitRef.current = snap();
+      } else if (JSON.stringify(nextSplit) === JSON.stringify(commitRef.current.params.split)) {
+        commitRef.current = null;
+      }
+      if (editBufRef.current && !pendingParamRebaseRef.current) {
+        pendingParamRebaseRef.current = { genBase, params: stateRef.current.params, gcodeOvr: stateRef.current.gcodeOvr };
+      }
+      setParams((p) => ({ ...p, split: nextSplit }));
+      return;
+    }
+    if (commitRef.current) {
+      const pend = commitRef.current;
+      commitRef.current = null;
+      const before = pend.params.split;
+      const changed =
+        before.enabled !== nextSplit.enabled ||
+        before.z !== nextSplit.z ||
+        before.r !== nextSplit.r ||
+        before.swapped !== nextSplit.swapped;
+      if (changed) {
+        pushPast(pend);
+        setHistVer((v) => v + 1);
+      }
+      if (editBufRef.current && !pendingParamRebaseRef.current) {
+        pendingParamRebaseRef.current = { genBase, params: stateRef.current.params, gcodeOvr: stateRef.current.gcodeOvr };
+      }
+      setParams((p) => ({ ...p, split: nextSplit }));
+      return;
+    }
+    onParamsCb({ split: nextSplit });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [genBase, onParamsCb]);
+
+  const preferencesRef = useRef(preferences);
+  preferencesRef.current = preferences;
+  const onPreferencesChange = useCallback((next: AppPreferences) => {
+    const prev = preferencesRef.current;
+    setPreferences(next);
+    const patch: Partial<Params> = {};
+    if (next.defaultGcodeShiftX !== prev.defaultGcodeShiftX && stateRef.current.params.gcodeShiftX === prev.defaultGcodeShiftX) {
+      patch.gcodeShiftX = next.defaultGcodeShiftX;
+    }
+    if (next.defaultGcodeShiftY !== prev.defaultGcodeShiftY && stateRef.current.params.gcodeShiftY === prev.defaultGcodeShiftY) {
+      patch.gcodeShiftY = next.defaultGcodeShiftY;
+    }
+    if (Object.keys(patch).length > 0) {
+      onParamsCb(patch);
+    }
+    const nextH2X = Math.max(MIN_HOLDER2_OFFSET, next.defaultHolder2XOff);
+    const nextH2Y = Math.max(MIN_HOLDER2_OFFSET, next.defaultHolder2YOff);
+    const curH2 = editOpenRef.current && editBufRef.current ? editBufRef.current.holder2 : stateRef.current.params.holder2;
+    const syncH2X = next.defaultHolder2XOff !== prev.defaultHolder2XOff && curH2.xOff === Math.max(MIN_HOLDER2_OFFSET, prev.defaultHolder2XOff);
+    const syncH2Y = next.defaultHolder2YOff !== prev.defaultHolder2YOff && curH2.yOff === Math.max(MIN_HOLDER2_OFFSET, prev.defaultHolder2YOff);
+    if (syncH2X || syncH2Y) {
+      onHolder2SettingsCb({
+        xOff: syncH2X ? nextH2X : curH2.xOff,
+        yOff: syncH2Y ? nextH2Y : curH2.yOff,
+      });
+    }
+  }, [onParamsCb, onHolder2SettingsCb]);
 
   const applyPreset = useCallback((p: Preset) => {
     setWelcomeOpen(false);
@@ -1153,14 +1293,20 @@ export default function App() {
         blankL: p.blankL,
         /* همهٔ پیش‌تنظیم‌ها با مقطع خام مربعی شروع می‌شوند. */
         blankShape: p.shape,
+        gcodeShiftX: preferences.defaultGcodeShiftX,
+        gcodeShiftY: preferences.defaultGcodeShiftY,
+        holder2: {
+          xOff: Math.max(MIN_HOLDER2_OFFSET, preferences.defaultHolder2XOff),
+          yOff: Math.max(MIN_HOLDER2_OFFSET, preferences.defaultHolder2YOff),
+        },
       };
       if (p.strategy) {
         const st = STRATEGIES.find((s) => s.id === p.strategy);
         if (st) next.ops = makeOps(st.types);
         if (p.strategy === "bowl") {
           next.holder2 = {
-            xOff: Math.max(MIN_HOLDER2_OFFSET, prev.holder2.xOff),
-            yOff: Math.max(MIN_HOLDER2_OFFSET, prev.holder2.yOff),
+            xOff: Math.max(MIN_HOLDER2_OFFSET, next.holder2.xOff),
+            yOff: Math.max(MIN_HOLDER2_OFFSET, next.holder2.yOff),
           };
         }
       }
@@ -1189,7 +1335,7 @@ export default function App() {
           ? `پیش‌تنظیم «${p.name}» + استراتژی داخل/خارج فعال شد`
           : `پیش‌تنظیم «${p.name}» اعمال شد`
     );
-  }, [showToast, params, activeProjectId]);
+  }, [showToast, params, activeProjectId, preferences]);
 
   /* قرار دادن خودکار نقطه Split روی لبه (بیشترین X زنجیره) */
   const autoSplit = useCallback(() => {
@@ -1427,7 +1573,7 @@ export default function App() {
     <div className="flex h-full flex-col" onDragOver={e=>{if(Array.from(e.dataTransfer.items).some(i=>i.kind==="file")){e.preventDefault();e.dataTransfer.dropEffect="copy";}}} onDrop={e=>{const file=e.dataTransfer.files[0];if(file && (file.name.toLowerCase().endsWith(".kharraat")||file.type==="application/json")){e.preventDefault();void openProjectFile(file);}}}>
       <input ref={projectInputRef} type="file" accept=".kharraat,application/json" className="hidden" onChange={e=>{const file=e.target.files?.[0];if(file)void openProjectFile(file);e.currentTarget.value="";}} />
       {showAiImport && <AIImportDialog onClose={() => setShowAiImport(false)} onImport={importAi} />}
-      {showPreferences && <PreferencesDialog value={preferences} snapTolerance={settings.snapTolerancePx} onChange={setPreferences} onSnapTolerance={(snapTolerancePx) => setSettings((s) => ({ ...s, snapTolerancePx }))} onClose={() => setShowPreferences(false)} />}
+      {showPreferences && <PreferencesDialog value={preferences} snapTolerance={settings.snapTolerancePx} onChange={onPreferencesChange} onSnapTolerance={(snapTolerancePx) => setSettings((s) => ({ ...s, snapTolerancePx }))} onClose={() => setShowPreferences(false)} />}
       {(welcomeOpen||projectTabs.length===0)&&<div className="fixed inset-0 z-[100] grid place-items-center overflow-hidden bg-[#0b0a08] p-8" dir="rtl"><div className="pointer-events-none absolute inset-0 opacity-80" style={{backgroundImage:"radial-gradient(circle at 18% 20%, rgba(227,169,78,.18), transparent 28%), radial-gradient(circle at 82% 78%, rgba(69,179,148,.13), transparent 30%), linear-gradient(rgba(227,169,78,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(227,169,78,.045) 1px, transparent 1px)",backgroundSize:"100% 100%, 100% 100%, 42px 42px, 42px 42px"}}/><div className="pointer-events-none absolute left-1/2 top-1/2 h-[min(72vw,760px)] w-[min(72vw,760px)] -translate-x-1/2 -translate-y-1/2 rounded-full border border-brass/10 shadow-[0_0_0_34px_rgba(227,169,78,.025),0_0_0_70px_rgba(69,179,148,.025),0_0_100px_rgba(0,0,0,.8)]"/><div className="pointer-events-none absolute inset-0 opacity-20" style={{backgroundImage:"repeating-conic-gradient(from 12deg at 50% 50%, rgba(227,169,78,.08) 0deg, transparent 8deg, rgba(69,179,148,.05) 16deg, transparent 26deg)"}}/><div className="relative z-10 w-full max-w-5xl"><h1 className="text-2xl font-bold text-brass2">خراط‌کد</h1><p className="mt-1 text-sm text-dim">مدیریت پروژه‌ها</p><div className="mt-8 grid gap-5 md:grid-cols-3"><section className="rounded-xl border border-edge2 bg-panel p-5"><div className="flex items-center justify-between gap-2"><h2 className="font-bold text-ink">پروژه‌های اخیر</h2>{recentProjects.length>0&&<button className="rounded-md bg-teal/15 px-2.5 py-1.5 text-[10px] font-bold text-teal hover:bg-teal/25" onClick={()=>{setWelcomeOpen(false);setProjectTabs(recentProjects);const t=recentProjects[0];setActiveProjectId(t.id);setSketch(t.sketch);setGenerationSketch(t.sketch);setParams(t.params);setGcodeOvr(t.gcodeOvr);setReferenceImages(t.referenceImages||[]);setActivePreset(t.activePreset);}}>باز کردن همه پروژه‌ها</button>}</div>{recentProjects.length?<><div className="mt-3 grid max-h-64 grid-cols-2 gap-2 overflow-y-auto pl-1">{recentProjects.map(p=><button key={p.id} className={`rounded-md border px-3 py-2 text-right transition-colors ${p.savedSnapshot!==projectSnapshot(p.sketch,p.params,p.gcodeOvr,p.referenceImages)?"border-orange-400/80 bg-orange-500/15 hover:bg-orange-500/25":"border-edge bg-panel2 hover:border-brass/60 hover:bg-brass/10"}`} onClick={()=>{setWelcomeOpen(false);const t=recentProjects.find(x=>x.id===p.id)!;setProjectTabs([t]);setActiveProjectId(t.id);setSketch(t.sketch);setGenerationSketch(t.sketch);setParams(t.params);setGcodeOvr(t.gcodeOvr);setReferenceImages(t.referenceImages||[]);setActivePreset(t.activePreset);}}><span className="block truncate text-[11px] font-bold text-ink">{p.name}</span><small className="mt-1 block font-mono text-[8px] text-dim">D{p.params.blankD} × L{p.params.blankL} mm</small></button>)}</div><button className="mt-2 w-full rounded-md border border-edge bg-panel2 px-3 py-2 text-xs font-bold text-mute hover:border-danger/60 hover:text-danger" onClick={clearRecentProjects}>تمیز کردن لیست</button></>:<p className="mt-3 text-xs leading-6 text-dim">پروژه اخیری وجود ندارد.</p>}<button className="mt-3 w-full rounded-md border border-edge px-3 py-2 text-xs text-mute" onClick={()=>{setWelcomeOpen(false);projectInputRef.current?.click()}}>باز کردن فایل پروژه</button></section><section className="rounded-xl border border-brass/60 bg-brass/10 p-5"><h2 className="font-bold text-brass2">ایجاد پروژه جدید</h2><p className="mt-3 text-xs leading-6 text-mute">یک پروژه خالی برای طراحی پروفایل بسازید.</p><button className="mt-5 w-full rounded-md bg-brass px-3 py-2 text-xs font-bold text-[#241a0c]" onClick={openNewProject}>طراحی پروفایل جدید</button></section><section className="rounded-xl border border-edge2 bg-panel p-5"><h2 className="font-bold text-ink">پیش‌تنظیم‌های طراحی</h2><div className="mt-3 grid max-h-64 grid-cols-2 gap-2 overflow-y-auto">{PRESETS.map(p=><button key={p.id} className="rounded-md border border-edge bg-panel2 px-3 py-2 text-right transition-colors hover:border-brass/60 hover:bg-brass/10" onClick={()=>applyPreset(p)}><span className="block text-[11px] font-bold text-ink">{p.name}</span><small className="mt-1 block font-mono text-[8px] text-dim">D{p.blankD} × L{p.blankL} mm</small></button>)}</div></section></div></div></div>}{confirmClearRecent&&<div className="fixed inset-0 z-[160] grid place-items-center bg-black/55 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-orange-400/60 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-orange-300">پروژه ذخیره‌نشده</h3><p className="mt-3 text-[12px] leading-6 text-mute">یک یا چند پروژه با هایلایت نارنجی ذخیره نشده‌اند. آیا می‌خواهید کل فهرست پروژه‌های اخیر پاک شود؟</p><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={()=>setConfirmClearRecent(false)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">انصراف</button><button type="button" onClick={()=>{setConfirmClearRecent(false);setRecentProjects([]);try{localStorage.removeItem("kharraat-recent-projects");}catch{}}} className="rounded-md bg-danger px-4 py-1.5 text-xs font-bold text-white">پاک کردن فهرست</button></div></div></div>}{newProjectDraft&&<div className="fixed inset-0 z-[140] grid place-items-center bg-black/50 p-4" dir="rtl"><form onSubmit={e=>{e.preventDefault();createNewProject();}} className="w-full max-w-md overflow-hidden rounded-xl border border-edge2 bg-panel shadow-2xl"><div className="border-b border-edge bg-panel2 px-5 py-4"><h3 className="text-sm font-bold text-brass2">ایجاد پروژه جدید</h3><label className="mt-3 block text-[10.5px] text-mute">نام پروژه<input autoFocus value={newProjectDraft.name} onChange={e=>setNewProjectDraft({...newProjectDraft,name:e.target.value})} onFocus={e=>e.currentTarget.select()} className="field-input mt-1.5 w-full"/></label></div><div className="p-5"><div className="grid grid-cols-2 gap-3"><label className="text-[10.5px] text-mute">قطر قطعه (mm)<input type="number" min="0.01" max="10000" step="0.01" value={newProjectDraft.diameter} onChange={e=>setNewProjectDraft({...newProjectDraft,diameter:e.target.value})} className="field-input mt-1.5 w-full"/></label><label className="text-[10.5px] text-mute">طول قطعه (mm)<input type="number" min="0.01" max="10000" step="0.01" value={newProjectDraft.length} onChange={e=>setNewProjectDraft({...newProjectDraft,length:e.target.value})} className="field-input mt-1.5 w-full"/></label></div><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={()=>setNewProjectDraft(null)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute hover:text-ink">لغو</button><button type="submit" className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[#241a0c]">ایجاد پروژه</button></div></div></form></div>}
       {saveAsName!==null&&<div className="fixed inset-0 z-[130] grid place-items-center bg-black/45 p-4" dir="rtl"><form onSubmit={e=>{e.preventDefault();const value=saveAsName;setSaveAsName(null);saveAsResolver.current?.(value);saveAsResolver.current=null;}} className="w-full max-w-sm rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">ذخیره پروژه با نام</h3><label className="mt-4 block text-[11px] text-mute">نام پروژه<input autoFocus value={saveAsName} onChange={e=>setSaveAsName(e.target.value)} onFocus={e=>e.currentTarget.select()} className="field-input mt-2 w-full"/></label><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={()=>{setSaveAsName(null);saveAsResolver.current?.(null);saveAsResolver.current=null;}} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button type="submit" className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[#241a0c]">ذخیره</button></div></form></div>}
       {pendingEditExit && <div className="fixed inset-0 z-[120] grid place-items-center bg-black/45 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">تغییرات تأییدنشده ویرایش مسیر</h3><p className="mt-3 text-[12px] leading-6 text-mute">تغییراتی در مسیر انجام شده که هنوز تأیید نشده‌اند. آیا می‌خواهید تغییرات را تأیید و سپس از حالت ویرایش مسیر خارج شوید؟</p><div className="mt-5 flex justify-center gap-2"><button onClick={()=>setPendingEditExit(false)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button onClick={()=>{setPendingEditExit(false);discardEdit();}} className="rounded-md border border-danger/50 bg-danger/10 px-4 py-1.5 text-xs font-bold text-danger">خیر</button><button onClick={()=>{confirmEdit();setEditBuf(null);setEditOpen(false);setPendingEditExit(false);}} className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[#241a0c]">بله</button></div></div></div>}
@@ -1624,7 +1770,7 @@ export default function App() {
               params={generationParams}
               gen={gen}
               split={params.split}
-              onSplit={(split) => onParamsCb({ split })}
+              onSplit={onSplitChange}
               settings={settings}
               onSettings={(patch) => setSettings((s) => ({ ...s, ...patch }))}
               toolShortcuts={preferences.shortcuts}

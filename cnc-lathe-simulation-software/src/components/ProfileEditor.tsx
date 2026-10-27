@@ -147,13 +147,13 @@ interface Props {
   imageImportRequest: number;
   registerImageHistory: (api:{undo:()=>void;redo:()=>void;canUndo:boolean;canRedo:boolean})=>void;
   segs: SketchSeg[];
-  onSegs: (next: SketchSeg[], commit: boolean) => void;
+  onSegs: (next: SketchSeg[], commit: boolean, splitPatch?: SplitState) => void;
   selected: number[];
   onSelected: (ids: number[]) => void;
   params: Params;
   gen: GenResult;
   split: SplitState;
-  onSplit: (s: SplitState) => void;
+  onSplit: (s: SplitState, commit?: boolean) => void;
   settings: EdSettings;
   onSettings: (patch: Partial<EdSettings>) => void;
   toolShortcuts: Record<string, string>;
@@ -575,6 +575,7 @@ const SNAP_COLOR: Record<string, string> = {
   cross: "#e0703c",
   axis: "#f3c26b",
   grid: "#8b7c5f",
+  split: "#f72585",
 };
 
 type SketchPointPart = "a" | "b" | "c1" | "c2" | "via";
@@ -842,6 +843,7 @@ type MoveSession = {
   lastClientX: number; lastClientY: number;
   editBase?: EVert[]; editVertexIds?: number[];
   pointRefs?: { segId: number; part: SketchPointPart }[];
+  splitBase?: SplitState;
 };
 
 export default function ProfileEditor({
@@ -1112,6 +1114,44 @@ export default function ProfileEditor({
     onSegs([...copySession.base, ...copySession.copies.map((segment) => moveSeg(segment, dz, dr))], false);
     setCopySession((session) => session ? { ...session, pointer } : session);
   }, [copyBox?.value]);
+  const applyMoveDelta = (session: MoveSession, dz: number, dr: number, commit: boolean) => {
+    const nextSplit = session.splitBase
+      ? { ...session.splitBase, z: session.splitBase.z + dz, r: session.splitBase.r + dr }
+      : undefined;
+    if (session.editBase && edit) {
+      const moving = new Set(session.editVertexIds ?? []);
+      const nextVerts = moving.size
+        ? session.editBase.map((vertex) => (moving.has(vertex.id) ? { ...vertex, z: vertex.z + dz, x: vertex.x + 2 * dr } : vertex))
+        : session.editBase;
+      onEditBuf({ ...edit, verts: nextVerts, ...(nextSplit ? { split: nextSplit } : {}) }, commit);
+    } else if (session.pointRefs?.length) {
+      const moving = new Set(session.pointRefs.map((point) => `${point.segId}:${point.part}`));
+      const nextSegs = session.base.map((segment) => {
+        const next = { ...segment };
+        for (const part of ["a", "b", "c1", "c2", "via"] as SketchPointPart[]) {
+          const point = segment[part];
+          if (point && moving.has(`${segment.id}:${part}`)) next[part] = { z: point.z + dz, r: point.r + dr };
+        }
+        return next;
+      });
+      onSegs(nextSegs, commit, nextSplit);
+    } else if (session.ids.length) {
+      onSegs(movePolylineSelection(session.base, session.ids, dz, dr), commit, nextSplit);
+    } else if (nextSplit) {
+      onSplit(nextSplit, commit);
+    }
+  };
+  const cancelMoveSession = (session: MoveSession | null) => {
+    if (!session) return;
+    if (session.editBase && edit) {
+      onEditBuf({ ...edit, verts: session.editBase, ...(session.splitBase ? { split: session.splitBase } : {}) }, false);
+    } else if (session.ids.length || session.pointRefs?.length) {
+      onSegs(session.base, false, session.splitBase);
+    } else if (session.splitBase) {
+      onSplit(session.splitBase, false);
+    }
+    setSnapHit(null);
+  };
   /* پیش‌نمایش عددی بدون ثبت در تاریخچه؛ Enter همان هندسه را به یک گام Undo تبدیل می‌کند. */
   useEffect(() => {
     if (!moveBox?.value.trim() || !moveSession) return;
@@ -1141,17 +1181,7 @@ export default function ProfileEditor({
       if (values.length === 2) { dz -= anchor.z; dr -= anchor.r; }
       else if (dz) dz = Math.abs(dz) - anchor.z; else dr = Math.abs(dr) - anchor.r;
     }
-    if (moveSession.editBase && moveSession.editVertexIds && edit) {
-      const moving = new Set(moveSession.editVertexIds);
-      onEditBuf({
-        ...edit,
-        verts: moveSession.editBase.map((vertex) => moving.has(vertex.id)
-          ? { ...vertex, z: vertex.z + dz, x: vertex.x + 2 * dr }
-          : vertex),
-      }, false);
-    } else {
-      onSegs(movePolylineSelection(moveSession.base,moveSession.ids,dz,dr), false);
-    }
+    applyMoveDelta(moveSession, dz, dr, false);
   }, [moveBox?.value, moveSession?.pointer, moveSession?.axis, moveSession?.mode]);
   const [draft, setDraft] = useState<SPoint[]>([]);
   /* در منحنی کنترلی، پس از کلیک دوم ابتدا دستهٔ متصل به نقطهٔ پایان (c2) و سپس  */
@@ -1172,6 +1202,24 @@ export default function ProfileEditor({
 
   /* ---------- حالت ویرایش مسیر — ویرایشگرِ پلی‌لاینِ پیوسته (مثل بک‌پلات سیمکو) ---------- */
   const editOpen = !!edit;
+  const activeSplit: SplitState = editOpen && edit?.split ? edit.split : split;
+  const shownSplitPoint = useMemo(() => {
+    if (!activeSplit.enabled) return null;
+    return editOpen
+      ? { z: activeSplit.z + params.gcodeShiftX, r: activeSplit.r + params.gcodeShiftY }
+      : { z: activeSplit.z, r: activeSplit.r };
+  }, [activeSplit.enabled, activeSplit.z, activeSplit.r, editOpen, params.gcodeShiftX, params.gcodeShiftY]);
+  const editInnerSplitPoint = useMemo(() => {
+    if (!editOpen || !activeSplit.enabled || !edit) return null;
+    const holder2 = edit.holder2 ?? params.holder2;
+    /* seedGcodeEdit در فضای ماشین ذخیره می‌کند: H2 نسبت به نقطه طراحی
+       در +Z به اندازه xOff و در شعاع به اندازه -yOff جابه‌جا است و شیفت جی‌کد نیز اعمال می‌شود. */
+    return { z: activeSplit.z + holder2.xOff + params.gcodeShiftX, r: activeSplit.r - holder2.yOff + params.gcodeShiftY };
+  }, [editOpen, activeSplit.enabled, activeSplit.z, activeSplit.r, edit, params.holder2, params.gcodeShiftX, params.gcodeShiftY]);
+  useEffect(() => {
+    setSplitSelected(false);
+    setSplitHovered(false);
+  }, [editOpen]);
   const toolpathLayersVisible = TOOLPATH_LAYER_KEYS.some((key) => settings[key]);
   const layerOpacity = Math.min(1, Math.max(0.1, settings.layerOpacity));
   /* فقط تغییر روشن/خاموشی مسیرها هندسهٔ SVG را بازسازی می‌کند؛ اسلایدر شفافیت
@@ -1296,15 +1344,15 @@ export default function ProfileEditor({
     setSpeedMenu(null);
   }, [toolpathLayersVisible]);
   useEffect(() => {
-    if (split.enabled) return;
+    if (activeSplit.enabled) return;
     setSplitSelected(false);
     setSplitHovered(false);
-  }, [split.enabled]);
+  }, [activeSplit.enabled]);
   useEffect(() => {
     if (tool !== "fillet") { setFilletPicks([]); setFilletBox(null); }
   }, [tool]);
   useEffect(() => {
-    if (tool !== "select") {
+    if (tool !== "select" && tool !== "move") {
       setSplitSelected(false);
       setSplitHovered(false);
     }
@@ -1529,6 +1577,7 @@ export default function ProfileEditor({
           setSelL(replacement == null ? [] : [replacement]); setActiveLine(replacement); setSelV([]);
           return;
         }
+        return;
       }
       /* میانبر ابزارها بر پایه موقعیت فیزیکی کلید است تا با فارسی، عربی و
          سایر Layoutها نیز همان کلید لاتین تنظیم‌شده عمل کند. */
@@ -1596,8 +1645,7 @@ export default function ProfileEditor({
           return;
         }
         if (tool === "move") {
-          if (moveSession?.editBase && edit) onEditBuf({ ...edit, verts: moveSession.editBase }, false);
-          else if (moveSession) onSegs(moveSession.base, false);
+          cancelMoveSession(moveSession);
           setMoveBox(null);
           setMoveSession(null);
           drag.current = null;
@@ -1651,14 +1699,39 @@ export default function ProfileEditor({
         return;
       }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (k === "r" && tool === "move" && lastMove && selected.length) {
-        e.preventDefault();
-        const next = movePolylineSelection(segs,selected,lastMove.dz,lastMove.dr);
-        onSegs(next, true);
-        return;
+      if (k === "r" && tool === "move" && lastMove) {
+        if (editOpen && edit && (selV.length || selL.length || (splitSelected && activeSplit.enabled))) {
+          e.preventDefault();
+          const vset = new Set<number>(selV);
+          for (const lid of selL) {
+            const ln = edit.lines.find((l) => l.id === lid && bufSelectable(l));
+            if (ln) { vset.add(ln.va); vset.add(ln.vb); }
+          }
+          const nextSplit = splitSelected && activeSplit.enabled
+            ? { ...activeSplit, z: activeSplit.z + lastMove.dz, r: activeSplit.r + lastMove.dr }
+            : edit.split;
+          const nextVerts = vset.size
+            ? edit.verts.map((v) => vset.has(v.id) ? { ...v, z: v.z + lastMove.dz, x: v.x + 2 * lastMove.dr } : v)
+            : edit.verts;
+          onEditBuf({ ...edit, verts: nextVerts, split: nextSplit }, true);
+          return;
+        }
+        if (!editOpen && (selected.length || (splitSelected && split.enabled))) {
+          e.preventDefault();
+          const nextSplit = splitSelected && split.enabled
+            ? { ...split, z: split.z + lastMove.dz, r: split.r + lastMove.dr }
+            : undefined;
+          if (selected.length) {
+            const next = movePolylineSelection(segs, selected, lastMove.dz, lastMove.dr);
+            onSegs(next, true, nextSplit);
+          } else if (nextSplit) {
+            onSplit(nextSplit, true);
+          }
+          return;
+        }
       }
       const t = TOOLS.find((x) => (toolShortcuts[x.id] ?? x.key).toLowerCase() === k);
-      if (t && (!editOpen || t.id === "select")) {
+      if (t && (!editOpen || t.id === "select" || t.id === "move")) {
         chooseTool(t.id);
         cancelDraft();
       }
@@ -1714,20 +1787,62 @@ export default function ProfileEditor({
   /* ---------- اسنپ ---------- */
   const snapPts = useMemo(() => snapCandidates(segs), [segs]);
   const crossPts = useMemo(() => (settings.smartSnap ? intersectionPoints(segs) : []), [segs, settings.smartSnap]);
+  const editMoveSnapPts = useMemo(() => {
+    if (!editOpen || !edit || !settings.smartSnap) return [] as (SnapPoint & { vid?: number; isSplit?: boolean })[];
+    const out: (SnapPoint & { vid?: number; isSplit?: boolean })[] = [];
+    /* نقاط Split قرمز و آبی اولویت اسنپ صریح در حالت ویرایش مسیر دارند. */
+    if (shownSplitPoint) out.push({ p: shownSplitPoint, type: "split", isSplit: true });
+    if (editInnerSplitPoint) out.push({ p: editInnerSplitPoint, type: "split", isSplit: true });
+    if (toolpathLayersVisible) {
+      const allowedVerts = new Set<number>();
+      for (const line of edit.lines) {
+        const kind: SegKind = line.motion === 0 ? "rapid" : line.kind;
+        if (settings[KIND_VISIBLE[kind]] && (isolatedOpId == null || line.opId === isolatedOpId)) {
+          allowedVerts.add(line.va);
+          allowedVerts.add(line.vb);
+        }
+      }
+      for (const v of edit.verts) {
+        if (!allowedVerts.has(v.id)) continue;
+        const p = { z: v.z, r: v.x / 2 };
+        if (shownSplitPoint && dist(p, shownSplitPoint) < 1e-6) continue;
+        if (editInnerSplitPoint && dist(p, editInnerSplitPoint) < 1e-6) continue;
+        out.push({ p, type: "end", vid: v.id });
+      }
+    }
+    return out;
+  }, [editOpen, edit, settings, shownSplitPoint, editInnerSplitPoint, toolpathLayersVisible, isolatedOpId]);
 
-  const applySnap = (raw: SPoint, skipIds: number[] = []): { p: SPoint; hit: SnapPoint | null } => {
+  const applySnap = (
+    raw: SPoint,
+    skipIds: number[] = [],
+    opts?: { skipEditVerts?: Set<number>; skipSplit?: boolean }
+  ): { p: SPoint; hit: SnapPoint | null } => {
     const c = camRef.current;
     if (!c) return { p: raw, hit: null };
     const tolW = Math.min(30, Math.max(3, settings.snapTolerancePx)) / c.s;
     if (settings.smartSnap) {
       let best: SnapPoint | null = null;
       let bestD = tolW;
-      for (const sp of [...snapPts, ...crossPts]) {
-        if ((sp.segId != null && skipIds.includes(sp.segId)) || (sp.segId2 != null && skipIds.includes(sp.segId2))) continue;
-        const d = dist(sp.p, raw);
-        if (d < bestD) {
-          bestD = d;
-          best = sp;
+      if (editOpen) {
+        for (const sp of editMoveSnapPts) {
+          if (opts?.skipSplit && sp.isSplit) continue;
+          if (sp.vid != null && opts?.skipEditVerts?.has(sp.vid)) continue;
+          const d = dist(sp.p, raw);
+          if (d < bestD || (sp.isSplit && best?.type !== "split" && Math.abs(d - bestD) < 1e-6)) {
+            bestD = d;
+            best = { p: sp.p, type: sp.type };
+          }
+        }
+      }
+      if (!editOpen) {
+        for (const sp of [...snapPts, ...crossPts]) {
+          if ((sp.segId != null && skipIds.includes(sp.segId)) || (sp.segId2 != null && skipIds.includes(sp.segId2))) continue;
+          const d = dist(sp.p, raw);
+          if (d < bestD) {
+            bestD = d;
+            best = sp;
+          }
         }
       }
       if (best) return { p: { ...best.p }, hit: best };
@@ -1969,7 +2084,7 @@ export default function ProfileEditor({
     p.z >= r.z0 - 1e-9 && p.z <= r.z1 + 1e-9 && p.r >= r.r0 - 1e-9 && p.r <= r.r1 + 1e-9;
 
   const marqueeHitsSplit = (r: { z0: number; z1: number; r0: number; r1: number }) =>
-    !editOpen && split.enabled && pointInRectW({ z: split.z, r: split.r }, r);
+    activeSplit.enabled && shownSplitPoint != null && pointInRectW(shownSplitPoint, r);
 
   const segSegInt = (p1: SPoint, p2: SPoint, p3: SPoint, p4: SPoint) => {
     const d = (p2.z - p1.z) * (p4.r - p3.r) - (p2.r - p1.r) * (p4.z - p3.z);
@@ -2210,6 +2325,7 @@ export default function ProfileEditor({
   /* سطل زباله و کلیدهای Delete/Backspace باید همهٔ انتخاب‌های فعلی، از جمله
      نقطه Split و خطوط پروفایل، را با هم حذف کنند. */
   const deleteSelection = () => {
+    if (editOpen) return;
     const hasLines = selected.length > 0;
     const hasSplit = splitSelected;
     if (hasLines) deleteSelected();
@@ -2441,13 +2557,6 @@ export default function ProfileEditor({
   const pathEndVid = lines[lines.length - 1]?.vb ?? null;
   const vById = useMemo(() => new Map(verts.map((v) => [v.id, v])), [verts]);
   const lineById = useMemo(() => new Map(lines.map((l) => [l.id, l])), [lines]);
-  const editInnerSplitPoint = useMemo(() => {
-    if (!editOpen || !split.enabled || !edit) return null;
-    const holder2 = edit.holder2 ?? params.holder2;
-    /* seedGcodeEdit در فضای ماشین ذخیره می‌کند: H2 نسبت به نقطه طراحی
-       در +Z به اندازه xOff و در شعاع به اندازه -yOff جابه‌جا است. */
-    return { z: split.z + holder2.xOff, r: split.r - holder2.yOff };
-  }, [editOpen, split.enabled, split.z, split.r, edit, params.holder2]);
   /* نگاشت قاب هنگام خروج فقط زمانی لازم است که کاربر واقعاً در حالت ویرایش Pan
      کرده باشد. ورود/خروج ساده یا Zoom بدون Pan نباید Camera را دست‌کاری کند. */
   const editPanOccurredRef=useRef(false);
@@ -2493,15 +2602,15 @@ export default function ProfileEditor({
     const [x2, y2] = screenPt(c, b.z, b.x / 2);
     return [x1, y1, x2, y2];
   };
-  const setBufGeom = (nextVerts: EVert[], nextLines: ELine[], commit: boolean) => {
+  const setBufGeom = (nextVerts: EVert[], nextLines: ELine[], commit: boolean, nextSplit?: SplitState) => {
     if (!edit) return;
     if (!commit) {
-      onEditBuf({ ...edit, verts: nextVerts, lines: nextLines }, false);
+      onEditBuf({ ...edit, verts: nextVerts, lines: nextLines, ...(nextSplit ? { split: nextSplit } : {}) }, false);
       return;
     }
     /* اعتبارسنجی پس از هر ثبت (خواستهٔ ۹): صفرطول/تکراری/رأسِ یتیم حذف */
     const fin = normalizeEditBuf(nextVerts, nextLines);
-    onEditBuf({ ...edit, verts: fin.verts, lines: fin.lines }, true);
+    onEditBuf({ ...edit, verts: fin.verts, lines: fin.lines, ...(nextSplit ? { split: nextSplit } : {}) }, true);
   };
   useEffect(() => {
     setSelV([]);
@@ -2749,8 +2858,9 @@ export default function ProfileEditor({
   /* ---------- تعامل ماوس ---------- */
   const drag = useRef<
     | { mode: "pan"; sx: number; sy: number; cam0: Cam; moved: boolean; btn: number }
-    | { mode: "handle"; ref: HandleRef; cluster: { segId: number; part: HandleRef["part"] }[]; moved: boolean }
-    | { mode: "move"; ids: number[]; clicked: number; last: SPoint; sx: number; sy: number; moved: boolean }
+    | { mode: "handle"; ref: HandleRef; cluster: { segId: number; part: HandleRef["part"] }[]; moved: boolean; baseSplit?: SplitState; startPt?: SPoint }
+    | { mode: "move"; ids: number[]; clicked: number; last: SPoint; sx: number; sy: number; moved: boolean; baseSplit?: SplitState; baseSegs: SketchSeg[] }
+    | { mode: "split"; start: SPoint; baseSplit: SplitState; baseSegs: SketchSeg[]; segIds: number[]; pointRefs: { segId: number; part: SketchPointPart }[]; sx: number; sy: number; moved: boolean; hadMulti: boolean }
     | { mode: "draw"; sx: number; sy: number; cam0: Cam; moved: boolean }
     | { mode: "marquee"; sx: number; sy: number; base: number[]; moved: boolean }
     | { mode: "rwait"; sx: number; sy: number; cam0: Cam; moved: boolean }
@@ -2762,10 +2872,12 @@ export default function ProfileEditor({
         sx: number;
         sy: number;
         moved: boolean;
+        baseSplit?: SplitState;
         /** Drag روی Segmentهای H2 یعنی تغییر سراسری آفست، نه اعوجاج یک خط. */
         holder2?: { base: Holder2State; next: Holder2State; latestVerts: EVert[] };
       }
-    | { mode: "evert"; vids: number[]; start: SPoint; base: Map<number, EVert>; sx: number; sy: number; moved: boolean }
+    | { mode: "evert"; vids: number[]; start: SPoint; base: Map<number, EVert>; sx: number; sy: number; moved: boolean; baseSplit?: SplitState }
+    | { mode: "esplit"; start: SPoint; baseSplit: SplitState; baseVerts: Map<number, EVert>; sx: number; sy: number; moved: boolean; hadMulti: boolean }
     | { mode: "eoff"; id: number; last: SPoint; seed: SketchSeg; sx: number; sy: number; moved: boolean }
     | { mode: "eoffh"; id: number; part: "a" | "b" | "c1" | "c2" | "via"; sx: number; sy: number; moved: boolean }
     | null
@@ -2778,11 +2890,11 @@ export default function ProfileEditor({
     return { x: clientX - rect.left, y: clientY - rect.top };
   };
 
-  /* فقط نشان اصلی Split روی پروفایل فعال است؛ قرینهٔ سمت مقابل حذف شده است. */
+  /* فقط نشان قرمز اصلی Split قابل انتخاب و جابه‌جایی است؛ نقطه آبی هرگز مستقل انتخاب نمی‌شود. */
   const hitSplitMarker = (px: number, py: number): boolean => {
     const c = camRef.current;
-    if (!c || editOpen || !split.enabled) return false;
-    const [x, y] = screenPt(c, split.z, split.r);
+    if (!c || !activeSplit.enabled || !shownSplitPoint) return false;
+    const [x, y] = screenPt(c, shownSplitPoint.z, shownSplitPoint.r);
     return Math.hypot(px - x, py - y) <= 10;
   };
 
@@ -2974,25 +3086,39 @@ export default function ProfileEditor({
         const base = moveSession.base.find((segment) => moveSession.ids.includes(segment.id));
         const current = base ? segs.find((segment) => segment.id === base.id) : null;
         if (base && current) setLastMove({ dz: current.a.z - base.a.z, dr: current.a.r - base.a.r });
+        else if (moveSession.splitBase && activeSplit.enabled) {
+          setLastMove({ dz: activeSplit.z - moveSession.splitBase.z, dr: activeSplit.r - moveSession.splitBase.r });
+        }
         if (moveSession.editBase && edit) onEditBuf({ ...edit }, true);
-        else onSegs(segs, true);
+        else if (moveSession.ids.length || moveSession.pointRefs?.length) {
+          onSegs(segs, true, moveSession.splitBase ? split : undefined);
+        } else if (moveSession.splitBase) {
+          onSplit(split, true);
+        }
+        setSnapHit(null);
         setMoveBox(null); setMoveSession(null);
         return;
       }
-      let ids: number[];
+      let ids: number[] = [];
       let editBase: EVert[] | undefined;
       let editVertexIds: number[] | undefined;
+      let splitBase: SplitState | undefined;
+      let origin = raw;
       if (editOpen && edit) {
         const loc = toLocal(e.clientX, e.clientY);
-        const hitVertex = hitBufVx(loc.x, loc.y);
-        const hit = hitVertex == null ? hitBufLine(loc.x, loc.y) : null;
+        const onRedSplit = hitSplitMarker(loc.x, loc.y);
+        const hitVertex = !onRedSplit ? hitBufVx(loc.x, loc.y) : null;
+        const hit = !onRedSplit && hitVertex == null ? hitBufLine(loc.x, loc.y) : null;
         const vertexSet = new Set<number>();
-        if (selV.length) {
-          ids = selV.map((id) => -id - 1);
+        const hasExistingSelection = selV.length > 0 || selL.length > 0 || (splitSelected && activeSplit.enabled);
+        if (hasExistingSelection) {
+          ids = [...selL, ...selV.map((id) => -id - 1)];
           for (const id of selV) vertexSet.add(id);
-        } else if (selL.length) {
-          ids = [...selL];
-          for (const line of edit.lines) if (ids.includes(line.id)) { vertexSet.add(line.va); vertexSet.add(line.vb); }
+          for (const line of edit.lines) if (selL.includes(line.id)) { vertexSet.add(line.va); vertexSet.add(line.vb); }
+          if (splitSelected && activeSplit.enabled) splitBase = { ...activeSplit };
+        } else if (onRedSplit && activeSplit.enabled) {
+          setSplitSelected(true);
+          splitBase = { ...activeSplit };
         } else if (hitVertex != null) {
           setSelV([hitVertex]);
           ids = [-hitVertex - 1]; // کلید داخلی برای نشست Move نقطه‌ای
@@ -3004,7 +3130,12 @@ export default function ProfileEditor({
         } else return;
         editVertexIds = [...vertexSet];
         editBase = edit.verts.map((vertex) => ({ ...vertex }));
+        if (!e.altKey && settings.smartSnap) {
+          origin = applySnap(raw).p;
+        }
       } else {
+        const loc = toLocal(e.clientX, e.clientY);
+        const hasSplitSel = splitSelected && split.enabled;
         /* انتخاب موجود همیشه بر هندسهٔ زیر کلیک اولویت دارد. */
         if (selPoints.length) {
           const refs = new Map<string, { segId: number; part: SketchPointPart }>();
@@ -3019,22 +3150,28 @@ export default function ProfileEditor({
           }
           ids = [];
           const rect = wrapRef.current!.getBoundingClientRect();
-          setMoveSession({ ids, pointRefs: [...refs.values()], base: segs.map((segment) => ({ ...segment })), origin: raw, pointer: raw, clientX: e.clientX, clientY: e.clientY, axis: "free", mode: "relative", dirX: 1, dirY: 1, lastClientX: e.clientX, lastClientY: e.clientY });
+          setMoveSession({ ids, pointRefs: [...refs.values()], splitBase: hasSplitSel ? { ...split } : undefined, base: segs.map((segment) => ({ ...segment })), origin: raw, pointer: raw, clientX: e.clientX, clientY: e.clientY, axis: "free", mode: "relative", dirX: 1, dirY: 1, lastClientX: e.clientX, lastClientY: e.clientY });
           setMoveBox({ x: Math.min(rect.width - 58, Math.max(4, e.clientX - rect.left + 12)), y: Math.min(rect.height - 42, Math.max(4, e.clientY - rect.top - 48)), value: "", error: "" });
           setLastMove(null);
           e.currentTarget.setPointerCapture?.(e.pointerId);
           return;
         }
-        const hit = hitSeg(raw);
-        if (selected.length) ids = [...selected];
-        else {
+        if (selected.length || hasSplitSel) {
+          ids = [...selected];
+          if (hasSplitSel) splitBase = { ...split };
+        } else if (hitSplitMarker(loc.x, loc.y) && split.enabled) {
+          setSplitSelected(true);
+          ids = [];
+          splitBase = { ...split };
+        } else {
+          const hit = hitSeg(raw);
           ids = hit ? [hit.id] : [];
           if (hit) onSelected(ids);
         }
-        if (!ids.length) return;
+        if (!ids.length && !splitBase) return;
       }
       const rect = wrapRef.current!.getBoundingClientRect();
-      setMoveSession({ ids, base: segs.map((segment) => ({ ...segment })), editBase, editVertexIds, origin: raw, pointer: raw, clientX: e.clientX, clientY: e.clientY, axis: "free", mode: "relative", dirX: 1, dirY: 1, lastClientX: e.clientX, lastClientY: e.clientY });
+      setMoveSession({ ids, base: segs.map((segment) => ({ ...segment })), editBase, editVertexIds, splitBase, origin, pointer: origin, clientX: e.clientX, clientY: e.clientY, axis: "free", mode: "relative", dirX: 1, dirY: 1, lastClientX: e.clientX, lastClientY: e.clientY });
       setMoveBox({ x: Math.min(rect.width - 58, Math.max(4, e.clientX - rect.left + 12)), y: Math.min(rect.height - 42, Math.max(4, e.clientY - rect.top - 48)), value: "", error: "" });
       drag.current = null;
       return;
@@ -3043,8 +3180,8 @@ export default function ProfileEditor({
     /* هنگام Drag رأس در Edit Path، دکمه وسط یا راست فقط یک Pan موقت آغاز
        می‌کند و خود ژست جابه‌جایی رأس در drag.current حفظ می‌شود. */
     const activeDragMode = drag.current?.mode;
-    const canPanDuringDrag = activeDragMode === "handle" || activeDragMode === "move" ||
-      activeDragMode === "evert" || activeDragMode === "eline" || activeDragMode === "eoff" || activeDragMode === "eoffh";
+    const canPanDuringDrag = activeDragMode === "handle" || activeDragMode === "move" || activeDragMode === "split" ||
+      activeDragMode === "evert" || activeDragMode === "eline" || activeDragMode === "esplit" || activeDragMode === "eoff" || activeDragMode === "eoffh";
     if (canPanDuringDrag && (e.button === 1 || e.button === 2)) {
       e.preventDefault();
       editVertexPan.current = { pointerId: e.pointerId, sx: e.clientX, sy: e.clientY, cam0: camRef.current };
@@ -3066,36 +3203,47 @@ export default function ProfileEditor({
 
     /* در ابزارهای رسم نیز کشیدن یک نقطهٔ موجود، همان نقطه/دسته را جابه‌جا می‌کند.
        کلیک ساده همچنان در pointerup به‌عنوان ورودی ابزار رسم پردازش می‌شود. */
-    const drawingHandle = !editOpen ? hitHandle(raw) : null;
+    const locForSplitBeforeHandle = !editOpen && tool === "select" ? toLocal(e.clientX, e.clientY) : null;
+    const onMainSplitBeforeHandle = locForSplitBeforeHandle ? hitSplitMarker(locForSplitBeforeHandle.x, locForSplitBeforeHandle.y) : false;
+    const drawingHandle = !editOpen && !onMainSplitBeforeHandle ? hitHandle(raw) : null;
     if (drawingHandle) {
       const cluster = drawingHandle.part === "a" || drawingHandle.part === "b"
         ? clusterOf(drawingHandle.segId, drawingHandle.part)
         : [drawingHandle];
-      drag.current = { mode: "handle", ref: drawingHandle, cluster, moved: false };
+      const owner = segs.find(segment => segment.id === drawingHandle.segId);
+      const clickedPoint = owner?.[drawingHandle.part];
+      const drawingPointSelected = !!clickedPoint && selPoints.some(point => {
+        const segment = segs.find(item => item.id === point.segId), selectedPoint = segment?.[point.part];
+        if (!selectedPoint) return false;
+        /* دو سر هم‌مکان یک رأس Polyline یک نقطهٔ هندسی‌اند؛ دسته و Via فقط
+           با شناسهٔ خودشان عضو انتخاب چندنقطه‌ای محسوب می‌شوند. */
+        return (drawingHandle.part === "a" || drawingHandle.part === "b") && (point.part === "a" || point.part === "b")
+          ? dist(selectedPoint, clickedPoint) < 1e-8
+          : point.segId === drawingHandle.segId && point.part === drawingHandle.part;
+      });
+      const keepSplitWithHandle = tool === "select" && splitSelected && split.enabled && (drawingPointSelected || e.shiftKey);
+      drag.current = {
+        mode: "handle",
+        ref: drawingHandle,
+        cluster,
+        moved: false,
+        baseSplit: keepSplitWithHandle && clickedPoint ? { ...split } : undefined,
+        startPt: clickedPoint ? { ...clickedPoint } : undefined,
+      };
       /* انتخاب نقطه مستقل از انتخاب Segment است. بدون کلید کمکی فقط خود نقطه
          فعال می‌شود؛ نقاط هم‌مکان صرفاً اتصال هندسی خود را حفظ می‌کنند. */
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        if (!drawingPointSelected) setSplitSelected(false);
         /* اگر نقطه/دسته متعلق به Polyline انتخاب‌شده است، Drag آن نباید انتخاب
            کل Polyline را پاک کند؛ انتخاب فقط برای هندسهٔ خارج از گروه عوض می‌شود. */
         if(!selected.includes(drawingHandle.segId))onSelected([]);
         /* هنگام گرفتن دستهٔ Bézier متعلق به رأس انتخاب‌شده، انتخاب رأس را حفظ
            می‌کنیم تا خود نقطه و دستهٔ مقابل در تمام مدت Drag قابل مشاهده بمانند. */
-        const owner=segs.find(segment=>segment.id===drawingHandle.segId);
         const anchor=drawingHandle.part==="c1"?owner?.a:drawingHandle.part==="c2"?owner?.b:null;
         const anchorSelected=!!anchor&&selPoints.some(point=>{
           if(point.part!=="a"&&point.part!=="b")return false;
           const segment=segs.find(item=>item.id===point.segId);
           return !!segment&&dist(segment[point.part],anchor)<1e-8;
-        });
-        const clickedPoint=owner?.[drawingHandle.part];
-        const drawingPointSelected=!!clickedPoint&&selPoints.some(point=>{
-          const segment=segs.find(item=>item.id===point.segId),selectedPoint=segment?.[point.part];
-          if(!selectedPoint)return false;
-          /* دو سر هم‌مکان یک رأس Polyline یک نقطهٔ هندسی‌اند؛ دسته و Via فقط
-             با شناسهٔ خودشان عضو انتخاب چندنقطه‌ای محسوب می‌شوند. */
-          return (drawingHandle.part==="a"||drawingHandle.part==="b")&&(point.part==="a"||point.part==="b")
-            ? dist(selectedPoint,clickedPoint)<1e-8
-            : point.segId===drawingHandle.segId&&point.part===drawingHandle.part;
         });
         /* اگر نقطهٔ زیر نشانگر از قبل عضو انتخاب چندنقطه‌ای است، انتخاب را دست
            نمی‌زنیم تا Drag مشترک در همهٔ ابزارهای رسم فعال بماند. */
@@ -3118,20 +3266,95 @@ export default function ProfileEditor({
 
     if (!editOpen) {
       const loc = toLocal(e.clientX, e.clientY);
-      if (hitSplitMarker(loc.x, loc.y)) {
-        /* Split انتخابی مستقل است؛ انتخاب خطوط/نقاط قبلی را پاک می‌کنیم. */
+      if (hitSplitMarker(loc.x, loc.y) && split.enabled) {
+        if (e.ctrlKey || e.metaKey) {
+          setSplitSelected(false);
+          drag.current = null;
+          return;
+        }
+        if (e.shiftKey && splitSelected) {
+          setSplitSelected(false);
+          drag.current = null;
+          return;
+        }
+        const hadMulti = (splitSelected || e.shiftKey) && (selected.length > 0 || selPoints.length > 0);
         setSplitSelected(true);
-        onSelected([]);
-        setSelPoints([]);
-        drag.current = null;
+        if (!hadMulti) {
+          onSelected([]);
+          setSelPoints([]);
+        }
+        const refs = new Map<string, { segId: number; part: SketchPointPart }>();
+        if (hadMulti && selPoints.length) {
+          for (const point of selPoints) {
+            const members = point.part === "a" || point.part === "b" ? clusterOf(point.segId, point.part) : [point];
+            for (const member of members) refs.set(`${member.segId}:${member.part}`, member);
+          }
+          for (const member of [...refs.values()]) {
+            const segment = segs.find((item) => item.id === member.segId);
+            if (member.part === "a" && segment?.c1) refs.set(`${member.segId}:c1`, { segId: member.segId, part: "c1" });
+            if (member.part === "b" && segment?.c2) refs.set(`${member.segId}:c2`, { segId: member.segId, part: "c2" });
+          }
+        }
+        drag.current = {
+          mode: "split",
+          start: raw,
+          baseSplit: { ...split },
+          baseSegs: segs.map((segment) => ({ ...segment })),
+          segIds: hadMulti ? [...selected] : [],
+          pointRefs: [...refs.values()],
+          sx: e.clientX,
+          sy: e.clientY,
+          moved: false,
+          hadMulti: splitSelected && !e.shiftKey && (selected.length > 0 || selPoints.length > 0),
+        };
         return;
       }
-      setSplitSelected(false);
     }
 
-    /* --- حالت ویرایش مسیر — رأسِ انتخابی، سرِ افست، منحنی افست، بدنهٔ خط --- */
+    /* --- حالت ویرایش مسیر — نشان قرمز Split، رأسِ انتخابی، سرِ افست، منحنی افست، بدنهٔ خط --- */
     if (editOpen) {
       const ploc = toLocal(e.clientX, e.clientY);
+      if (hitSplitMarker(ploc.x, ploc.y) && activeSplit.enabled) {
+        if (e.ctrlKey || e.metaKey) {
+          setSplitSelected(false);
+          drag.current = null;
+          return;
+        }
+        if (e.shiftKey && splitSelected) {
+          setSplitSelected(false);
+          drag.current = null;
+          return;
+        }
+        const keepPathSel = (splitSelected || e.shiftKey) && (selL.length > 0 || selV.length > 0);
+        setSplitSelected(true);
+        setHitPicker(null);
+        setPickerHover(null);
+        const baseVerts = new Map<number, EVert>();
+        if (keepPathSel) {
+          for (const vid of selV) baseVerts.set(vid, { ...vz(vid) });
+          for (const lid of selL) {
+            const l = lineById.get(lid);
+            if (l) {
+              baseVerts.set(l.va, { ...vz(l.va) });
+              baseVerts.set(l.vb, { ...vz(l.vb) });
+            }
+          }
+        } else {
+          selectEditLines([], null, true);
+          setSelV([]);
+        }
+        drag.current = {
+          mode: "esplit",
+          start: raw,
+          baseSplit: { ...activeSplit },
+          baseVerts,
+          sx: e.clientX,
+          sy: e.clientY,
+          moved: false,
+          hadMulti: splitSelected && !e.shiftKey && (selL.length > 0 || selV.length > 0),
+        };
+        return;
+      }
       let nearVerts = hitBufVerts(ploc.x, ploc.y);
       const nearLines = hitBufLines(ploc.x, ploc.y);
       /* اگر خط هایلایت‌شده زیر/روی خطوط دیگر باشد، Drag نقطه فقط رأس‌های همان
@@ -3144,11 +3367,14 @@ export default function ProfileEditor({
       /* خود آیکن‌های S/E نیز Hit Area مستقل دارند؛ بنابراین مخصوصاً در مسیر بسته
          که آیکن از رأس فاصله دارد، Drag مستقیماً از روی آیکن آغاز می‌شود. */
       /* نشان‌های ابتدا/انتها بر Segment زیرین اولویت دارند تا با یک کلیک ساده
-         انتخاب شوند و همان لحظه امکان drag آن‌ها وجود داشته باشد. */
+         انتخاب شوند و همان لحظه امکان drag آن‌ها داشته باشد. */
       if (endpointCandidate != null) {
+        const wasSel = selV.includes(endpointCandidate);
+        const keepSplit = splitSelected && activeSplit.enabled && (wasSel || e.shiftKey);
+        if (!keepSplit && !e.ctrlKey && !e.metaKey) setSplitSelected(false);
         const chosen = selectedHitLine!=null ? [endpointCandidate] : e.shiftKey
-          ? (selV.includes(endpointCandidate) ? selV.filter((id) => id !== endpointCandidate) : [...selV, endpointCandidate])
-          : [endpointCandidate];
+          ? (wasSel ? selV.filter((id) => id !== endpointCandidate) : [...selV, endpointCandidate])
+          : (wasSel && selV.length > 1 ? [...selV] : [endpointCandidate]);
         setSelV(chosen);
         focusEditVertexInGCode(endpointCandidate);
         setHitPicker(null);
@@ -3161,6 +3387,7 @@ export default function ProfileEditor({
           sx: ploc.x,
           sy: ploc.y,
           moved: false,
+          baseSplit: keepSplit ? { ...activeSplit } : undefined,
         };
         return;
       }
@@ -3207,9 +3434,12 @@ export default function ProfileEditor({
       setPickerHover(null);
       const bv = hitBufVx(ploc.x, ploc.y);
       if (bv != null) {
+        const wasSel = selV.includes(bv);
+        const keepSplit = splitSelected && activeSplit.enabled && (wasSel || e.shiftKey);
+        if (!keepSplit && !e.ctrlKey && !e.metaKey) setSplitSelected(false);
         const chosen = selectedHitLine!=null ? [bv] : e.shiftKey
-          ? (selV.includes(bv) ? selV.filter((id) => id !== bv) : [...selV, bv])
-          : [bv];
+          ? (wasSel ? selV.filter((id) => id !== bv) : [...selV, bv])
+          : (wasSel && selV.length > 1 ? [...selV] : [bv]);
         setSelV(chosen);
         focusEditVertexInGCode(bv);
         drag.current = {
@@ -3220,6 +3450,7 @@ export default function ProfileEditor({
           sx: ploc.x,
           sy: ploc.y,
           moved: false,
+          baseSplit: keepSplit ? { ...activeSplit } : undefined,
         };
         return;
       }
@@ -3251,8 +3482,11 @@ export default function ProfileEditor({
           setSelV([]);
           return;
         }
-        if (e.shiftKey) ids = selL.includes(bl) ? selL.filter((x) => x !== bl) : [...selL, bl];
-        else ids = selL.includes(bl) ? selL : [bl];
+        const wasLineSel = selL.includes(bl);
+        const keepSplit = splitSelected && activeSplit.enabled && (wasLineSel || e.shiftKey);
+        if (!keepSplit) setSplitSelected(false);
+        if (e.shiftKey) ids = wasLineSel ? selL.filter((x) => x !== bl) : [...selL, bl];
+        else ids = wasLineSel ? selL : [bl];
         ids = lines.filter((line) => ids.includes(line.id) && bufSelectable(line)).map((line) => line.id);
         selectEditLines(ids, bl, true);
         setSelV([]);
@@ -3269,6 +3503,7 @@ export default function ProfileEditor({
           sx: e.clientX,
           sy: e.clientY,
           moved: false,
+          baseSplit: keepSplit ? { ...activeSplit } : undefined,
         };
         return;
       }
@@ -3279,7 +3514,10 @@ export default function ProfileEditor({
       /* صرفِ کلیک دوم یک ضلع را انتخاب می‌کند، اما Drag روی Polyline کاملاً
          انتخاب‌شده همچنان باید کل Polyline را حرکت دهد. ضلع فقط پس از آنکه با
          یک کلیک مستقل انتخاب شد، به‌تنهایی Drag می‌شود. */
-      const allowed = selected.includes(s.id) ? [...selected] : objectIds;
+      const wasSegSelected = selected.includes(s.id);
+      const keepSplit = splitSelected && split.enabled && (wasSegSelected || e.shiftKey);
+      if (!keepSplit && !e.ctrlKey && !e.metaKey) setSplitSelected(false);
+      const allowed = wasSegSelected ? [...selected] : objectIds;
       const movingSinglePolylineEdge=s.polylineId!=null&&allowed.length===1&&allowed[0]===s.id;
       if (!movingSinglePolylineEdge&&allowed.some((id) => segLocked(id, allowed))) {
         if (e.shiftKey) onSelected(selected.includes(s.id) ? selected.filter((x) => !objectIds.includes(x)) : [...selected, ...objectIds.filter((id) => !selected.includes(id))]);
@@ -3288,7 +3526,17 @@ export default function ProfileEditor({
         return;
       }
       /* تصمیم نهایی کلیک در pointerup گرفته می‌شود تا درگ گروهی ممکن باشد */
-      drag.current = { mode: "move", ids: allowed, clicked: s.id, last: raw, sx: e.clientX, sy: e.clientY, moved: false };
+      drag.current = {
+        mode: "move",
+        ids: allowed,
+        clicked: s.id,
+        last: raw,
+        sx: e.clientX,
+        sy: e.clientY,
+        moved: false,
+        baseSplit: keepSplit ? { ...split } : undefined,
+        baseSegs: segs.map((seg) => ({ ...seg })),
+      };
       return;
     }
     /* فضای خالی: شروع باکس انتخابگر (پاک‌سازی در pointerup اگر کلیک بود) */
@@ -3301,8 +3549,8 @@ export default function ProfileEditor({
 
   const onPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
     const activeMode = drag.current?.mode;
-    const canPanDuringDrag = activeMode === "handle" || activeMode === "move" ||
-      activeMode === "evert" || activeMode === "eline" || activeMode === "eoff" || activeMode === "eoffh";
+    const canPanDuringDrag = activeMode === "handle" || activeMode === "move" || activeMode === "split" ||
+      activeMode === "evert" || activeMode === "eline" || activeMode === "esplit" || activeMode === "eoff" || activeMode === "eoffh";
     const auxiliaryButtonHeld = (e.buttons & 2) !== 0 || (e.buttons & 4) !== 0;
     let temporaryPan = editVertexPan.current;
     /* بعضی مرورگرها هنگام نگه‌داشتن دکمه چپ، PointerDown دکمه دوم را ارسال
@@ -3528,26 +3776,44 @@ export default function ProfileEditor({
       const dirY: 1 | -1 = dy < -5 ? 1 : dy > 5 ? -1 : moveSession.dirY;
       setMoveSession({ ...moveSession, pointer: raw, axis, dirX, dirY, lastClientX: e.clientX, lastClientY: e.clientY });
       if (!moveBox?.value.trim()) {
-        /* حرکت آزاد Move به گام شبکه می‌چسبد؛ Alt موقتاً Snap را دور می‌زند. */
-        const snapped = e.altKey
-          ? { z: raw.z - moveSession.origin.z, r: raw.r - moveSession.origin.r }
-          : quantStep(raw, moveSession.origin);
-        const dz = nearOrigin ? 0 : axis === "y" ? 0 : snapped.z;
-        const dr = nearOrigin ? 0 : axis === "x" ? 0 : snapped.r;
-        if (moveSession.editBase && moveSession.editVertexIds && edit) {
-          const moving = new Set(moveSession.editVertexIds);
-          onEditBuf({ ...edit, verts: moveSession.editBase.map((v) => moving.has(v.id) ? { ...v, z: v.z + dz, x: v.x + 2 * dr } : v) }, false);
-        } else if (moveSession.pointRefs) {
-          const moving = new Set(moveSession.pointRefs.map((point) => `${point.segId}:${point.part}`));
-          onSegs(moveSession.base.map((segment) => {
-            const next = { ...segment };
-            for (const part of ["a", "b", "c1", "c2", "via"] as SketchPointPart[]) {
-              const point = segment[part];
-              if (point && moving.has(`${segment.id}:${part}`)) next[part] = { z: point.z + dz, r: point.r + dr };
+        let dz = 0;
+        let dr = 0;
+        if (editOpen && settings.smartSnap && !e.altKey) {
+          const skipEditVerts = new Set(moveSession.editVertexIds ?? []);
+          const skipSplit = !!moveSession.splitBase;
+          const directSnap = applySnap(raw, [], { skipEditVerts, skipSplit });
+          if (directSnap.hit && directSnap.hit.type !== "grid") {
+            dz = nearOrigin ? 0 : axis === "y" ? 0 : directSnap.p.z - moveSession.origin.z;
+            dr = nearOrigin ? 0 : axis === "x" ? 0 : directSnap.p.r - moveSession.origin.r;
+            setSnapHit(nearOrigin ? null : directSnap.hit);
+          } else {
+            const singleVid = moveSession.editVertexIds?.length === 1 ? moveSession.editVertexIds[0] : null;
+            const singleBase = singleVid != null ? moveSession.editBase?.find((v) => v.id === singleVid) : null;
+            const candidate = singleBase
+              ? { z: singleBase.z + (raw.z - moveSession.origin.z), r: singleBase.x / 2 + (raw.r - moveSession.origin.r) }
+              : null;
+            const vertSnap = candidate ? applySnap(candidate, [], { skipEditVerts, skipSplit }) : null;
+            if (singleBase && vertSnap?.hit && vertSnap.hit.type !== "grid") {
+              dz = nearOrigin ? 0 : axis === "y" ? 0 : vertSnap.p.z - singleBase.z;
+              dr = nearOrigin ? 0 : axis === "x" ? 0 : vertSnap.p.r - singleBase.x / 2;
+              setSnapHit(nearOrigin ? null : vertSnap.hit);
+            } else {
+              const q = quantStep(raw, moveSession.origin);
+              dz = nearOrigin ? 0 : axis === "y" ? 0 : q.z;
+              dr = nearOrigin ? 0 : axis === "x" ? 0 : q.r;
+              setSnapHit(null);
             }
-            return next;
-          }), false);
-        } else onSegs(movePolylineSelection(moveSession.base,moveSession.ids,dz,dr), false);
+          }
+        } else {
+          /* حرکت آزاد Move به گام شبکه می‌چسبد؛ Alt موقتاً Snap را دور می‌زند. */
+          const snapped = e.altKey
+            ? { z: raw.z - moveSession.origin.z, r: raw.r - moveSession.origin.r }
+            : quantStep(raw, moveSession.origin);
+          dz = nearOrigin ? 0 : axis === "y" ? 0 : snapped.z;
+          dr = nearOrigin ? 0 : axis === "x" ? 0 : snapped.r;
+          setSnapHit(null);
+        }
+        applyMoveDelta(moveSession, dz, dr, false);
       }
       return;
     }
@@ -3584,6 +3850,12 @@ export default function ProfileEditor({
         setCursor(nearestOnSketch(raw));
         setSnapHit(null);
       } else {
+        if (tool === "move") {
+          const ploc = toLocal(e.clientX, e.clientY);
+          setSplitHovered(hitSplitMarker(ploc.x, ploc.y));
+        } else {
+          setSplitHovered(false);
+        }
         const { p, hit } = applySnap(raw);
         setCursor(constrainDraftPoint(p));
         setSnapHit(hit);
@@ -3612,11 +3884,12 @@ export default function ProfileEditor({
       /* رأس‌های مشترک = یک‌جا جابه‌جا می‌شوند → همسایه‌ها بی‌درز دنباله می‌آیند؛
          جابه‌جایی از مبنایِ لحظهٔ کلیک و با گامِ شبکه (فقط «میزان» حرکت) */
       const { z: qz, r: qr } = quantStep(raw, d.start);
-const nv = verts.map((v) => {
-          const b0 = d.base.get(v.id);
-          return b0 ? { ...v, z: b0.z + qz, x: b0.x + 2 * qr } : v;
-        });
-        setBufGeom(nv, lines, false);
+      const nv = verts.map((v) => {
+        const b0 = d.base.get(v.id);
+        return b0 ? { ...v, z: b0.z + qz, x: b0.x + 2 * qr } : v;
+      });
+      const nextSplit = d.baseSplit ? { ...d.baseSplit, z: d.baseSplit.z + qz, r: d.baseSplit.r + qr } : undefined;
+      setBufGeom(nv, lines, false, nextSplit);
       return;
     }
     if (d.mode === "evert") {
@@ -3626,7 +3899,74 @@ const nv = verts.map((v) => {
         const origin = d.base.get(v.id);
         return origin ? { ...v, z: origin.z + qz, x: origin.x + 2 * qr } : v;
       });
-      setBufGeom(nv, lines, false);
+      const nextSplit = d.baseSplit ? { ...d.baseSplit, z: d.baseSplit.z + qz, r: d.baseSplit.r + qr } : undefined;
+      setBufGeom(nv, lines, false, nextSplit);
+      return;
+    }
+    if (d.mode === "esplit") {
+      if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 3) d.moved = true;
+      if (!d.moved || !edit) return;
+      const rawStep = e.altKey ? { z: raw.z - d.start.z, r: raw.r - d.start.r } : quantStep(raw, d.start);
+      const dz = e.shiftKey ? (Math.abs(rawStep.z) >= Math.abs(rawStep.r) ? rawStep.z : 0) : rawStep.z;
+      const dr = e.shiftKey ? (Math.abs(rawStep.z) >= Math.abs(rawStep.r) ? 0 : rawStep.r) : rawStep.r;
+      const nextSplit: SplitState = { ...d.baseSplit, z: d.baseSplit.z + dz, r: d.baseSplit.r + dr };
+      if (d.baseVerts.size > 0) {
+        const nv = verts.map((v) => {
+          const b0 = d.baseVerts.get(v.id);
+          return b0 ? { ...v, z: b0.z + dz, x: b0.x + 2 * dr } : v;
+        });
+        setBufGeom(nv, lines, false, nextSplit);
+      } else {
+        onEditBuf({ ...edit, split: nextSplit }, false);
+      }
+      return;
+    }
+    if (d.mode === "split") {
+      if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 3) d.moved = true;
+      if (!d.moved) return;
+      let dz: number;
+      let dr: number;
+      if (!d.segIds.length && !d.pointRefs.length && !e.altKey) {
+        const candidate = { z: d.baseSplit.z + (raw.z - d.start.z), r: d.baseSplit.r + (raw.r - d.start.r) };
+        const snapped = applySnap(candidate);
+        setSnapHit(snapped.hit);
+        const sdz = snapped.p.z - d.baseSplit.z;
+        const sdr = snapped.p.r - d.baseSplit.r;
+        dz = e.shiftKey ? (Math.abs(sdz) >= Math.abs(sdr) ? sdz : 0) : sdz;
+        dr = e.shiftKey ? (Math.abs(sdz) >= Math.abs(sdr) ? 0 : sdr) : sdr;
+      } else {
+        const rawStep = e.altKey ? { z: raw.z - d.start.z, r: raw.r - d.start.r } : quantStep(raw, d.start);
+        dz = e.shiftKey ? (Math.abs(rawStep.z) >= Math.abs(rawStep.r) ? rawStep.z : 0) : rawStep.z;
+        dr = e.shiftKey ? (Math.abs(rawStep.z) >= Math.abs(rawStep.r) ? 0 : rawStep.r) : rawStep.r;
+        setSnapHit(null);
+      }
+      if (d.segIds.length) {
+        const moving = d.baseSegs.filter((s) => d.segIds.includes(s.id));
+        const bounds = moving.map(segBounds);
+        const minZ = Math.min(...bounds.map((b) => b.minZ));
+        const maxZ = Math.max(...bounds.map((b) => b.maxZ));
+        const minR = Math.min(...bounds.map((b) => b.minR));
+        const maxR = Math.max(...bounds.map((b) => b.maxR));
+        dz = Math.min(L - maxZ, Math.max(-minZ, dz));
+        dr = Math.min(R - maxR, Math.max(-minR, dr));
+        const nextSplit: SplitState = { ...d.baseSplit, z: d.baseSplit.z + dz, r: d.baseSplit.r + dr };
+        onSegs(movePolylineSelection(d.baseSegs, d.segIds, dz, dr), false, nextSplit);
+      } else if (d.pointRefs.length) {
+        const moving = new Set(d.pointRefs.map((point) => `${point.segId}:${point.part}`));
+        const nextSegs = d.baseSegs.map((segment) => {
+          const next = { ...segment };
+          for (const part of ["a", "b", "c1", "c2", "via"] as SketchPointPart[]) {
+            const point = segment[part];
+            if (point && moving.has(`${segment.id}:${part}`)) next[part] = { z: point.z + dz, r: point.r + dr };
+          }
+          return next;
+        });
+        const nextSplit: SplitState = { ...d.baseSplit, z: d.baseSplit.z + dz, r: d.baseSplit.r + dr };
+        onSegs(nextSegs, false, nextSplit);
+      } else {
+        const nextSplit: SplitState = { ...d.baseSplit, z: d.baseSplit.z + dz, r: d.baseSplit.r + dr };
+        onSplit(nextSplit, false);
+      }
       return;
     }
     if (d.mode === "eoff") {
@@ -3668,11 +4008,11 @@ const nv = verts.map((v) => {
       const mode: "window" | "crossing" = loc.x >= d.sx ? "window" : "crossing";
       setMarquee({ x0: d.sx, y0: d.sy, x1: loc.x, y1: loc.y, add: e.shiftKey, remove: e.ctrlKey || e.metaKey });
       if (editOpen) {
-        /* در ویرایش مسیر فقط پیش‌نمایش EditBuf محاسبه می‌شود؛ پروفایل اصلی
-           نباید حتی به‌صورت موقت داخل باکس هایلایت شود. */
+        /* در ویرایش مسیر فقط پیش‌نمایش EditBuf و نشان قرمز Split محاسبه می‌شود؛ پروفایل اصلی
+           و نشان آبی Split هرگز داخل باکس انتخاب نمی‌شوند. */
         setMarqueeHits([]);
         setMarqueePointHits([]);
-        setMarqueeSplitHit(false);
+        setMarqueeSplitHit(marqueeHitsSplit(rectW));
         setBufMarq(bufMarqueeHits(rectW, mode));
       } else {
         setBufMarq(null);
@@ -3830,7 +4170,14 @@ const nv = verts.map((v) => {
           }
         }
       }
-      onSegs(merged, false);
+      const nextSplitFromHandle = d.baseSplit && d.startPt
+        ? {
+            ...d.baseSplit,
+            z: d.baseSplit.z + dz * zScale,
+            r: d.baseSplit.r + dr * rScale,
+          }
+        : undefined;
+      onSegs(merged, false, nextSplitFromHandle);
       return;
     }
 
@@ -3850,6 +4197,8 @@ const nv = verts.map((v) => {
           }
         } else if (!d.ids.includes(d.clicked)) {
           d.ids = [d.clicked];
+          d.baseSplit = undefined;
+          setSplitSelected(false);
         }
         onSelected([...d.ids]);
         d.last = raw;
@@ -3868,7 +4217,11 @@ const nv = verts.map((v) => {
          بیرون خام بمانند، درحالی‌که انتقال کل خط از مرز عبور نمی‌کند. */
       const dz = Math.min(L - maxZ, Math.max(-minZ, requestedDz));
       const dr = Math.min(R - maxR, Math.max(-minR, requestedDr));
-      onSegs(movePolylineSelection(segs,d.ids,dz,dr), false);
+      const nextSegs = movePolylineSelection(segs, d.ids, dz, dr);
+      const nextSplit = d.baseSplit
+        ? { ...split, z: split.z + dz, r: split.r + dr }
+        : undefined;
+      onSegs(nextSegs, false, nextSplit);
     }
   };
 
@@ -4028,8 +4381,7 @@ const nv = verts.map((v) => {
     if (tool === "move") {
       if (d?.mode === "rwait" && !d.moved) {
         /* راست‌کلیک ساده دقیقاً مانند Esc: لغو Preview و خروج از Move. */
-        if (moveSession?.editBase && edit) onEditBuf({ ...edit, verts: moveSession.editBase }, false);
-        else if (moveSession) onSegs(moveSession.base, false);
+        cancelMoveSession(moveSession);
         setMoveBox(null);
         setMoveSession(null);
         chooseTool("select");
@@ -4060,7 +4412,29 @@ const nv = verts.map((v) => {
         if (d.mode === "eline" && d.holder2) {
           const fin = normalizeEditBuf(d.holder2.latestVerts, edit.lines);
           onEditBuf({ ...edit, verts: fin.verts, lines: fin.lines, holder2: d.holder2.next }, true);
-        } else setBufGeom(edit.verts, edit.lines, true);
+        } else setBufGeom(edit.verts, edit.lines, true, d.baseSplit ? edit.split : undefined);
+      }
+      return;
+    }
+    if (d?.mode === "esplit") {
+      if (edit && d.moved) {
+        if (d.baseVerts.size > 0) setBufGeom(edit.verts, edit.lines, true, edit.split);
+        else onEditBuf({ ...edit }, true);
+      } else if (!d.moved && d.hadMulti) {
+        selectEditLines([], null, true);
+        setSelV([]);
+        setSplitSelected(true);
+      }
+      return;
+    }
+    if (d?.mode === "split") {
+      if (d.moved) {
+        if (d.segIds.length || d.pointRefs.length) onSegs(segs, true, split);
+        else onSplit(split, true);
+      } else if (d.hadMulti) {
+        onSelected([]);
+        setSelPoints([]);
+        setSplitSelected(true);
       }
       return;
     }
@@ -4110,7 +4484,7 @@ const nv = verts.map((v) => {
         else {
           const ploc=toLocal(e.clientX,e.clientY),world=worldPt(camRef.current!,ploc.x,ploc.y);
           const empty=editOpen
-            ? hitBufLine(ploc.x,ploc.y)==null&&hitBufVx(ploc.x,ploc.y)==null&&hitOffSeg(ploc.x,ploc.y)==null
+            ? hitBufLine(ploc.x,ploc.y)==null&&hitBufVx(ploc.x,ploc.y)==null&&hitOffSeg(ploc.x,ploc.y)==null&&!hitSplitMarker(ploc.x,ploc.y)
             : !hitSeg(world)&&hitHandle(world)==null&&!hitSplitMarker(ploc.x,ploc.y);
           if(rightClickToolToggle&&empty){const previous=previousToolRef.current;if(!editOpen||previous==="select"||previous==="move")chooseTool(previous);}
           else if (editOpen) openSpeedMenu(e.clientX, e.clientY);
@@ -4170,27 +4544,31 @@ const nv = verts.map((v) => {
         else if(addPaint)setSelectedPaintPoints(points=>[...points,...pointHitsPaint.filter(h=>!points.some(p=>pointKey(p)===pointKey(h)))]);
         else setSelectedPaintPoints(pointHitsPaint);
       }
-      /* باکس در حالت ادیت: اول خطوط/رأس‌های برنامه؛ اگر چیزی نگرفت، رفتار همیشگیِ پروفایل */
+      /* باکس در حالت ادیت: اول خطوط/رأس‌های برنامه و نشان قرمز Split؛ نقطه آبی هرگز انتخاب نمی‌شود */
       if (editOpen) {
         const bh = bufMarqueeHits(rectW, mode);
-        if (bh.ids.length || bh.vxs.length) {
-          const remove = e.ctrlKey || e.metaKey;
-          const add = e.shiftKey;
+        const splitHitEdit = marqueeHitsSplit(rectW);
+        const remove = e.ctrlKey || e.metaKey;
+        const add = e.shiftKey;
+        if (bh.ids.length || bh.vxs.length || splitHitEdit) {
           if (remove) {
             const nextLines = selL.filter((id) => !bh.ids.includes(id));
             const nextVerts = selV.filter((id) => !bh.vxs.includes(id));
             selectEditLines(nextLines, nextLines.includes(activeLine ?? -1) ? activeLine : null, true);
             setSelV(nextVerts);
+            if (splitHitEdit) setSplitSelected(false);
             if (!nextLines.length && nextVerts.length) focusEditVertexInGCode(nextVerts[nextVerts.length - 1]);
           } else if (add) {
             const nextLines = [...selL, ...bh.ids.filter((id) => !selL.includes(id))];
             const nextVerts = [...selV, ...bh.vxs.filter((id) => !selV.includes(id))];
             selectEditLines(nextLines, bh.ids[bh.ids.length - 1] ?? activeLine, true);
             setSelV(nextVerts);
+            if (splitHitEdit) setSplitSelected(true);
             if (!nextLines.length && nextVerts.length) focusEditVertexInGCode(nextVerts[nextVerts.length - 1]);
           } else {
             selectEditLines(bh.ids, bh.ids[bh.ids.length - 1] ?? null, true);
             setSelV(bh.vxs);
+            setSplitSelected(splitHitEdit);
             if (!bh.ids.length && bh.vxs.length) focusEditVertexInGCode(bh.vxs[bh.vxs.length - 1]);
           }
           setBufMarq(null);
@@ -4201,6 +4579,7 @@ const nv = verts.map((v) => {
         if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
           selectEditLines([], null, true);
           setSelV([]);
+          setSplitSelected(false);
         }
         return;
       }
@@ -4237,7 +4616,7 @@ const nv = verts.map((v) => {
              render ثبت تاریخچه آن را پاک می‌کنیم تا پس از MouseUp حتی یک فریم
              در محل قدیمی چشمک نزند؛ حرکت بعدی موس دوباره نشانگر را می‌سازد. */
           setCursor(null);
-          onSegs(segs, true); // ثبت در تاریخچه
+          onSegs(segs, true, d.baseSplit ? split : undefined); // ثبت در تاریخچه
           const owner=segs.find(segment=>segment.id===ref.segId);
           const anchor=ref.part==="c1"?owner?.a:ref.part==="c2"?owner?.b:null;
           const keepVertex=!!anchor&&selPoints.some(point=>{
@@ -4251,17 +4630,21 @@ const nv = verts.map((v) => {
         if (tool === "select") {
           if (e.shiftKey) setSelPoints(exists ? selPoints.filter((p) => pkey(p) !== pkey(ref)) : [...selPoints, ref]);
           else if (e.ctrlKey || e.metaKey) setSelPoints(selPoints.filter((p) => pkey(p) !== pkey(ref)));
-          else setSelPoints([ref]);
+          else {
+            setSelPoints([ref]);
+            setSplitSelected(false);
+          }
           return;
         }
         /* کلیک بدون Drag در ابزار رسم باید نقطهٔ مرحلهٔ رسم را ثبت کند. */
       }
       if (d.mode === "move") {
         if (d.moved) {
-          onSegs(segs, true); // ثبت در تاریخچه
+          onSegs(segs, true, d.baseSplit ? split : undefined); // ثبت در تاریخچه
           return;
         }
         /* کلیک بدون درگ روی المان */
+        if (!e.shiftKey && !e.ctrlKey && !e.metaKey) setSplitSelected(false);
         const id = d.clicked;
         const objectIds = sketchObjectIds(id);
         // اتصال هندسیِ تازه‌شده را به‌صورت پایدار در همان Polyline ثبت می‌کنیم
@@ -4738,8 +5121,7 @@ const nv = verts.map((v) => {
     if (boxRotateSession) onSegs(boxRotateSession.base,false);
     setBoxRotateSession(null); setBoxRotateBox(null); setBoxScalePivot(null);
     if (moveSession) {
-      if (moveSession.editBase && edit) onEditBuf({ ...edit, verts: moveSession.editBase }, false);
-      else onSegs(moveSession.base, false);
+      cancelMoveSession(moveSession);
     }
     if (copySession) onSegs(copySession.base, false);
     if (mirrorSession) onSegs(mirrorSession.base, false);
@@ -4760,8 +5142,12 @@ const nv = verts.map((v) => {
     const editCurrent = editBase ? edit?.verts.find((vertex) => vertex.id === editBase.id) : null;
     const base = moveSession.base.find((segment) => moveSession.ids.includes(segment.id));
     const current = base ? segs.find((segment) => segment.id === base.id) : null;
-    const bz = editBase?.z ?? base?.a.z, br = editBase ? editBase.x / 2 : base?.a.r;
-    const cz = editCurrent?.z ?? current?.a.z, cr = editCurrent ? editCurrent.x / 2 : current?.a.r;
+    const splitBaseZ = moveSession.splitBase ? moveSession.splitBase.z + (editOpen ? params.gcodeShiftX : 0) : undefined;
+    const splitBaseR = moveSession.splitBase ? moveSession.splitBase.r + (editOpen ? params.gcodeShiftY : 0) : undefined;
+    const bz = editBase?.z ?? base?.a.z ?? splitBaseZ;
+    const br = editBase ? editBase.x / 2 : (base?.a.r ?? splitBaseR);
+    const cz = editCurrent?.z ?? current?.a.z ?? shownSplitPoint?.z;
+    const cr = editCurrent ? editCurrent.x / 2 : (current?.a.r ?? shownSplitPoint?.r);
     if (bz != null && br != null && cz != null && cr != null) {
       moveReadout = moveSession.mode === "absolute"
         ? `${concise(cz)}, ${concise(cr)} · ABS`
@@ -5389,12 +5775,12 @@ const nv = verts.map((v) => {
         })()}
 
         {/* نقطه Split */}
-        {split.enabled && (
-          <g pointerEvents={editOpen ? "none" : undefined}>
+        {shownSplitPoint && (
+          <g pointerEvents={tool === "select" || tool === "move" ? undefined : "none"}>
             {(() => {
-              const [x, y] = P(split.z, split.r);
+              const [x, y] = P(shownSplitPoint.z, shownSplitPoint.r);
               return (
-                <g style={editOpen ? undefined : { cursor: "pointer" }}>
+                <g style={tool === "select" || tool === "move" ? { cursor: "pointer" } : undefined}>
                   {(splitSelected || splitHovered || marqueeSplitHit) && (
                     <circle
                       cx={x}
@@ -6000,8 +6386,7 @@ const nv = verts.map((v) => {
             onKeyDown={(e) => {
               e.stopPropagation();
               if (e.key === "Escape") {
-                if (moveSession.editBase && edit) onEditBuf({ ...edit, verts: moveSession.editBase }, false);
-                else onSegs(moveSession.base, false);
+                cancelMoveSession(moveSession);
                 setMoveBox(null);
                 setMoveSession(null);
                 drag.current = null;
@@ -6034,13 +6419,8 @@ const nv = verts.map((v) => {
       if (values.length === 2) { dz -= anchor.z; dr -= anchor.r; }
       else if (dz) dz = Math.abs(dz) - anchor.z; else dr = Math.abs(dr) - anchor.r;
     }
-              if (moveSession.editBase && moveSession.editVertexIds && edit) {
-                const moving = new Set(moveSession.editVertexIds);
-                onEditBuf({ ...edit, verts: moveSession.editBase.map((v) => moving.has(v.id) ? { ...v, z: v.z + dz, x: v.x + 2 * dr } : v) }, true);
-              } else {
-                const next = movePolylineSelection(moveSession.base,moveSession.ids,dz,dr);
-                onSegs(next, true);
-              }
+              applyMoveDelta(moveSession, dz, dr, true);
+              setSnapHit(null);
               setLastMove({ dz, dr }); setMoveBox(null); setMoveSession(null);
             }} />
           <div className={cn(
@@ -6070,8 +6450,7 @@ const nv = verts.map((v) => {
                   setScaleBox(null);
                 }
                 if (t.id === "move" && moveSession) {
-                  if (moveSession.editBase && edit) onEditBuf({ ...edit, verts: moveSession.editBase }, false);
-                  else onSegs(moveSession.base, false);
+                  cancelMoveSession(moveSession);
                   setMoveBox(null);
                   setMoveSession(null);
                   drag.current = null;
@@ -6104,11 +6483,11 @@ const nv = verts.map((v) => {
           </button>
           <button
             onClick={deleteSelection}
-            disabled={!selected.length && !splitSelected}
-            title={selected.length && splitSelected ? "حذف خطوط و نقطه Split (Delete)" : splitSelected ? "حذف نقطه Split (Delete)" : "حذف انتخابی (Delete)"}
+            disabled={editOpen || (!selected.length && !splitSelected)}
+            title={!editOpen && selected.length && splitSelected ? "حذف خطوط و نقطه Split (Delete)" : !editOpen && splitSelected ? "حذف نقطه Split (Delete)" : "حذف انتخابی (Delete)"}
             className={cn(
               "grid h-[27px] w-full place-items-center border-t border-edge transition-colors",
-              selected.length || splitSelected ? "text-danger/80 hover:bg-danger/15 hover:text-danger" : "text-dim/40"
+              !editOpen && (selected.length || splitSelected) ? "text-danger/80 hover:bg-danger/15 hover:text-danger" : "text-dim/40"
             )}
           >
             <IconTrash className="h-3.5 w-3.5" />
