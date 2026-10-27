@@ -2858,7 +2858,7 @@ export default function ProfileEditor({
   /* ---------- تعامل ماوس ---------- */
   const drag = useRef<
     | { mode: "pan"; sx: number; sy: number; cam0: Cam; moved: boolean; btn: number }
-    | { mode: "handle"; ref: HandleRef; cluster: { segId: number; part: HandleRef["part"] }[]; moved: boolean; baseSplit?: SplitState; startPt?: SPoint }
+    | { mode: "handle"; ref: HandleRef; cluster: { segId: number; part: HandleRef["part"] }[]; sx: number; sy: number; moved: boolean; baseSplit?: SplitState; startPt?: SPoint }
     | { mode: "move"; ids: number[]; clicked: number; last: SPoint; sx: number; sy: number; moved: boolean; baseSplit?: SplitState; baseSegs: SketchSeg[] }
     | { mode: "split"; start: SPoint; baseSplit: SplitState; baseSegs: SketchSeg[]; segIds: number[]; pointRefs: { segId: number; part: SketchPointPart }[]; sx: number; sy: number; moved: boolean; hadMulti: boolean }
     | { mode: "draw"; sx: number; sy: number; cam0: Cam; moved: boolean }
@@ -3203,9 +3203,24 @@ export default function ProfileEditor({
 
     /* در ابزارهای رسم نیز کشیدن یک نقطهٔ موجود، همان نقطه/دسته را جابه‌جا می‌کند.
        کلیک ساده همچنان در pointerup به‌عنوان ورودی ابزار رسم پردازش می‌شود. */
+    const rawCandidateHandle = !editOpen ? hitHandle(raw) : null;
+    const rawCandidateOwner = rawCandidateHandle ? segs.find((segment) => segment.id === rawCandidateHandle.segId) : undefined;
+    const rawCandidatePt = rawCandidateHandle ? rawCandidateOwner?.[rawCandidateHandle.part] : undefined;
+    const rawCandidateSelected = !!rawCandidateHandle && !!rawCandidatePt && selPoints.some((point) => {
+      const segment = segs.find((item) => item.id === point.segId), selectedPoint = segment?.[point.part];
+      if (!selectedPoint) return false;
+      return (rawCandidateHandle.part === "a" || rawCandidateHandle.part === "b") && (point.part === "a" || point.part === "b")
+        ? dist(selectedPoint, rawCandidatePt) < 1e-8
+        : point.segId === rawCandidateHandle.segId && point.part === rawCandidateHandle.part;
+    });
     const locForSplitBeforeHandle = !editOpen && tool === "select" ? toLocal(e.clientX, e.clientY) : null;
-    const onMainSplitBeforeHandle = locForSplitBeforeHandle ? hitSplitMarker(locForSplitBeforeHandle.x, locForSplitBeforeHandle.y) : false;
-    const drawingHandle = !editOpen && !onMainSplitBeforeHandle ? hitHandle(raw) : null;
+    /* اگر خود رأس زیر نشانگر و نقطه Split هر دو از قبل انتخاب شده باشند (و کلید کمکی فشرده نباشد)،
+       درگ از مسیر یکپارچهٔ handle انجام می‌شود تا رفتار اسنپ، کران خام و اتصال اضلاع دقیقاً مشابه سایر نقاط باشد. */
+    const onMainSplitBeforeHandle = locForSplitBeforeHandle
+      ? hitSplitMarker(locForSplitBeforeHandle.x, locForSplitBeforeHandle.y) &&
+        !(rawCandidateSelected && splitSelected && split.enabled && !e.shiftKey && !e.ctrlKey && !e.metaKey)
+      : false;
+    const drawingHandle = !editOpen && !onMainSplitBeforeHandle ? rawCandidateHandle : null;
     if (drawingHandle) {
       const cluster = drawingHandle.part === "a" || drawingHandle.part === "b"
         ? clusterOf(drawingHandle.segId, drawingHandle.part)
@@ -3221,11 +3236,21 @@ export default function ProfileEditor({
           ? dist(selectedPoint, clickedPoint) < 1e-8
           : point.segId === drawingHandle.segId && point.part === drawingHandle.part;
       });
-      const keepSplitWithHandle = tool === "select" && splitSelected && split.enabled && (drawingPointSelected || e.shiftKey);
+      const partOfSelectedSeg = cluster.some((m) => selected.includes(m.segId));
+      const isVertexLike = drawingHandle.part === "a" || drawingHandle.part === "b" || drawingHandle.part === "via";
+      const keepSplitWithHandle =
+        tool === "select" &&
+        splitSelected &&
+        split.enabled &&
+        ((drawingPointSelected && (isVertexLike || selPoints.length > 1)) ||
+          (partOfSelectedSeg && isVertexLike) ||
+          e.shiftKey);
       drag.current = {
         mode: "handle",
         ref: drawingHandle,
         cluster,
+        sx: e.clientX,
+        sy: e.clientY,
         moved: false,
         baseSplit: keepSplitWithHandle && clickedPoint ? { ...split } : undefined,
         startPt: clickedPoint ? { ...clickedPoint } : undefined,
@@ -3233,7 +3258,7 @@ export default function ProfileEditor({
       /* انتخاب نقطه مستقل از انتخاب Segment است. بدون کلید کمکی فقط خود نقطه
          فعال می‌شود؛ نقاط هم‌مکان صرفاً اتصال هندسی خود را حفظ می‌کنند. */
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
-        if (!drawingPointSelected) setSplitSelected(false);
+        if (!drawingPointSelected && !(partOfSelectedSeg && isVertexLike && splitSelected)) setSplitSelected(false);
         /* اگر نقطه/دسته متعلق به Polyline انتخاب‌شده است، Drag آن نباید انتخاب
            کل Polyline را پاک کند؛ انتخاب فقط برای هندسهٔ خارج از گروه عوض می‌شود. */
         if(!selected.includes(drawingHandle.segId))onSelected([]);
@@ -3934,14 +3959,24 @@ export default function ProfileEditor({
         const sdr = snapped.p.r - d.baseSplit.r;
         dz = e.shiftKey ? (Math.abs(sdz) >= Math.abs(sdr) ? sdz : 0) : sdz;
         dr = e.shiftKey ? (Math.abs(sdz) >= Math.abs(sdr) ? 0 : sdr) : sdr;
+      } else if (!d.segIds.length && d.pointRefs.length && !e.altKey) {
+        const skipIds = [...new Set(d.pointRefs.map((pt) => pt.segId))];
+        const candidate = { z: d.baseSplit.z + (raw.z - d.start.z), r: d.baseSplit.r + (raw.r - d.start.r) };
+        const snapped = applySnap(candidate, skipIds);
+        setSnapHit(snapped.hit);
+        const sdz = snapped.p.z - d.baseSplit.z;
+        const sdr = snapped.p.r - d.baseSplit.r;
+        dz = e.shiftKey ? (Math.abs(sdz) >= Math.abs(sdr) ? sdz : 0) : sdz;
+        dr = e.shiftKey ? (Math.abs(sdz) >= Math.abs(sdr) ? 0 : sdr) : sdr;
       } else {
-        const rawStep = e.altKey ? { z: raw.z - d.start.z, r: raw.r - d.start.r } : quantStep(raw, d.start);
-        dz = e.shiftKey ? (Math.abs(rawStep.z) >= Math.abs(rawStep.r) ? rawStep.z : 0) : rawStep.z;
-        dr = e.shiftKey ? (Math.abs(rawStep.z) >= Math.abs(rawStep.r) ? 0 : rawStep.r) : rawStep.r;
+        const rawDelta = { z: raw.z - d.start.z, r: raw.r - d.start.r };
+        dz = e.shiftKey ? (Math.abs(rawDelta.z) >= Math.abs(rawDelta.r) ? rawDelta.z : 0) : rawDelta.z;
+        dr = e.shiftKey ? (Math.abs(rawDelta.z) >= Math.abs(rawDelta.r) ? 0 : rawDelta.r) : rawDelta.r;
         setSnapHit(null);
       }
       if (d.segIds.length) {
-        const moving = d.baseSegs.filter((s) => d.segIds.includes(s.id));
+        const segSet = new Set(d.segIds);
+        const moving = d.baseSegs.filter((s) => segSet.has(s.id));
         const bounds = moving.map(segBounds);
         const minZ = Math.min(...bounds.map((b) => b.minZ));
         const maxZ = Math.max(...bounds.map((b) => b.maxZ));
@@ -3949,19 +3984,62 @@ export default function ProfileEditor({
         const maxR = Math.max(...bounds.map((b) => b.maxR));
         dz = Math.min(L - maxZ, Math.max(-minZ, dz));
         dr = Math.min(R - maxR, Math.max(-minR, dr));
+        let nextSegs = movePolylineSelection(d.baseSegs, d.segIds, dz, dr);
+        const extraPoints = d.pointRefs.filter((pt) => !segSet.has(pt.segId));
+        if (extraPoints.length) {
+          const movingPts = new Set(extraPoints.map((pt) => `${pt.segId}:${pt.part}`));
+          nextSegs = nextSegs.map((segment) => {
+            if (segSet.has(segment.id)) return segment;
+            const baseSeg = d.baseSegs.find((b) => b.id === segment.id) ?? segment;
+            let next = { ...segment };
+            for (const part of ["a", "b", "c1", "c2", "via"] as SketchPointPart[]) {
+              const point = baseSeg[part];
+              if (point && movingPts.has(`${segment.id}:${part}`)) {
+                next = withSegPoint(next, part, { z: point.z + dz, r: point.r + dr });
+              }
+            }
+            return segInsideStock(next, L, R) ? next : segment;
+          });
+        }
         const nextSplit: SplitState = { ...d.baseSplit, z: d.baseSplit.z + dz, r: d.baseSplit.r + dr };
-        onSegs(movePolylineSelection(d.baseSegs, d.segIds, dz, dr), false, nextSplit);
+        onSegs(nextSegs, false, nextSplit);
       } else if (d.pointRefs.length) {
         const moving = new Set(d.pointRefs.map((point) => `${point.segId}:${point.part}`));
-        const nextSegs = d.baseSegs.map((segment) => {
-          const next = { ...segment };
-          for (const part of ["a", "b", "c1", "c2", "via"] as SketchPointPart[]) {
-            const point = segment[part];
-            if (point && moving.has(`${segment.id}:${part}`)) next[part] = { z: point.z + dz, r: point.r + dr };
+        const involvedIds = new Set(d.pointRefs.map((point) => point.segId));
+        const involvedBase = d.baseSegs.filter((s) => involvedIds.has(s.id));
+        const applyPointShift = (source: SketchSeg[], ddz: number, ddr: number) =>
+          source.map((segment) => {
+            let next = segment;
+            for (const part of ["a", "b", "c1", "c2", "via"] as SketchPointPart[]) {
+              const point = segment[part];
+              if (point && moving.has(`${segment.id}:${part}`)) {
+                next = withSegPoint(next, part, { z: point.z + ddz, r: point.r + ddr });
+              }
+            }
+            return next;
+          });
+        const valid = (cand: SketchSeg[]) => cand.every((s) => segInsideStock(s, L, R));
+        const scaleAxis = (source: SketchSeg[], ddz: number, ddr: number): number => {
+          if (Math.abs(ddz) + Math.abs(ddr) < 1e-12) return 1;
+          if (valid(applyPointShift(source, ddz, ddr))) return 1;
+          if (!valid(source)) return 0;
+          let lo = 0, hi = 1;
+          for (let i = 0; i < 12; i++) {
+            const mid = (lo + hi) / 2;
+            if (valid(applyPointShift(source, ddz * mid, ddr * mid))) lo = mid;
+            else hi = mid;
           }
-          return next;
-        });
-        const nextSplit: SplitState = { ...d.baseSplit, z: d.baseSplit.z + dz, r: d.baseSplit.r + dr };
+          return lo;
+        };
+        const zScale = scaleAxis(involvedBase, dz, 0);
+        const afterZ = applyPointShift(involvedBase, dz * zScale, 0);
+        const rScale = scaleAxis(afterZ, 0, dr);
+        const finalMoved = applyPointShift(afterZ, 0, dr * rScale);
+        const movedById = new Map(finalMoved.map((s) => [s.id, s]));
+        const nextSegs = d.baseSegs.map((s) => movedById.get(s.id) ?? s);
+        const actualDz = dz * zScale;
+        const actualDr = dr * rScale;
+        const nextSplit: SplitState = { ...d.baseSplit, z: d.baseSplit.z + actualDz, r: d.baseSplit.r + actualDr };
         onSegs(nextSegs, false, nextSplit);
       } else {
         const nextSplit: SplitState = { ...d.baseSplit, z: d.baseSplit.z + dz, r: d.baseSplit.r + dr };
@@ -4040,6 +4118,7 @@ export default function ProfileEditor({
     }
 
     if (d.mode === "handle") {
+      if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 3) return;
       d.moved = true;
       if ([...separated].some((key) => Number(key.split(":")[0]) === d.ref.segId)) setSeparated(new Set());
       const refSeg = segs.find((s) => s.id === d.ref.segId);
@@ -4048,7 +4127,15 @@ export default function ProfileEditor({
 
       /* اگر نقطهٔ درگ‌شده جزو چند نقطهٔ مستقلِ انتخاب‌شده است، همه با هم جابه‌جا می‌شوند */
       const inMulti = selPoints.length > 1 && d.cluster.some((member) =>
-        selPoints.some((point) => point.segId === member.segId && point.part === member.part)
+        selPoints.some((point) => {
+          if (point.segId === member.segId && point.part === member.part) return true;
+          if ((member.part === "a" || member.part === "b") && (point.part === "a" || point.part === "b")) {
+            const segA = segs.find((s) => s.id === member.segId);
+            const segB = segs.find((s) => s.id === point.segId);
+            return !!segA && !!segB && dist(segA[member.part], segB[point.part]) < 1e-8;
+          }
+          return false;
+        })
       );
 
       /* برای کنترل‌پوینت‌ها مقصد clamp نمی‌شود. کل جابه‌جایی (تکی یا چندانتخابی)
@@ -4170,11 +4257,13 @@ export default function ProfileEditor({
           }
         }
       }
-      const nextSplitFromHandle = d.baseSplit && d.startPt
+      const movedRefSeg = merged.find((s) => s.id === d.ref.segId);
+      const movedRefPt = movedRefSeg ? movedRefSeg[d.ref.part] : null;
+      const nextSplitFromHandle = d.baseSplit && d.startPt && movedRefPt
         ? {
             ...d.baseSplit,
-            z: d.baseSplit.z + dz * zScale,
-            r: d.baseSplit.r + dr * rScale,
+            z: d.baseSplit.z + (movedRefPt.z - d.startPt.z),
+            r: d.baseSplit.r + (movedRefPt.r - d.startPt.r),
           }
         : undefined;
       onSegs(merged, false, nextSplitFromHandle);
@@ -4631,8 +4720,15 @@ export default function ProfileEditor({
           if (e.shiftKey) setSelPoints(exists ? selPoints.filter((p) => pkey(p) !== pkey(ref)) : [...selPoints, ref]);
           else if (e.ctrlKey || e.metaKey) setSelPoints(selPoints.filter((p) => pkey(p) !== pkey(ref)));
           else {
-            setSelPoints([ref]);
-            setSplitSelected(false);
+            const locUp = toLocal(e.clientX, e.clientY);
+            if (!editOpen && split.enabled && hitSplitMarker(locUp.x, locUp.y)) {
+              onSelected([]);
+              setSelPoints([]);
+              setSplitSelected(true);
+            } else {
+              setSelPoints([ref]);
+              setSplitSelected(false);
+            }
           }
           return;
         }
