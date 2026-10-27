@@ -21,6 +21,17 @@ export const PANEL_IDS: PanelId[] = ["controls", "view3d", "editor", "gcode"];
 
 export const MIN_PANEL = 150;
 export const MAX_PANEL = 640;
+export const MIN_EDITOR_W = 180;
+export const MAX_UNBOUNDED_PANEL = 4096;
+
+/* محدودیت حداقل و حداکثر عرض هر پنل: نمای سه‌بعدی دقیقاً هم‌اندازه با پنجرهٔ طراحی پروفایل است */
+export function panelMinWidth(id: PanelId): number {
+  return id === "editor" || id === "view3d" ? MIN_EDITOR_W : MIN_PANEL;
+}
+
+export function panelMaxWidth(id: PanelId): number {
+  return id === "editor" || id === "view3d" ? MAX_UNBOUNDED_PANEL : MAX_PANEL;
+}
 
 export function defaultLayout(): LayoutState {
   return {
@@ -44,7 +55,7 @@ export function normalizeLayout(saved: unknown): LayoutState {
     if (typeof o.open === "boolean") out[id].open = o.open;
     if (typeof o.collapsed === "boolean") out[id].collapsed = o.collapsed;
     if (typeof o.size === "number" && Number.isFinite(o.size))
-      out[id].size = Math.min(MAX_PANEL, Math.max(MIN_PANEL, Math.round(o.size)));
+      out[id].size = Math.min(panelMaxWidth(id), Math.max(panelMinWidth(id), Math.round(o.size)));
   }
   if (Array.isArray(rec.order)) {
     const valid = rec.order.filter((x): x is PanelId => typeof x === "string" && (PANEL_IDS as string[]).includes(x));

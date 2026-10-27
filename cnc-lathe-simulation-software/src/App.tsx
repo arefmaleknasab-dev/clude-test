@@ -2,7 +2,7 @@ import "./point-scale.css";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ControlsPanel from "./components/ControlsPanel";
 import AIImportDialog from "./components/AIImportDialog";
-import { DockPanel, DockSplitter, MAX_PANEL, MIN_PANEL, PANEL_IDS, WindowMenu, defaultLayout, normalizeLayout } from "./components/Dock";
+import { DockPanel, DockSplitter, MIN_EDITOR_W, MIN_PANEL, PANEL_IDS, WindowMenu, defaultLayout, normalizeLayout, panelMaxWidth, panelMinWidth } from "./components/Dock";
 import type { LayoutState, PanelId, PanelState, PanelVis, WindowMenuItem } from "./components/Dock";
 import GCodePanel from "./components/GCodePanel";
 import ProfileEditor, { type EdSettings, type ReferenceImage } from "./components/ProfileEditor";
@@ -18,7 +18,6 @@ import { autoSplitPoint, branchPathPoints, branchPoints, chainPolyline, flattenS
 import { cn } from "./utils/cn";
 
 const STORE_KEY = "kharraatcode-v1";
-const MIN_EDITOR_W = 180;
 
 /* محاسبهٔ بودجهٔ دقیق عرض پنل‌های کناری بر اساس عرض واقعی ردیف فلکس تا هیچ پنلی (از جمله جی‌کد در سمت چپ) از کادر بیرون نزند */
 function computeSideBudget(l: LayoutState, rowW: number) {
@@ -38,15 +37,23 @@ function computeSideBudget(l: LayoutState, rowW: number) {
   const gapsW = Math.max(0, visItems - 1) * 8;
   const splittersW = splitterCount * 9;
   const collapsedW = collapsedCount * 44;
-  const flexReserve = flexPanelId === "editor" ? MIN_EDITOR_W : flexPanelId ? MIN_PANEL : 0;
+  const flexReserve = flexPanelId ? panelMinWidth(flexPanelId) : 0;
   /* ۲۴ پیکسل padding افقی (p-3) + ۲ پیکسل حاشیه اطمینان برای رندینگ زیرپیکسلی مرورگر */
   const innerAvail = rowW - 26 - gapsW - splittersW - collapsedW - flexReserve;
-  const minEach =
-    openSideIds.length > 0
-      ? Math.min(MIN_PANEL, Math.max(110, Math.floor(innerAvail / openSideIds.length)))
-      : MIN_PANEL;
-  const maxSideSum = Math.max(openSideIds.length * minEach, innerAvail);
-  return { openSideIds, flexPanelId, maxSideSum, minEach };
+  const rawMinSum = openSideIds.reduce((acc, id) => acc + panelMinWidth(id), 0);
+  const scale = rawMinSum > 0 && innerAvail < rawMinSum ? innerAvail / rawMinSum : 1;
+  const minById: Record<PanelId, number> = {
+    controls: MIN_PANEL,
+    view3d: MIN_EDITOR_W,
+    editor: MIN_EDITOR_W,
+    gcode: MIN_PANEL,
+  };
+  for (const id of openSideIds) {
+    minById[id] = scale < 1 ? Math.max(110, Math.floor(panelMinWidth(id) * scale)) : panelMinWidth(id);
+  }
+  const minSideSum = openSideIds.reduce((acc, id) => acc + minById[id], 0);
+  const maxSideSum = Math.max(minSideSum, innerAvail);
+  return { openSideIds, flexPanelId, maxSideSum, minById };
 }
 
 function getEffectiveSideSizes(l: LayoutState, rowW: number, isRow: boolean): Record<PanelId, number> {
@@ -57,29 +64,29 @@ function getEffectiveSideSizes(l: LayoutState, rowW: number, isRow: boolean): Re
     gcode: l.gcode.size,
   };
   if (!isRow) return out;
-  const { openSideIds, maxSideSum, minEach } = computeSideBudget(l, rowW);
+  const { openSideIds, maxSideSum, minById } = computeSideBudget(l, rowW);
   if (openSideIds.length === 0) return out;
   for (const id of openSideIds) {
-    out[id] = Math.max(minEach, Math.min(MAX_PANEL, Math.round(out[id])));
+    out[id] = Math.max(minById[id], Math.min(panelMaxWidth(id), Math.round(out[id])));
   }
   const sum = openSideIds.reduce((acc, id) => acc + out[id], 0);
   if (sum <= maxSideSum) return out;
 
   const excess = sum - maxSideSum;
-  const shrinkable = openSideIds.reduce((acc, id) => acc + Math.max(0, out[id] - minEach), 0);
+  const shrinkable = openSideIds.reduce((acc, id) => acc + Math.max(0, out[id] - minById[id]), 0);
   if (shrinkable <= 0) {
-    for (const id of openSideIds) out[id] = minEach;
+    for (const id of openSideIds) out[id] = minById[id];
     return out;
   }
   for (const id of openSideIds) {
-    const cap = Math.max(0, out[id] - minEach);
+    const cap = Math.max(0, out[id] - minById[id]);
     const take = Math.min(cap, Math.round((excess * cap) / shrinkable));
     out[id] -= take;
   }
   let rem = openSideIds.reduce((acc, id) => acc + out[id], 0) - maxSideSum;
   for (const id of openSideIds) {
     if (rem <= 0) break;
-    const canTake = Math.min(rem, Math.max(0, out[id] - minEach));
+    const canTake = Math.min(rem, Math.max(0, out[id] - minById[id]));
     out[id] -= canTake;
     rem -= canTake;
   }
@@ -894,15 +901,17 @@ export default function App() {
     const isRow = el ? getComputedStyle(el).flexDirection.startsWith("row") : rowW >= 896;
     setLayout((l) => {
       if (!isRow) {
-        const size = Math.min(MAX_PANEL, Math.max(MIN_PANEL, Math.round(l[id].size + dx)));
+        const size = Math.min(panelMaxWidth(id), Math.max(panelMinWidth(id), Math.round(l[id].size + dx)));
         return size === l[id].size ? l : { ...l, [id]: { ...l[id], size } };
       }
       const eff = getEffectiveSideSizes(l, rowW, true);
-      const { openSideIds, maxSideSum, minEach } = computeSideBudget(l, rowW);
+      const { openSideIds, maxSideSum, minById } = computeSideBudget(l, rowW);
       if (!openSideIds.includes(id)) return l;
 
       const cur = eff[id];
+      const minSelf = minById[id];
       const otherIds = openSideIds.filter((p) => p !== id);
+      const otherMinSum = otherIds.reduce((acc, p) => acc + minById[p], 0);
       /* اولویت قرض‌گرفتن فضا: ابتدا پنلِ همسایهٔ مستقیم، سپس عریض‌ترین پنل‌های کناری */
       otherIds.sort((a, b) => {
         if (a === neighborId) return -1;
@@ -910,8 +919,8 @@ export default function App() {
         return eff[b] - eff[a];
       });
 
-      const maxPossibleForId = Math.max(minEach, Math.min(MAX_PANEL, maxSideSum - otherIds.length * minEach));
-      const nextIdSize = Math.max(minEach, Math.min(maxPossibleForId, Math.round(cur + dx)));
+      const maxPossibleForId = Math.max(minSelf, Math.min(panelMaxWidth(id), maxSideSum - otherMinSum));
+      const nextIdSize = Math.max(minSelf, Math.min(maxPossibleForId, Math.round(cur + dx)));
       if (nextIdSize === cur && openSideIds.every((p) => eff[p] === l[p].size)) return l;
 
       const nextSizes: Record<PanelId, number> = { ...eff, [id]: nextIdSize };
@@ -922,12 +931,12 @@ export default function App() {
         let overflow = total - maxSideSum;
         for (const oid of otherIds) {
           if (overflow <= 0) break;
-          const give = Math.min(overflow, Math.max(0, nextSizes[oid] - minEach));
+          const give = Math.min(overflow, Math.max(0, nextSizes[oid] - minById[oid]));
           nextSizes[oid] -= give;
           overflow -= give;
         }
         if (overflow > 0) {
-          nextSizes[id] = Math.max(minEach, nextSizes[id] - overflow);
+          nextSizes[id] = Math.max(minSelf, nextSizes[id] - overflow);
         }
       }
 
@@ -967,11 +976,12 @@ export default function App() {
     const isRow = el ? getComputedStyle(el).flexDirection.startsWith("row") : rowW >= 896;
     setLayout((l) => {
       if (!isRow) return { ...l, [id]: { ...l[id], size: defSize } };
-      const { openSideIds, maxSideSum, minEach } = computeSideBudget(l, rowW);
+      const { openSideIds, maxSideSum, minById } = computeSideBudget(l, rowW);
       if (!openSideIds.includes(id)) return { ...l, [id]: { ...l[id], size: defSize } };
+      const minSelf = minById[id];
       const eff = getEffectiveSideSizes(l, rowW, true);
       const otherSum = openSideIds.filter((p) => p !== id).reduce((acc, p) => acc + eff[p], 0);
-      const clamped = Math.max(minEach, Math.min(defSize, Math.max(minEach, maxSideSum - otherSum)));
+      const clamped = Math.max(minSelf, Math.min(defSize, Math.max(minSelf, maxSideSum - otherSum)));
       const nextLayout: LayoutState = { ...l };
       for (const p of openSideIds) {
         nextLayout[p] = { ...nextLayout[p], size: p === id ? clamped : eff[p] };
@@ -1552,7 +1562,7 @@ export default function App() {
             isDropTarget={panelDrag?.targetId === "view3d"}
             onHeaderDragStart={startPanelDrag}
             className="w-full shrink-0"
-            expandedClassName={cn("h-[420px] min-[56rem]:h-auto", flexPanelId === "view3d" && "min-[56rem]:w-auto min-[56rem]:min-w-0 min-[56rem]:flex-1")}
+            expandedClassName={cn("h-[54vh] min-[56rem]:h-auto", flexPanelId === "view3d" && "min-[56rem]:w-auto min-[56rem]:min-w-0 min-[56rem]:flex-1")}
           >
             {view3dActive && view3dSketch && (
               <Lathe3DView
