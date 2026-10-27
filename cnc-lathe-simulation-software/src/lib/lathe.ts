@@ -488,16 +488,45 @@ export function normalOffset(pts: Sample[], dist: number, outward: boolean): Sam
     const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
     const tl = Math.hypot(b.z - a.z, b.r - a.r);
     let nz: number, nr: number;
+    let tr = 0;
     if (tl < 1e-9) { nz = 0; nr = 1; } // نمونه تکراری: شعاعی
-    else { const tz = (b.z - a.z) / tl, tr = (b.r - a.r) / tl; nz = -tr; nr = tz; }
+    else { const tz = (b.z - a.z) / tl; tr = (b.r - a.r) / tl; nz = -tr; nr = tz; }
     if (Math.abs(nr) < 1e-9) {
-      // نرمال محوری (دیواره پیشانی): بیرون = دور از وسط پروفیل
-      const sgn = pts[i].z >= zMid ? 1 : -1;
+      // روی پله/دیواره قائم زنجیرهٔ چپ‌به‌راست: بالا رفتن (tr>0) بیرونش -Z است و پایین رفتن (tr<0) بیرونش +Z
+      const sgn = Math.abs(tr) > 1e-9 ? -Math.sign(tr) : (pts[i].z >= zMid ? 1 : -1);
       nz = outward ? sgn : -sgn; nr = 0;
     } else if (outward ? nr < 0 : nr > 0) { nz = -nz; nr = -nr; }
     out[i] = { z: pts[i].z + dist * nz, r: pts[i].r + dist * nr };
   }
   return trimOffsetLoops(out);
+}
+
+/**
+ * تشخیص خودکار سمت داخل حفره (به طرف محور R=0 و دهانهٔ باز +Z) برای شاخهٔ داخلی
+ * که از نقطهٔ Split آغاز و به انتهای داخلی ختم شده است، تا آفست داخل هرگز به
+ * درون گوشت قطعه نیفتد.
+ */
+export function innerOffsetLeftSide(pts: Sample[]): boolean {
+  const clean = pts.filter((point, i) => i === 0 || Math.hypot(point.z - pts[i - 1].z, point.r - pts[i - 1].r) > 1e-9);
+  if (clean.length < 2) return true;
+  const splitEnd = clean[0];
+  const floorEnd = clean[clean.length - 1];
+  let maxZ = -Infinity;
+  for (const q of clean) if (q.z > maxZ) maxZ = q.z;
+  const mouthZ = maxZ + 10;
+  const cavityLoop: Sample[] = [
+    ...clean,
+    { z: floorEnd.z, r: 0 },
+    { z: mouthZ, r: 0 },
+    { z: mouthZ, r: splitEnd.r },
+  ];
+  let area2 = 0;
+  for (let i = 0; i < cavityLoop.length; i++) {
+    const a = cavityLoop[i];
+    const b = cavityLoop[(i + 1) % cavityLoop.length];
+    area2 += a.z * b.r - b.z * a.r;
+  }
+  return area2 >= -1e-6;
 }
 
 /* آفست یک سمتِ پیوسته برای مسیرهای برگشتی/Overhang. برخلاف normalOffset، با
@@ -1019,8 +1048,17 @@ export function generate(pts: PPoint[], p: Params, innerPts?: PPoint[], outerFin
   if (outerFinishPath.length >= 2 && outerFinishPath[outerFinishPath.length - 1].z < outerFinishPath[0].z) {
     outerFinishPath = [...outerFinishPath].reverse();
   }
-  /* مسیر ترتیبی برای Offset/Finish و پوشش یکنواخت جدا برای پاس‌های خشن. */
-  const innerPathSamples = p.split.enabled && innerPts && innerPts.length >= 2 ? sampleOrderedProfile(innerPts, R) : [];
+  /* مسیر ترتیبی برای Offset/Finish و پوشش یکنواخت جدا برای پاس‌های خشن.
+     ابتدای شاخه داخلی همیشه باید سرِ نزدیک به Split (لبه) و انتهای آن کف حفره باشد. */
+  let innerPathSamples = p.split.enabled && innerPts && innerPts.length >= 2 ? sampleOrderedProfile(innerPts, R) : [];
+  if (innerPathSamples.length >= 2) {
+    const dStart = Math.hypot(innerPathSamples[0].z - p.split.z, innerPathSamples[0].r - p.split.r);
+    const dEnd = Math.hypot(
+      innerPathSamples[innerPathSamples.length - 1].z - p.split.z,
+      innerPathSamples[innerPathSamples.length - 1].r - p.split.r
+    );
+    if (dEnd + 1e-6 < dStart) innerPathSamples = [...innerPathSamples].reverse();
+  }
   /* splitChain شاخه داخلی را از لبه به کف می‌دهد؛ ماشین‌کاری پرداخت از کف به لبه است. */
   const innerFinishPath = [...innerPathSamples].reverse();
   const innerSamples = innerRoughEnvelope(innerPathSamples);
@@ -1165,7 +1203,7 @@ export function generate(pts: PPoint[], p: Params, innerPts?: PPoint[], outerFin
      مرتب‌سازی و ادغام این نمونه‌ها از حلقه و رفت‌وبرگشت مسیر جلوگیری می‌کند. */
   /* مسیر نمایشی/پرداختی با ترتیب اصلی شاخه، بدون مرتب‌سازی مخرب برحسب X. */
   const innerFinishOffSamples: Sample[] = hasInner
-    ? continuousPathOffset(innerPathSamples, IOD, true).reverse()
+    ? continuousPathOffset(innerPathSamples, IOD, innerOffsetLeftSide(innerPathSamples)).reverse()
     : [];
   /* مرز مشترک کف‌تراشی/خشن داخل، بیشترین X واقعیِ خط آفست داخلی است؛
      Split فقط شاخه‌ها را معرفی می‌کند و مرز ماشین‌کاری محسوب نمی‌شود. */

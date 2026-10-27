@@ -483,8 +483,11 @@ export default function App() {
       const poly = chainPolyline(orderChain(generationSketch));
       if (poly.length >= 3) {
         const sp = splitChainAt(poly, { z: params.split.z, r: params.split.r });
-        const outerBranch = params.split.swapped ? sp.inner : sp.outer;
-        const innerBranch = params.split.swapped ? sp.outer : sp.inner;
+        /* حفظ جهت توپولوژیک نسبت به Split در حالت swapped: شاخهٔ خارجی از سر آزاد به Split و شاخهٔ داخلی از Split به سر آزاد */
+        const outerBranch = params.split.swapped ? [...sp.inner].reverse() : sp.outer;
+        const innerBranch = params.split.swapped ? [...sp.outer].reverse() : sp.inner;
+        const branchDir = (br: { z: number }[]): 1 | -1 =>
+          br.length >= 2 && br[br.length - 1].z < br[0].z ? -1 : 1;
         return {
           points: branchPoints(outerBranch, blankR, params.blankL, "max"),
           /* پرداخت بیرونی نیز باید ترتیب توپولوژیک و گوشه‌های قائم شاخه را حفظ
@@ -494,8 +497,8 @@ export default function App() {
              یکنواخت جداگانه برای پاس‌های خشن می‌سازد. */
           innerPoints: branchPathPoints(innerBranch, blankR, params.blankL),
           splitInfo: {
-            outerDir: params.split.swapped ? sp.innerDir : sp.outerDir,
-            innerDir: params.split.swapped ? sp.outerDir : sp.innerDir,
+            outerDir: branchDir(outerBranch),
+            innerDir: branchDir(innerBranch),
             at: sp.splitAt,
           },
         };

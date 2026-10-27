@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import type { EditBuf, ELine, EVert, GenResult, Holder2State, OffPatch, Op, Params, SegKind, SplitState } from "../lib/lathe";
-import { continuousPathOffset, deleteEditLines, deleteEditVertices, insertEditVertex, normalizeEditBuf, OP_INFO, RAPID_RATE, sampleOrderedProfile } from "../lib/lathe";
+import { continuousPathOffset, deleteEditLines, deleteEditVertices, innerOffsetLeftSide, insertEditVertex, normalizeEditBuf, OP_INFO, RAPID_RATE, sampleOrderedProfile } from "../lib/lathe";
 import type { SketchKind, SketchSeg, SnapPoint, SPoint } from "../lib/sketch";
 import {
   arcRadius,
@@ -9,6 +9,7 @@ import {
   cloneSeg,
   defaultCubicHandles,
   dist,
+  distToPoly,
   distToSeg,
   endFromLenAngle,
   evalSeg,
@@ -1990,18 +1991,13 @@ export default function ProfileEditor({
     const poly = chainPolyline(orderChain(segs));
     if (poly.length < 3) return m;
     const sp = splitChainAt(poly, { z: split.z, r: split.r });
+    const outerBranch = split.swapped ? [...sp.inner].reverse() : sp.outer;
+    const innerBranch = split.swapped ? [...sp.outer].reverse() : sp.inner;
     for (const s of segs) {
       const mid = segMid(s);
-      let bi = 0;
-      let bd = Infinity;
-      poly.forEach((p, i) => {
-        const d = dist(p, mid);
-        if (d < bd) {
-          bd = d;
-          bi = i;
-        }
-      });
-      m.set(s.id, bi <= sp.splitIndex ? "outer" : "inner");
+      const dOuter = distToPoly(outerBranch, mid);
+      const dInner = distToPoly(innerBranch, mid);
+      m.set(s.id, dOuter <= dInner ? "outer" : "inner");
     }
     return m;
   }, [segs, split]);
@@ -5460,10 +5456,10 @@ export default function ProfileEditor({
             → −X روی محور → دنبال‌کردن Offset تا همان نقطه. */}
         {!editOpen && settings.showInnerArea && split.enabled && (()=>{
           const divided=splitChainAt(chainPolyline(orderChain(segs)),{z:split.z,r:split.r});
-          const inner=split.swapped?divided.outer:divided.inner;
+          const inner=split.swapped?[...divided.outer].reverse():divided.inner;
           if(inner.length<2)return null;
           const sampledInner=sampleOrderedProfile(inner.map((q,i)=>({id:i+1,z:q.z,r:q.r,smooth:false})),params.blankD/2);
-          const rawOffset=continuousPathOffset(sampledInner,Math.max(0,params.innerOffsetDist),true).reverse().map(q=>({z:q.z,r:Math.max(0,q.r)}));
+          const rawOffset=continuousPathOffset(sampledInner,Math.max(0,params.innerOffsetDist),innerOffsetLeftSide(sampledInner)).reverse().map(q=>({z:q.z,r:Math.max(0,q.r)}));
           if(rawOffset.length<2)return null;
           /* مسیر بسته‌شدن از محور باید ابتدا به سر کم‌شعاع Offset برسد. */
           const offset=rawOffset[0].r<=rawOffset[rawOffset.length-1].r?rawOffset:[...rawOffset].reverse();
