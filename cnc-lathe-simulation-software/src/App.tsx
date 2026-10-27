@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import ControlsPanel from "./components/ControlsPanel";
 import AIImportDialog from "./components/AIImportDialog";
 import { PanelErrorBoundary } from "./components/ErrorBoundary";
-import { DockPanel, DockSplitter, MIN_EDITOR_W, MIN_PANEL, PANEL_IDS, WindowMenu, defaultLayout, normalizeLayout, panelMaxWidth, panelMinWidth } from "./components/Dock";
+import { DockPanel, DockSplitter, MAX_UNBOUNDED_PANEL, MIN_EDITOR_W, MIN_PANEL, PANEL_IDS, WindowMenu, defaultLayout, normalizeLayout, panelMaxWidth, panelMinWidth } from "./components/Dock";
 import type { LayoutState, PanelId, PanelState, PanelVis, WindowMenuItem } from "./components/Dock";
 import GCodePanel from "./components/GCodePanel";
 import ProfileEditor, { type EdSettings, type ReferenceImage } from "./components/ProfileEditor";
@@ -23,38 +23,40 @@ const STORE_KEY = "kharraatcode-v1";
 /* محاسبهٔ بودجهٔ دقیق عرض پنل‌های کناری بر اساس عرض واقعی ردیف فلکس تا هیچ پنلی (از جمله جی‌کد در سمت چپ) از کادر بیرون نزند */
 function computeSideBudget(l: LayoutState, rowW: number) {
   const order = Array.isArray(l.order) ? l.order : PANEL_IDS;
-  const sideOpen = order.filter((id) => id !== "editor" && l[id].open && !l[id].collapsed);
-  const flexPanelId: PanelId | null = !l.editor.collapsed
+  const activeIds = order.filter((id) =>
+    id === "editor" ? !l.editor.open || !l.editor.collapsed : l[id].open && !l[id].collapsed
+  );
+  const flexPanelId: PanelId | null = activeIds.includes("editor")
     ? "editor"
-    : sideOpen.length > 0
-      ? sideOpen[sideOpen.length - 1]
+    : activeIds.length > 0
+      ? activeIds[activeIds.length - 1]
       : null;
-  const openSideIds = sideOpen.filter((id) => id !== flexPanelId);
+  const openSideIds = activeIds.filter((id) => id !== flexPanelId);
   const collapsedCount = order.filter((id) => l[id].open && l[id].collapsed).length;
-  const activeSlotsCount = order.filter((id) => (id === "editor" ? !l.editor.collapsed : l[id].open && !l[id].collapsed)).length;
-  const splitterCount = Math.max(0, activeSlotsCount - 1);
-  const renderedPanels = order.filter((id) => id === "editor" || l[id].open).length;
+  const splitterCount = Math.max(0, activeIds.length - 1);
+  const renderedPanels = activeIds.length + collapsedCount;
   const visItems = renderedPanels + splitterCount;
   const gapsW = Math.max(0, visItems - 1) * 8;
   const splittersW = splitterCount * 9;
   const collapsedW = collapsedCount * 44;
-  const flexReserve = flexPanelId ? panelMinWidth(flexPanelId) : 0;
-  /* ۲۴ پیکسل padding افقی (p-3) + ۲ پیکسل حاشیه اطمینان برای رندینگ زیرپیکسلی مرورگر */
-  const innerAvail = rowW - 26 - gapsW - splittersW - collapsedW - flexReserve;
-  const rawMinSum = openSideIds.reduce((acc, id) => acc + panelMinWidth(id), 0);
-  const scale = rawMinSum > 0 && innerAvail < rawMinSum ? innerAvail / rawMinSum : 1;
+  /* ۲۴ پیکسل padding افقی (p-3) + ۲ پیکسل حاشیه اطمینان برای رندرینگ زیرپیکسلی مرورگر */
+  const totalRawAvail = Math.max(activeIds.length * 110, rowW - 26 - gapsW - splittersW - collapsedW);
+  const allRawMin = activeIds.reduce((acc, id) => acc + panelMinWidth(id), 0);
+  const scale = allRawMin > 0 && totalRawAvail < allRawMin ? totalRawAvail / allRawMin : 1;
   const minById: Record<PanelId, number> = {
     controls: MIN_PANEL,
     view3d: MIN_EDITOR_W,
     editor: MIN_EDITOR_W,
     gcode: MIN_PANEL,
   };
-  for (const id of openSideIds) {
+  for (const id of activeIds) {
     minById[id] = scale < 1 ? Math.max(110, Math.floor(panelMinWidth(id) * scale)) : panelMinWidth(id);
   }
+  const flexReserve = flexPanelId ? minById[flexPanelId] : 0;
   const minSideSum = openSideIds.reduce((acc, id) => acc + minById[id], 0);
-  const maxSideSum = Math.max(minSideSum, innerAvail);
-  return { openSideIds, flexPanelId, maxSideSum, minById };
+  const maxSideSum = Math.max(minSideSum, totalRawAvail - flexReserve);
+  const totalActiveWidth = maxSideSum + flexReserve;
+  return { activeIds, openSideIds, flexPanelId, maxSideSum, totalActiveWidth, minById };
 }
 
 function getEffectiveSideSizes(l: LayoutState, rowW: number, isRow: boolean): Record<PanelId, number> {
@@ -1036,57 +1038,58 @@ export default function App() {
   const toggleCollapse = useCallback((id: PanelId) => {
     setLayout((l) => ({ ...l, [id]: { ...l[id], collapsed: !l[id].collapsed } }));
   }, []);
-  const resizePanel = useCallback((id: PanelId, dx: number, neighborId?: PanelId) => {
-    if (id === "editor") return;
+  const resizeSplitter = useCallback((splitIdx: number, dx: number) => {
+    const step = Math.round(dx);
+    if (step === 0) return;
     const el = dockRowRef.current;
     const rowW = el?.clientWidth || window.innerWidth;
     const isRow = el ? getComputedStyle(el).flexDirection.startsWith("row") : rowW >= 896;
+    if (!isRow) return;
+
     setLayout((l) => {
-      if (!isRow) {
-        const size = Math.min(panelMaxWidth(id), Math.max(panelMinWidth(id), Math.round(l[id].size + dx)));
-        return size === l[id].size ? l : { ...l, [id]: { ...l[id], size } };
-      }
+      const { activeIds, openSideIds, flexPanelId, totalActiveWidth, minById } = computeSideBudget(l, rowW);
+      if (splitIdx < 0 || splitIdx >= activeIds.length - 1) return l;
+
       const eff = getEffectiveSideSizes(l, rowW, true);
-      const { openSideIds, maxSideSum, minById } = computeSideBudget(l, rowW);
-      if (!openSideIds.includes(id)) return l;
+      const sideSum = openSideIds.reduce((acc, p) => acc + eff[p], 0);
+      const curW: Record<PanelId, number> = { ...eff };
+      if (flexPanelId) {
+        curW[flexPanelId] = Math.max(minById[flexPanelId], totalActiveWidth - sideSum);
+      }
+      const maxW = (pid: PanelId) => (pid === flexPanelId ? MAX_UNBOUNDED_PANEL : panelMaxWidth(pid));
 
-      const cur = eff[id];
-      const minSelf = minById[id];
-      const otherIds = openSideIds.filter((p) => p !== id);
-      const otherMinSum = otherIds.reduce((acc, p) => acc + minById[p], 0);
-      /* اولویت قرض‌گرفتن فضا: ابتدا پنلِ همسایهٔ مستقیم، سپس عریض‌ترین پنل‌های کناری */
-      otherIds.sort((a, b) => {
-        if (a === neighborId) return -1;
-        if (b === neighborId) return 1;
-        return eff[b] - eff[a];
-      });
+      /* در چیدمان RTL (راست به چپ):
+         - کشیدن جداکننده به چپ (step < 0): پنلِ سمت راستِ جداکننده فقط از لبهٔ چپش بزرگ می‌شود؛
+           پنل‌های سمت راستِ آن کاملاً قفل می‌مانند تا هرگز از سمت راست رشد نکند.
+         - کشیدن جداکننده به راست (step > 0): پنلِ سمت چپِ جداکننده فقط از لبهٔ راستش بزرگ می‌شود؛
+           پنل‌های سمت چپِ آن کاملاً قفل می‌مانند تا هرگز از سمت چپ رشد نکند. */
+      const want = Math.abs(step);
+      const growId = step < 0 ? activeIds[splitIdx] : activeIds[splitIdx + 1];
+      const shrinkChain =
+        step < 0
+          ? activeIds.slice(splitIdx + 1)
+          : activeIds.slice(0, splitIdx + 1).reverse();
 
-      const maxPossibleForId = Math.max(minSelf, Math.min(panelMaxWidth(id), maxSideSum - otherMinSum));
-      const nextIdSize = Math.max(minSelf, Math.min(maxPossibleForId, Math.round(cur + dx)));
-      if (nextIdSize === cur && openSideIds.every((p) => eff[p] === l[p].size)) return l;
+      const growCap = Math.max(0, maxW(growId) - curW[growId]);
+      const shrinkCap = shrinkChain.reduce((acc, pid) => acc + Math.max(0, curW[pid] - minById[pid]), 0);
+      const delta = Math.min(want, growCap, shrinkCap);
+      if (delta <= 0) return l;
 
-      const nextSizes: Record<PanelId, number> = { ...eff, [id]: nextIdSize };
-      const total = openSideIds.reduce((acc, p) => acc + nextSizes[p], 0);
-
-      /* جلوگیری قطعی از بیرون‌زدن پنل‌ها (مانند جی‌کد در سمت چپ) از کادر صفحه */
-      if (total > maxSideSum && otherIds.length > 0) {
-        let overflow = total - maxSideSum;
-        for (const oid of otherIds) {
-          if (overflow <= 0) break;
-          const give = Math.min(overflow, Math.max(0, nextSizes[oid] - minById[oid]));
-          nextSizes[oid] -= give;
-          overflow -= give;
-        }
-        if (overflow > 0) {
-          nextSizes[id] = Math.max(minSelf, nextSizes[id] - overflow);
-        }
+      const nextW: Record<PanelId, number> = { ...curW };
+      nextW[growId] += delta;
+      let rem = delta;
+      for (const pid of shrinkChain) {
+        if (rem <= 0) break;
+        const give = Math.min(rem, Math.max(0, nextW[pid] - minById[pid]));
+        nextW[pid] -= give;
+        rem -= give;
       }
 
       let changed = false;
       const nextLayout: LayoutState = { ...l };
       for (const p of openSideIds) {
-        if (nextLayout[p].size !== nextSizes[p]) {
-          nextLayout[p] = { ...nextLayout[p], size: nextSizes[p] };
+        if (nextLayout[p].size !== nextW[p]) {
+          nextLayout[p] = { ...nextLayout[p], size: nextW[p] };
           changed = true;
         }
       }
@@ -1597,48 +1600,40 @@ export default function App() {
     vis: panelVis(id),
   }));
   const slotOrder = (id: PanelId) => panelOrder.indexOf(id) * 2;
-  const { flexPanelId } = computeSideBudget(layout, dockRowState.width);
+  const { activeIds: activeDockIds, flexPanelId } = computeSideBudget(layout, dockRowState.width);
   const effectiveSideSizes = getEffectiveSideSizes(layout, dockRowState.width, dockRowState.isRow);
   const panelWidthPx = (id: PanelId): number | undefined =>
     dockRowState.isRow && flexPanelId === id ? undefined : effectiveSideSizes[id];
 
   const dockSplitters = (() => {
-    const activeSlots: number[] = [];
-    panelOrder.forEach((id, idx) => {
-      const resizable = id === "editor" ? !layout.editor.collapsed : panelVis(id) === "open";
-      if (resizable) activeSlots.push(idx);
-    });
     const flexIdx = flexPanelId ? panelOrder.indexOf(flexPanelId) : -1;
     const items: {
       key: string;
+      splitIdx: number;
       orderIndex: number;
-      targetId: PanelId;
-      neighborId?: PanelId;
-      sign: 1 | -1;
+      resetTargetId: PanelId;
       title: string;
     }[] = [];
-    for (let k = 0; k < activeSlots.length - 1; k++) {
-      const rSlot = activeSlots[k];
-      const lSlot = activeSlots[k + 1];
-      const rId = panelOrder[rSlot];
-      const lId = panelOrder[lSlot];
+    for (let k = 0; k < activeDockIds.length - 1; k++) {
+      const rId = activeDockIds[k];
+      const lId = activeDockIds[k + 1];
+      const rSlot = panelOrder.indexOf(rId);
+      const lSlot = panelOrder.indexOf(lId);
       if (flexIdx === -1 || lSlot <= flexIdx) {
         items.push({
-          key: `split-${rId}-r`,
+          key: `split-${rId}-${lId}`,
+          splitIdx: k,
           orderIndex: rSlot * 2 + 1,
-          targetId: rId,
-          neighborId: lId !== flexPanelId ? lId : undefined,
-          sign: -1,
-          title: `تغییر عرض پنل ${panelTitleMap[rId]} (دابل‌کلیک: اندازه پیش‌فرض)`,
+          resetTargetId: rId,
+          title: `تغییر عرض بین «${panelTitleMap[rId]}» و «${panelTitleMap[lId]}» (دابل‌کلیک: اندازه پیش‌فرض)`,
         });
       } else {
         items.push({
-          key: `split-${lId}-l`,
+          key: `split-${rId}-${lId}`,
+          splitIdx: k,
           orderIndex: lSlot * 2 - 1,
-          targetId: lId,
-          neighborId: rId !== flexPanelId ? rId : undefined,
-          sign: 1,
-          title: `تغییر عرض پنل ${panelTitleMap[lId]} (دابل‌کلیک: اندازه پیش‌فرض)`,
+          resetTargetId: lId,
+          title: `تغییر عرض بین «${panelTitleMap[rId]}» و «${panelTitleMap[lId]}» (دابل‌کلیک: اندازه پیش‌فرض)`,
         });
       }
     }
@@ -1969,8 +1964,8 @@ export default function App() {
           <DockSplitter
             key={sp.key}
             orderIndex={sp.orderIndex}
-            onResize={(dx) => resizePanel(sp.targetId, dx * sp.sign, sp.neighborId)}
-            onResetSize={() => resetPanelSize(sp.targetId)}
+            onResize={(dx) => resizeSplitter(sp.splitIdx, dx)}
+            onResetSize={() => resetPanelSize(sp.resetTargetId)}
             title={sp.title}
           />
         ))}

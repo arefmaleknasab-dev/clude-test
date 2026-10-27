@@ -250,9 +250,9 @@ export function DockSplitter({ onResize, onResetSize, orderIndex, title, classNa
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-    const dx = pendingDx.current;
+    const step = Math.trunc(pendingDx.current);
     pendingDx.current = 0;
-    if (dx !== 0) onResizeRef.current(dx);
+    if (step !== 0) onResizeRef.current(step);
   };
 
   useEffect(() => {
@@ -298,9 +298,9 @@ export function DockSplitter({ onResize, onResetSize, orderIndex, title, classNa
         if (rafRef.current == null) {
           rafRef.current = requestAnimationFrame(() => {
             rafRef.current = null;
-            const total = pendingDx.current;
-            pendingDx.current = 0;
-            if (total !== 0) onResizeRef.current(total);
+            const step = Math.trunc(pendingDx.current);
+            pendingDx.current -= step;
+            if (step !== 0) onResizeRef.current(step);
           });
         }
       }}
