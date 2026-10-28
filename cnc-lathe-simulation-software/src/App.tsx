@@ -1,5 +1,5 @@
 import "./point-scale.css";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ControlsPanel from "./components/ControlsPanel";
 import AIImportDialog from "./components/AIImportDialog";
 import { PanelErrorBoundary } from "./components/ErrorBoundary";
@@ -2318,7 +2318,22 @@ function DesktopMenuBar({ tabChrome, projects, activeProjectId, onSwitchProject,
   const [hoveredTabId, setHoveredTabId] = useState<string | null>(null);
   const [hoveredCloseId, setHoveredCloseId] = useState<string | null>(null);
   const [plusHovered, setPlusHovered] = useState(false);
+  const [stripWidth, setStripWidth] = useState(1200);
   const ref = useRef<HTMLDivElement>(null);
+  const stripRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const measure = () => setStripWidth(el.clientWidth || 1200);
+    measure();
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(measure);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
   useEffect(() => {
     if (!open) return;
     const close = (e: PointerEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(null); };
@@ -2327,6 +2342,14 @@ function DesktopMenuBar({ tabChrome, projects, activeProjectId, onSwitchProject,
     return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", key); };
   }, [open]);
   const run = (fn: () => void) => { setOpen(null); fn(); };
+  /* عرض تخمینی هر تب پس از کسر فضاهای ثابت (بدون اسکرول افقی؛ تب‌ها فشرده می‌شوند) */
+  const estTabW = projects.length > 0
+    ? Math.min(216, (stripWidth - 20 - projects.length * 11 - 30) / projects.length)
+    : 216;
+  const isCompact = estTabW < 96;
+  const isTiny = estTabW < 56;
+  const dividerSlotCls = isTiny ? "w-[5px]" : "w-[11px]";
+  const lastTabInactive = projects.length > 0 && projects[projects.length - 1].id !== activeProjectId;
   return (
     <div
       ref={ref}
@@ -2341,17 +2364,24 @@ function DesktopMenuBar({ tabChrome, projects, activeProjectId, onSwitchProject,
       </div>
       <span className="h-4 w-px shrink-0 rounded-full" style={{ backgroundColor: tabChrome.dividerBg }} />
 
-      <div className="-mb-px flex h-[39px] min-w-0 flex-1 items-stretch self-start overflow-x-auto overflow-y-hidden px-[10px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" dir="ltr">
+      <div
+        ref={stripRef}
+        className="-mb-px flex h-[39px] min-w-0 flex-1 items-stretch self-start overflow-hidden px-[10px]"
+        dir="ltr"
+      >
         {projects.map((project, index) => {
           const isActive = project.id === activeProjectId;
           const isHovered = hoveredTabId === project.id;
           const prevProject = index > 0 ? projects[index - 1] : null;
           /* خط جداکننده | دقیقاً مثل کروم بین تب‌های غیرفعال نمایش داده می‌شود */
           const showDivider = !!prevProject && !isActive && prevProject.id !== activeProjectId;
+          const showCloseBtn = isTiny ? (isActive || isHovered) : isCompact ? (isActive || isHovered) : true;
+          const showIcon = !isTiny || (!isActive && !isHovered);
+          const showTitle = !isTiny;
           return (
-            <div key={project.id} className="flex h-full shrink-0 items-stretch">
+            <Fragment key={project.id}>
               {index > 0 && (
-                <div className="mb-px flex w-[11px] shrink-0 items-center justify-center self-center" aria-hidden="true">
+                <div className={cn("mb-px flex shrink-0 items-center justify-center self-center", dividerSlotCls)} aria-hidden="true">
                   <span
                     className="h-4 w-px rounded-full transition-opacity duration-150"
                     style={{ backgroundColor: tabChrome.dividerBg, opacity: showDivider ? 1 : 0 }}
@@ -2375,7 +2405,7 @@ function DesktopMenuBar({ tabChrome, projects, activeProjectId, onSwitchProject,
                       : undefined
                 }
                 className={cn(
-                  "group relative mt-[5px] flex min-w-[138px] max-w-[216px] cursor-pointer transition-colors duration-150",
+                  "group relative mt-[5px] flex min-w-0 max-w-[216px] basis-[216px] shrink cursor-pointer transition-colors duration-150",
                   isActive
                     ? "z-10 h-[34px] rounded-t-[10px] pb-[6px] text-ink"
                     : "mb-[6px] h-[28px] rounded-[10px] text-ink/75 hover:text-ink"
@@ -2386,54 +2416,80 @@ function DesktopMenuBar({ tabChrome, projects, activeProjectId, onSwitchProject,
                   <>
                     <svg
                       viewBox="0 0 10 11"
+                      preserveAspectRatio="none"
                       aria-hidden="true"
-                      className="pointer-events-none absolute bottom-0 -left-[10px] h-[11px] w-[10px]"
+                      className={cn("pointer-events-none absolute bottom-0 h-[11px]", isTiny ? "-left-[5px] w-[5px]" : "-left-[10px] w-[10px]")}
                     >
                       <path d="M10 0 A10 10 0 0 1 0 10 L0 11 L10 11 Z" fill={tabChrome.toolbarBg} />
                     </svg>
                     <svg
                       viewBox="0 0 10 11"
+                      preserveAspectRatio="none"
                       aria-hidden="true"
-                      className="pointer-events-none absolute bottom-0 -right-[10px] h-[11px] w-[10px]"
+                      className={cn("pointer-events-none absolute bottom-0 h-[11px]", isTiny ? "-right-[5px] w-[5px]" : "-right-[10px] w-[10px]")}
                     >
                       <path d="M0 0 A10 10 0 0 0 10 10 L10 11 L0 11 Z" fill={tabChrome.toolbarBg} />
                     </svg>
                   </>
                 )}
 
-                <div className="flex h-[28px] w-full min-w-0 items-center gap-2 pr-1.5 pl-2.5">
-                  <span
-                    className="grid h-4 w-4 shrink-0 place-items-center rounded-[4px]"
-                    style={{ backgroundColor: tabChrome.iconBadgeBg }}
-                  >
-                    <IconSpindle className="h-3 w-3 text-brass" />
-                  </span>
-                  <span dir="auto" className="min-w-0 flex-1 truncate text-[11.5px] font-medium leading-none">
-                    {project.dirty && <span className="mr-1 inline-block text-brass">•</span>}
-                    {project.name}
-                  </span>
-                  <button
-                    type="button"
-                    onMouseEnter={() => setHoveredCloseId(project.id)}
-                    onMouseLeave={() => setHoveredCloseId((cur) => (cur === project.id ? null : cur))}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onCloseProject(project.id);
-                    }}
-                    title="بستن پروژه"
-                    aria-label="بستن پروژه"
-                    style={hoveredCloseId === project.id ? { backgroundColor: tabChrome.controlHoverBg } : undefined}
-                    className="grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full text-ink/70 transition-colors hover:text-ink"
-                  >
-                    <svg viewBox="0 0 12 12" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round">
-                      <path d="M2.5 2.5l7 7M9.5 2.5l-7 7" />
-                    </svg>
-                  </button>
+                <div
+                  className={cn(
+                    "flex h-[28px] w-full min-w-0 items-center",
+                    isTiny ? "justify-center px-0.5" : isCompact ? "gap-1 px-1.5" : "gap-2 pr-1.5 pl-2.5"
+                  )}
+                >
+                  {showIcon && (
+                    <span
+                      className="relative grid h-4 w-4 shrink-0 place-items-center rounded-[4px]"
+                      style={{ backgroundColor: tabChrome.iconBadgeBg }}
+                    >
+                      <IconSpindle className="h-3 w-3 text-brass" />
+                      {isTiny && project.dirty && (
+                        <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-brass" />
+                      )}
+                    </span>
+                  )}
+                  {showTitle && (
+                    <span dir="auto" className="min-w-0 flex-1 truncate text-[11.5px] font-medium leading-none">
+                      {project.dirty && <span className="mr-1 inline-block text-brass">•</span>}
+                      {project.name}
+                    </span>
+                  )}
+                  {showCloseBtn && (
+                    <button
+                      type="button"
+                      onMouseEnter={() => setHoveredCloseId(project.id)}
+                      onMouseLeave={() => setHoveredCloseId((cur) => (cur === project.id ? null : cur))}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onCloseProject(project.id);
+                      }}
+                      title="بستن پروژه"
+                      aria-label="بستن پروژه"
+                      style={hoveredCloseId === project.id ? { backgroundColor: tabChrome.controlHoverBg } : undefined}
+                      className="grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full text-ink/70 transition-colors hover:text-ink"
+                    >
+                      <svg viewBox="0 0 12 12" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round">
+                        <path d="M2.5 2.5l7 7M9.5 2.5l-7 7" />
+                      </svg>
+                    </button>
+                  )}
                 </div>
               </div>
-            </div>
+            </Fragment>
           );
         })}
+
+        {/* جداکنندهٔ | بین آخرین تب (در صورت غیرفعال بودن) و دکمهٔ + */}
+        {projects.length > 0 && (
+          <div className={cn("mb-px flex shrink-0 items-center justify-center self-center", dividerSlotCls)} aria-hidden="true">
+            <span
+              className="h-4 w-px rounded-full transition-opacity duration-150"
+              style={{ backgroundColor: tabChrome.dividerBg, opacity: lastTabInactive ? 1 : 0 }}
+            />
+          </div>
+        )}
 
         {/* دکمهٔ + بدون کادر، دقیقاً در وسط عمودی نوار تب‌ها */}
         <button
@@ -2444,7 +2500,7 @@ function DesktopMenuBar({ tabChrome, projects, activeProjectId, onSwitchProject,
           title="ایجاد پروژه جدید"
           aria-label="ایجاد پروژه جدید"
           style={plusHovered ? { backgroundColor: tabChrome.controlHoverBg } : undefined}
-          className="mb-px ml-3 grid h-7 w-7 shrink-0 self-center place-items-center rounded-full border-0 bg-transparent text-ink/80 transition-colors hover:text-ink"
+          className="mb-px ml-0.5 grid h-7 w-7 shrink-0 self-center place-items-center rounded-full border-0 bg-transparent text-ink/80 transition-colors hover:text-ink"
         >
           <svg viewBox="0 0 14 14" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round">
             <path d="M7 1.75v10.5M1.75 7h10.5" />
