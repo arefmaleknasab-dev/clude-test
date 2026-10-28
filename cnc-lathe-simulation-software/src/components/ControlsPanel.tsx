@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BlankShape, Holder2State, HolderMachinePoint, Op, OpType, Params, PPoint, Preset, Sample, ToolHand, ToolSpec, ToolType } from "../lib/lathe";
-import { ALL_OP_TYPES, BLANK_SHAPES, HAND_INFO, HOLDER2_ROT, INNER_OPS, INSERT_ANGLE, MIN_HOLDER2_OFFSET, NOSE_RADII, OP_INFO, OUTER_OPS, PRESETS, ROUGH_MODES, STRATEGIES, findZones, holder2OffsetFromCoordinates, makeOps, normalOffset, outerFirstOps, outerFirstTypes, rotationalEnvelope, sampleOrderedProfile, sampleProfile, thumbPath, toolProfile } from "../lib/lathe";
+import { ALL_OP_TYPES, BLANK_SHAPES, HAND_INFO, HOLDER2_ROT, INNER_OPS, INSERT_ANGLE, MIN_HOLDER2_OFFSET, NOSE_RADII, OP_INFO, OUTER_OPS, PRESETS, ROUGH_MODES, STRATEGIES, findZones, holder2OffsetFromCoordinates, makeOps, normalOffset, outerFirstOps, outerFirstTypes, rotationalEnvelope, sampleOrderedProfile, thumbPath, toolProfile } from "../lib/lathe";
+import { DEFAULT_THEME_COLORS, opColorFromTheme, rgbaCss, shadeHex, type ThemeColors } from "../lib/theme";
 import { cn } from "../utils/cn";
 import { IconBowl, IconCheck, IconCurve, IconEye, IconEyeOff, IconLayers, IconPlus, IconSpindle, IconTool, IconTrash } from "./icons";
 
@@ -35,6 +36,7 @@ interface Props {
   isolatedOpId: number | null;
   onIsolate: (id: number | null) => void;
   onNotify: (msg: string) => void;
+  themeColors?: ThemeColors;
 }
 
 function ControlsPanel({
@@ -51,6 +53,7 @@ function ControlsPanel({
   isolatedOpId,
   onIsolate,
   onNotify,
+  themeColors = DEFAULT_THEME_COLORS,
 }: Props) {
   /* امضای استراتژی فعلی برای تشخیص پیش‌تنظیم فعال (با قاعدهٔ پیش‌فرض: بیرونی‌ها اول) */
   const sig = outerFirstOps(params.ops.filter((o) => o.on)).map((o) => o.type).join(",");
@@ -143,10 +146,11 @@ function ControlsPanel({
   /* نمونه‌های پروفایل و تقسیم خودکار نواحی (نقطهٔ شروع برای مرزسازی دستی) */
   const { autoZones } = useMemo(() => {
     const blankR = params.blankD / 2;
-    const samples = sampleProfile(points, blankR);
+    const srcPts = outerDisplayPoints && outerDisplayPoints.length >= 2 ? outerDisplayPoints : points;
+    const samples = sampleOrderedProfile(srcPts, blankR);
     const off: Sample[] = normalOffset(samples, params.offsetDist, true).map((s) => ({ z: s.z, r: Math.min(blankR, s.r) }));
     return { zoneSamples: off, autoZones: findZones(off) };
-  }, [points, params.blankD, params.offsetDist]);
+  }, [outerDisplayPoints, points, params.blankD, params.offsetDist]);
   /* برای تصویر تنظیم نواحی باید ترتیب واقعی Segmentها حفظ شود. sampleProfile
      پوشش خشن را برحسب Z مرتب می‌کند و روی پروفایل‌های برگشتی شکل را می‌شکند. */
   const innerZoneSamples = useMemo(() => {
@@ -191,11 +195,11 @@ function ControlsPanel({
               title={p.empty ? "بوم خالی ۱۰۰ × ۱۰۰ میلی‌متر با مقطع مربعی" : `خام ⌀${p.blankD} × ${p.blankL}`}
             >
               <svg viewBox="0 0 100 34" className="h-8 w-full">
-                <line x1="0" y1="17" x2="100" y2="17" stroke="rgba(227,169,78,0.3)" strokeWidth="0.8" strokeDasharray="3 2" />
+                <line x1="0" y1="17" x2="100" y2="17" stroke="rgba(var(--rgb-brass), 0.35)" strokeWidth="0.8" strokeDasharray="3 2" />
                 <path
                   d={thumbPath(p, 100, 34)}
-                  fill={p.empty ? "rgba(201,149,90,0.06)" : "rgba(201,149,90,0.25)"}
-                  stroke="#e3a94e"
+                  fill={p.empty ? "rgba(var(--rgb-brass), 0.06)" : "rgba(var(--rgb-brass), 0.24)"}
+                  stroke="var(--color-brass)"
                   strokeWidth="1.1"
                   strokeDasharray={p.empty ? "4 3" : undefined}
                   fillRule="evenodd"
@@ -323,11 +327,18 @@ function ControlsPanel({
                 <button
                   onClick={() => toggleHolder(op.id)}
                   title={op.holder === 2 ? "هلدر ۲ — داخل‌تراش — کلیک برای تغییر" : "هلدر ۱ — اصلی — کلیک برای تغییر"}
+                  style={
+                    op.holder === 2
+                      ? {
+                          borderColor: rgbaCss(themeColors.opInnerRough, 0.6),
+                          backgroundColor: rgbaCss(themeColors.opInnerRough, 0.15),
+                          color: themeColors.opInnerRough,
+                        }
+                      : undefined
+                  }
                   className={cn(
                     "grid h-6 w-7 shrink-0 place-items-center rounded border font-mono text-[9px] font-bold transition-all",
-                    op.holder === 2
-                      ? "border-[#4cc9f0]/60 bg-[#4cc9f0]/15 text-[#4cc9f0]"
-                      : "border-edge text-dim hover:border-edge2 hover:text-ink"
+                    op.holder !== 2 && "border-edge text-dim hover:border-edge2 hover:text-ink"
                   )}
                 >
                   H{op.holder}
@@ -347,7 +358,7 @@ function ControlsPanel({
                     />
                   </span>
                 </button>
-                <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: info.color }} />
+                <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: opColorFromTheme(themeColors, op.type) }} />
                 <div className="min-w-0 flex-1 leading-tight">
                   <div className="truncate text-[11px] font-bold text-ink/90">{info.name}</div>
                   <div className="truncate text-[9.5px] text-dim">{info.desc}</div>
@@ -425,8 +436,9 @@ function ControlsPanel({
                   onClick={() => setOpGroup("inner")}
                   className={cn(
                     "rounded-md border px-1 py-1.5 text-[10px] font-bold transition-all",
-                    innerActive && !outerActive ? "border-[#4cc9f0]/70 bg-[#4cc9f0]/10 text-[#4cc9f0]" : "border-edge bg-panel2 text-mute hover:text-ink"
+                    innerActive && !outerActive ? "" : "border-edge bg-panel2 text-mute hover:text-ink"
                   )}
+                  style={innerActive && !outerActive ? { borderColor: rgbaCss(themeColors.opInnerRough, 0.7), backgroundColor: rgbaCss(themeColors.opInnerRough, 0.12), color: themeColors.opInnerRough } : undefined}
                 >
                   داخل‌تراشی
                 </button>
@@ -450,9 +462,9 @@ function ControlsPanel({
         )}
 
         {/* تنظیمات هلدر دوم مستقل از استراتژی و Split همیشه در دسترس است. */}
-        <div className="mt-2 rounded-lg border border-[#4cc9f0]/30 bg-[#4cc9f0]/5 p-2">
+        <div className="mt-2 rounded-lg border p-2" style={{ borderColor: rgbaCss(themeColors.opInnerRough, 0.35), backgroundColor: rgbaCss(themeColors.opInnerRough, 0.06) }}>
           <div className="mb-1.5 flex items-center justify-between">
-            <span className="text-[11px] font-bold text-[#4cc9f0]">هلدر دوم (داخل‌تراش)</span>
+            <span className="text-[11px] font-bold" style={{ color: themeColors.opInnerRough }}>هلدر دوم (داخل‌تراش)</span>
             <div className="flex items-center gap-1">
               {holder2IsDraft && (
                 <span className="rounded-full border border-teal/50 bg-teal/10 px-2 py-0.5 text-[8.5px] font-bold text-teal">
@@ -475,7 +487,7 @@ function ControlsPanel({
 
       {/* ابزار تراش */}
       <Section title="ابزار تراش" icon={<IconTool className="h-3.5 w-3.5 text-brass" />}>
-        <ToolPreview tool={params.tool} />
+        <ToolPreview tool={params.tool} themeColors={themeColors} />
         <div className="mt-2 grid grid-cols-3 gap-1.5">
           {TOOL_TYPES.map((tt) => (
             <button
@@ -532,7 +544,7 @@ function ControlsPanel({
                     className={cn(
                       "flex-1 py-1.5 font-mono text-[11px] font-bold transition-colors",
                       Math.abs(params.tool.nose - r) < 1e-6
-                        ? "bg-brass text-[#241a0c]"
+                        ? "bg-brass text-[var(--color-brass-ink)]"
                         : "bg-panel2 text-mute hover:bg-panel3 hover:text-ink"
                     )}
                   >
@@ -619,10 +631,12 @@ function ControlsPanel({
           <Num label="برداشت اضافه از هر طرف" unit="mm" value={params.extraCutEachSide} min={0} max={10} step={0.5} onChange={(v) => onParams({ extraCutEachSide: Math.min(10, Math.max(0, v)) })} />
 
           <Num label="فاصله امن" unit="mm" value={params.safety} min={1} max={20} step={1} onChange={(v) => onParams({ safety: v })} />
+          <Num label="جابجایی جی‌کد محور X" unit="mm" value={params.gcodeShiftX} step={0.5} onChange={(v) => onParams({ gcodeShiftX: v })} />
+          <Num label="جابجایی جی‌کد محور Y" unit="mm" value={params.gcodeShiftY} step={0.5} onChange={(v) => onParams({ gcodeShiftY: v })} />
         </div>
         <div className="mt-2 rounded-md border border-edge bg-panel2 p-2.5">
           <label className="flex cursor-pointer items-center gap-2 text-[10.5px] font-semibold text-ink">
-            <input type="checkbox" checked={params.smartTransferEnabled} onChange={(e) => onParams({ smartTransferEnabled: e.target.checked })} className="accent-[#e3a94e]" />
+            <input type="checkbox" checked={params.smartTransferEnabled} onChange={(e) => onParams({ smartTransferEnabled: e.target.checked })} className="accent-brass" />
             حرکت انتقالی هوشمند برای خطوط زاویه‌دار
           </label>
           {params.smartTransferEnabled && (
@@ -648,10 +662,10 @@ function ControlsPanel({
                   i > 0 && "border-l border-edge",
                   params.roughMode === m.id
                     ? m.id === "zone"
-                      ? "bg-copper text-[#2a150a]"
+                      ? "bg-copper text-[var(--color-brass-ink)]"
                       : m.id === "zigzag"
-                        ? "bg-teal text-[#0d201a]"
-                        : "bg-brass text-[#241a0c]"
+                        ? "bg-teal text-[var(--color-brass-ink)]"
+                        : "bg-brass text-[var(--color-brass-ink)]"
                     : "bg-panel2 text-mute hover:bg-panel3 hover:text-ink"
                 )}
                 title={
@@ -720,7 +734,7 @@ function ControlsPanel({
         <div className="mt-4 border-t border-edge pt-3">
           <span className="mb-1 block text-[10.5px] font-semibold text-mute">روش خشن تراشی داخل</span>
           <div className="flex overflow-hidden rounded-md border border-edge" dir="ltr">
-            {ROUGH_MODES.map((m,i)=><button key={m.id} onClick={()=>onParams({innerRoughMode:m.id})} className={cn("flex flex-1 flex-col items-center gap-1 px-1 py-2",i>0&&"border-l border-edge",params.innerRoughMode===m.id?m.id==="zone"?"bg-copper text-[#2a150a]":m.id==="zigzag"?"bg-teal text-[#0d201a]":"bg-brass text-[#241a0c]":"bg-panel2 text-mute")}>
+            {ROUGH_MODES.map((m,i)=><button key={m.id} onClick={()=>onParams({innerRoughMode:m.id})} className={cn("flex flex-1 flex-col items-center gap-1 px-1 py-2",i>0&&"border-l border-edge",params.innerRoughMode===m.id?m.id==="zone"?"bg-copper text-[var(--color-brass-ink)]":m.id==="zigzag"?"bg-teal text-[var(--color-brass-ink)]":"bg-brass text-[var(--color-brass-ink)]":"bg-panel2 text-mute")}>
               <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={1.8}>{m.id==="classic"?<path d="M4 8h13l-3-3M20 16H7l3 3"/>:m.id==="zigzag"?<path d="M3 7h15l-2.5-2.5M21 12H6l2.5-2.5M3 17h15l-2.5-2.5"/>:<><rect x="3" y="6" width="7" height="12" rx="1"/><rect x="14" y="6" width="7" height="12" rx="1"/></>}</svg>
               <span className="text-[9px] font-bold">{m.name}</span>
             </button>)}
@@ -911,7 +925,7 @@ function RotationalEnvelopePreview({ blankD, shape, rpm }: { blankD: number; sha
   const growthPct = env.growth > 0 ? (env.growth / blankD) * 100 : 0;
 
   return (
-    <div className="mt-2.5 overflow-hidden rounded-lg border border-edge bg-[#120e09]">
+    <div className="mt-2.5 overflow-hidden rounded-lg border border-edge bg-[var(--theme-editor-bg)]">
       <div className="flex items-center justify-between border-b border-edge/60 px-2.5 py-1.5">
         <span className="text-[10px] font-bold text-mute">پوشش دورانی — Rotational Envelope</span>
         <span className="font-mono text-[9px] text-dim" dir="ltr">
@@ -922,61 +936,61 @@ function RotationalEnvelopePreview({ blankD, shape, rpm }: { blankD: number; sha
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
         <defs>
           <radialGradient id="envGlow" cx="50%" cy="50%" r="50%">
-            <stop offset="72%" stopColor="rgba(69,179,148,0)" />
-            <stop offset="100%" stopColor="rgba(69,179,148,0.2)" />
+            <stop offset="72%" stopColor="rgba(var(--rgb-teal), 0)" />
+            <stop offset="100%" stopColor="rgba(var(--rgb-teal), 0.2)" />
           </radialGradient>
         </defs>
 
         {/* ناحیهٔ جاروب‌شده هنگام چرخش */}
         <circle cx={cx} cy={cy} r={outPx} fill="url(#envGlow)" />
         {/* دایرهٔ پوشش — قطر مؤثر دوران */}
-        <circle cx={cx} cy={cy} r={outPx} fill="none" stroke="#45b394" strokeWidth={1.7} />
+        <circle cx={cx} cy={cy} r={outPx} fill="none" stroke="var(--color-teal)" strokeWidth={1.7} />
         {/* دایرهٔ قطر واقعی — محاطی */}
-        <circle cx={cx} cy={cy} r={inPx} fill="rgba(227,169,78,0.05)" stroke="#e3a94e" strokeWidth={1.2} strokeDasharray="4 3" />
+        <circle cx={cx} cy={cy} r={inPx} fill="rgba(var(--rgb-brass), 0.06)" stroke="var(--color-brass)" strokeWidth={1.2} strokeDasharray="4 3" />
 
         {/* مقطع در حال چرخش + گوشه‌ها */}
         {n > 0 ? (
           <g style={{ transformOrigin: `${cx}px ${cy}px`, animation: `spin360 ${dur}s linear infinite` }}>
-            <polygon points={poly(outPx, phase - 0.55)} fill="rgba(201,149,90,0.07)" />
-            <polygon points={poly(outPx, phase - 0.28)} fill="rgba(201,149,90,0.13)" />
-            <polygon points={poly(outPx, phase)} fill="rgba(201,149,90,0.32)" stroke="#d8a86c" strokeWidth={1.2} strokeLinejoin="round" />
+            <polygon points={poly(outPx, phase - 0.55)} fill="rgba(var(--rgb-brass), 0.08)" />
+            <polygon points={poly(outPx, phase - 0.28)} fill="rgba(var(--rgb-brass), 0.14)" />
+            <polygon points={poly(outPx, phase)} fill="rgba(var(--rgb-brass), 0.30)" stroke="var(--color-brass2)" strokeWidth={1.2} strokeLinejoin="round" />
             {corners.map((c, i) => (
-              <circle key={i} cx={c.x} cy={c.y} r={2.7} fill="#e0703c" stroke="#ffd489" strokeWidth={1} />
+              <circle key={i} cx={c.x} cy={c.y} r={2.7} fill="var(--color-copper)" stroke="var(--color-brass2)" strokeWidth={1} />
             ))}
           </g>
         ) : (
-          <circle cx={cx} cy={cy} r={inPx} fill="rgba(201,149,90,0.32)" stroke="#d8a86c" strokeWidth={1.2} />
+          <circle cx={cx} cy={cy} r={inPx} fill="rgba(var(--rgb-brass), 0.30)" stroke="var(--color-brass2)" strokeWidth={1.2} />
         )}
 
         {/* محور چرخش */}
-        <circle cx={cx} cy={cy} r={2.2} fill="#f3c26b" />
-        <line x1={cx - 6} y1={cy} x2={cx + 6} y2={cy} stroke="#f3c26b" strokeWidth={0.8} opacity={0.5} />
+        <circle cx={cx} cy={cy} r={2.2} fill="var(--color-brass2)" />
+        <line x1={cx - 6} y1={cy} x2={cx + 6} y2={cy} stroke="var(--color-brass2)" strokeWidth={0.8} opacity={0.5} />
 
         {/* برچسب بالای پوشش */}
-        <text x={cx} y={cy - outPx - 12} textAnchor="middle" fontSize={10.5} fontWeight={800} fontFamily="Vazirmatn, sans-serif" fill="#45b394">
+        <text x={cx} y={cy - outPx - 12} textAnchor="middle" fontSize={10.5} fontWeight={800} fontFamily="Vazirmatn, sans-serif" fill="var(--color-teal)">
           ⌀ دوران {env.maxRotD.toFixed(1)}
         </text>
         {/* برچسب پایین قطر واقعی */}
-        <text x={cx} y={cy + outPx + 20} textAnchor="middle" fontSize={10} fontWeight={700} fontFamily="Vazirmatn, sans-serif" fill="#e3a94e">
+        <text x={cx} y={cy + outPx + 20} textAnchor="middle" fontSize={10} fontWeight={700} fontFamily="Vazirmatn, sans-serif" fill="var(--color-brass)">
           ⌀ واقعی {faNum(blankD)}
         </text>
       </svg>
 
       {/* آمار تفکیک‌شده */}
       <div className="grid grid-cols-3 gap-px border-t border-edge/60 bg-edge/40 text-center">
-        <div className="bg-[#120e09] px-1 py-1.5">
+        <div className="bg-[var(--theme-editor-bg)] px-1 py-1.5">
           <div className="text-[8.5px] font-semibold text-dim">قطر واقعی</div>
           <div className="font-mono text-[11px] font-bold text-brass2" dir="ltr">
             ⌀{faNum(blankD)}
           </div>
         </div>
-        <div className="bg-[#120e09] px-1 py-1.5">
+        <div className="bg-[var(--theme-editor-bg)] px-1 py-1.5">
           <div className="text-[8.5px] font-semibold text-dim">قطر دوران</div>
           <div className="font-mono text-[11px] font-bold text-teal" dir="ltr">
             ⌀{env.maxRotD.toFixed(1)}
           </div>
         </div>
-        <div className="bg-[#120e09] px-1 py-1.5">
+        <div className="bg-[var(--theme-editor-bg)] px-1 py-1.5">
           <div className="text-[8.5px] font-semibold text-dim">افزایش {n > 0 ? `(${faNum(n)} گوشه)` : ""}</div>
           <div className="font-mono text-[11px] font-bold text-copper" dir="ltr">
             {env.growth > 0 ? `+${env.growth.toFixed(1)} / ${growthPct.toFixed(0)}%` : "—"}
@@ -1081,14 +1095,14 @@ function Holder2CoordinateCalibration({
   const detectedText = (v: number) => Number.isFinite(v) ? v.toFixed(2) : "—";
 
   return (
-    <div className="mt-2 overflow-hidden rounded-md border border-[#4cc9f0]/25 bg-bg/35">
+    <div className="mt-2 overflow-hidden rounded-md border border-teal/25 bg-bg/35">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 px-2 py-1.5 text-right transition-colors hover:bg-[#4cc9f0]/5"
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-right transition-colors hover:bg-teal/5"
       >
-        <span className="grid h-5 w-5 shrink-0 place-items-center rounded border border-[#4cc9f0]/35 text-[#4cc9f0]">
+        <span className="grid h-5 w-5 shrink-0 place-items-center rounded border border-teal/35 text-teal">
           <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
             <path d="M3 2.5h10v11H3zM5 5h6M5 8h1M8 8h1M11 8h0M5 11h1M8 11h1M11 11h0" />
           </svg>
@@ -1104,7 +1118,7 @@ function Holder2CoordinateCalibration({
       </button>
 
       {open && (
-        <div className="anim-in border-t border-[#4cc9f0]/20 p-2">
+        <div className="anim-in border-t border-teal/20 p-2">
           <p className="mb-2 text-[9px] leading-4 text-mute">
             ابتدا مختصات ماشینِ هلدر اول و سپس هلدر دوم را وارد کنید. نتیجه پس از توقف کوتاه تایپ، خودکار در افست‌های اصلی ثبت می‌شود.
           </p>
@@ -1118,9 +1132,9 @@ function Holder2CoordinateCalibration({
             <Num label="محور Y" unit="mm" value={holder1.y} step={0.1} onChange={(y) => setHolder1((p) => ({ ...p, y }))} />
           </div>
 
-          <div className="mt-1.5 grid grid-cols-2 gap-2 rounded-md border border-[#4cc9f0]/20 bg-[#4cc9f0]/5 p-2">
+          <div className="mt-1.5 grid grid-cols-2 gap-2 rounded-md border border-teal/20 bg-teal/5 p-2">
             <div className="col-span-2 flex items-center gap-1.5">
-              <span className="grid h-4 w-5 place-items-center rounded bg-[#4cc9f0]/15 font-mono text-[8px] font-bold text-[#4cc9f0]">H2</span>
+              <span className="grid h-4 w-5 place-items-center rounded bg-teal/15 font-mono text-[8px] font-bold text-teal">H2</span>
               <span className="text-[9.5px] font-bold text-mute">مختصات هلدر دوم</span>
             </div>
             <Num label="محور X" unit="mm" value={holder2.x} step={0.1} onChange={(x) => setHolder2((p) => ({ ...p, x }))} />
@@ -1185,13 +1199,18 @@ function Num({
   /* اگر min/max داده نشده باشد، عدد هیچ محدودیتی ندارد */
   const clamp = (v: number) => {
     let r = Math.round(v * 100) / 100;
+    if (Object.is(r, -0)) r = 0;
     if (min !== undefined) r = Math.max(min, r);
     if (max !== undefined) r = Math.min(max, r);
     return r;
   };
 
   const commit = (raw: string) => {
-    const v = parseFloat(raw.replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))));
+    const normalized = raw
+      .replace(/[−–—]/g, "-")
+      .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+      .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)));
+    const v = parseFloat(normalized);
     if (!Number.isNaN(v) && Number.isFinite(v)) {
       onChange(clamp(v));
     }
@@ -1203,7 +1222,7 @@ function Num({
       <div className="relative">
         <input
           type="text"
-          inputMode="decimal"
+          inputMode={min !== undefined && min >= 0 ? "decimal" : undefined}
           className="field-input pl-12"
           value={text}
           dir="ltr"
@@ -1253,7 +1272,7 @@ const TOOL_TYPES: { id: ToolType; name: string; glyph: ReactNode }[] = [
 ];
 
 /* پیش‌نمایش مهندسی ابزار — همان پروفایل براده‌برداری با اندازه‌گذاری */
-function ToolPreview({ tool }: { tool: ToolSpec }) {
+function ToolPreview({ tool, themeColors = DEFAULT_THEME_COLORS }: { tool: ToolSpec; themeColors?: ThemeColors }) {
   const prof = useMemo(() => toolProfile(tool), [tool]);
   const W = 224;
   const H = 124;
@@ -1280,8 +1299,8 @@ function ToolPreview({ tool }: { tool: ToolSpec }) {
       `M${x.toFixed(1)} ${y.toFixed(1)} l${(-4.5 * Math.cos(ang - 0.42)).toFixed(1)} ${(-4.5 * Math.sin(ang - 0.42)).toFixed(1)} M${x.toFixed(1)} ${y.toFixed(1)} l${(-4.5 * Math.cos(ang + 0.42)).toFixed(1)} ${(-4.5 * Math.sin(ang + 0.42)).toFixed(1)} `;
     return (
       <g>
-        <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#8b7c5f" strokeWidth={1} />
-        <path d={head(x1, y1) + head(x2, y2)} stroke="#8b7c5f" strokeWidth={1} fill="none" />
+        <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={themeColors.editorGrid} strokeWidth={1} />
+        <path d={head(x1, y1) + head(x2, y2)} stroke={themeColors.editorGrid} strokeWidth={1} fill="none" />
         <text
           x={(x1 + x2) / 2}
           y={ly ?? Math.min(y1, y2) - 4}
@@ -1289,8 +1308,8 @@ function ToolPreview({ tool }: { tool: ToolSpec }) {
           fontSize={9}
           fontWeight={700}
           fontFamily="JetBrains Mono, monospace"
-          fill="#d8c49a"
-          stroke="#120e09"
+          fill={themeColors.uiInk}
+          stroke={themeColors.simBg}
           strokeWidth={3}
           paintOrder="stroke"
         >
@@ -1304,45 +1323,45 @@ function ToolPreview({ tool }: { tool: ToolSpec }) {
   for (let z = Math.ceil(prof.min / 5) * 5; z <= prof.max; z += 5) gridX.push(z);
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full rounded-md border border-edge bg-[#120e09]">
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full rounded-md border border-edge" style={{ backgroundColor: themeColors.simBg }}>
       <defs>
         <linearGradient id="toolGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#aeb9c4" />
-          <stop offset="0.55" stopColor="#7d8a95" />
-          <stop offset="1" stopColor="#4f5b66" />
+          <stop offset="0" stopColor={shadeHex(themeColors.simToolInsert, 0.2)} />
+          <stop offset="0.55" stopColor={themeColors.simToolInsert} />
+          <stop offset="1" stopColor={shadeHex(themeColors.simToolInsert, -0.32)} />
         </linearGradient>
       </defs>
       {/* شبکه */}
       {gridX.map((z) => (
-        <line key={z} x1={tipX + z * s} y1={12} x2={tipX + z * s} y2={tipY + 6} stroke="rgba(209,183,134,0.08)" strokeWidth={1} />
+        <line key={z} x1={tipX + z * s} y1={12} x2={tipX + z * s} y2={tipY + 6} stroke={rgbaCss(themeColors.editorGrid, 0.14)} strokeWidth={1} />
       ))}
       {/* خط سطح قطعه */}
-      <line x1={8} y1={tipY} x2={W - 8} y2={tipY} stroke="rgba(227,169,78,0.4)" strokeWidth={1} strokeDasharray="6 3 1.5 3" />
-      <text x={W - 10} y={tipY + 11} textAnchor="end" fontSize={7.5} fill="#8b7c5f" fontFamily="JetBrains Mono, monospace">
+      <line x1={8} y1={tipY} x2={W - 8} y2={tipY} stroke={rgbaCss(themeColors.simTargetOutline, 0.45)} strokeWidth={1} strokeDasharray="6 3 1.5 3" />
+      <text x={W - 10} y={tipY + 11} textAnchor="end" fontSize={7.5} fill={themeColors.editorGrid} fontFamily="JetBrains Mono, monospace">
         سطح قطعه
       </text>
       {/* دنباله */}
-      <rect x={midX - shW / 2} y={yTop - 14} width={shW} height={16} fill="#333c45" stroke="#1d2329" strokeWidth={1} />
+      <rect x={midX - shW / 2} y={yTop - 14} width={shW} height={16} fill={themeColors.simToolBody} stroke={shadeHex(themeColors.simToolBody, -0.45)} strokeWidth={1} />
       {/* اینسرت */}
       <path d={`${d} L${xMaxE.toFixed(1)} ${yTop.toFixed(1)} L${xMinE.toFixed(1)} ${yTop.toFixed(1)} Z`} fill="url(#toolGrad)" stroke="rgba(0,0,0,0.45)" strokeWidth={1} />
       {/* لبه برنده */}
-      <path d={d} fill="none" stroke="#f3c26b" strokeWidth={2} strokeLinecap="round" />
+      <path d={d} fill="none" stroke={themeColors.simToolTip} strokeWidth={2} strokeLinecap="round" />
       {/* نوک */}
-      <circle cx={tipX} cy={tipY} r={2.4} fill="#f3c26b" />
+      <circle cx={tipX} cy={tipY} r={2.4} fill={themeColors.simToolTip} />
 
       {/* اندازه‌گذاری‌ها */}
       {tool.type === "angle" && (
         <g>
           {/* شعاع نوک — تنها پارامتر */}
-          <circle cx={tipX} cy={tipY - tool.nose * s} r={Math.max(3, tool.nose * s)} fill="none" stroke="#f59a80" strokeWidth={1} strokeDasharray="2.5 2" />
+          <circle cx={tipX} cy={tipY - tool.nose * s} r={Math.max(3, tool.nose * s)} fill="none" stroke={themeColors.opOffset} strokeWidth={1} strokeDasharray="2.5 2" />
           {dim(tipX, tipY, tipX, tipY - tool.nose * s, `R${tool.nose}`, tipY - tool.nose * s - 5)}
           {/* خط عمودی مبنا */}
-          <line x1={tipX} y1={tipY} x2={tipX} y2={yTop} stroke="rgba(209,183,134,0.28)" strokeWidth={1} strokeDasharray="3 3" />
+          <line x1={tipX} y1={tipY} x2={tipX} y2={yTop} stroke={rgbaCss(themeColors.editorGrid, 0.35)} strokeWidth={1} strokeDasharray="3 3" />
           {/* برچسب اینسرت و دسته */}
-          <text x={midX} y={yTop + 13} textAnchor="middle" fontSize={9.5} fontWeight={700} fontFamily="JetBrains Mono, monospace" fill="#2b333b">
+          <text x={midX} y={yTop + 13} textAnchor="middle" fontSize={9.5} fontWeight={700} fontFamily="JetBrains Mono, monospace" fill={shadeHex(themeColors.simToolInsert, -0.55)}>
             V{tool.angle}°
           </text>
-          <text x={midX} y={yTop - 3} textAnchor="middle" fontSize={9.5} fontWeight={700} fontFamily="JetBrains Mono, monospace" fill="#d8c49a" stroke="#120e09" strokeWidth={3} paintOrder="stroke">
+          <text x={midX} y={yTop - 3} textAnchor="middle" fontSize={9.5} fontWeight={700} fontFamily="JetBrains Mono, monospace" fill={themeColors.uiInk} stroke={themeColors.simBg} strokeWidth={3} paintOrder="stroke">
             {HAND_INFO[tool.hand].name} {HAND_INFO[tool.hand].k}°
           </text>
         </g>
@@ -1350,7 +1369,7 @@ function ToolPreview({ tool }: { tool: ToolSpec }) {
       {tool.type === "groove" && (
         <g>
           {dim(xMinE, tipY + 8, xMaxE, tipY + 8, `W ${tool.width}`, tipY + 22)}
-          <text x={tipX + (prof.max - prof.min) * s + 8} y={tipY - 4} fontSize={8.5} fontWeight={700} fontFamily="JetBrains Mono, monospace" fill="#d8c49a" stroke="#120e09" strokeWidth={3} paintOrder="stroke">
+          <text x={tipX + (prof.max - prof.min) * s + 8} y={tipY - 4} fontSize={8.5} fontWeight={700} fontFamily="JetBrains Mono, monospace" fill={themeColors.uiInk} stroke={themeColors.simBg} strokeWidth={3} paintOrder="stroke">
             R{tool.corner}
           </text>
         </g>
@@ -1414,10 +1433,10 @@ function InnerRadialZoneEditor({blankR,samples,outerSamples,bounds:committed,ord
   const add=(e:React.MouseEvent<SVGSVGElement>)=>{if(drag!==null)return;const v=Math.round(radial(e));if(!bounds.some(x=>Math.abs(x-v)<2)){setBounds([...bounds,v].sort((a,b)=>a-b));setOrder([]);}};
   return <div className="anim-in mt-2.5 border-t border-edge pt-2.5">
     <div className="mb-1.5 flex items-center justify-between"><span className="text-[10.5px] font-semibold text-mute">نواحی + ترتیب (دستی)</span><span className="rounded-full border border-edge px-2 py-0.5 text-[9px] font-bold text-mute">{faNum(zones.length)} ناحیه</span></div>
-    <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="aspect-square w-full select-none touch-none rounded-md border border-edge bg-[#120e09]" style={{cursor:drag!==null?'ns-resize':'crosshair'}} onClick={add} onPointerMove={e=>{if(drag!==null){const raw=Math.round(radial(e));setBounds(bs=>{const lo=drag>0?bs[drag-1]+1:.5,hi=drag<bs.length-1?bs[drag+1]-1:radialMax-.5,v=Math.max(lo,Math.min(hi,raw));return bs.map((b,i)=>i===drag?v:b)});}}} onPointerUp={()=>{setBounds(bs=>[...bs].sort((a,b)=>a-b));setDrag(null)}} onPointerLeave={()=>{setDrag(null);setHover(null)}}>
-      {innerPath?<><path d={outerPath} fill="none" stroke="rgba(227,169,78,.7)" strokeWidth="1.2"/><path d={innerPath} fill="none" stroke="#45b394" strokeWidth="1.5"/></>:<text x={W/2} y={H/2} textAnchor="middle" fill="#8b7c5f" fontSize="10">خط داخل‌تراشی موجود نیست</text>}
-      {zones.map((z,i)=>{const pos=order.indexOf(i),cy=(Y(z.a)+Y(z.b))/2;return <g key={i}><rect x={P} y={Math.min(Y(z.a),Y(z.b))} width={W-2*P} height={Math.abs(Y(z.a)-Y(z.b))} fill={pos>=0?'rgba(69,179,148,.14)':'transparent'}/><g className="cursor-pointer" onClick={e=>{e.stopPropagation();toggle(i)}}><circle cx={W/2} cy={cy} r={pos>=0?9:8.5} fill={pos>=0?'#e0703c':'#120e09'} stroke={pos>=0?'#120e09':'#6f6047'} strokeDasharray={pos>=0?undefined:'2.5 2'}/><text x={W/2} y={cy+3.5} textAnchor="middle" fontSize="10" fontWeight="800" fill={pos>=0?'#fff7ec':'#8b7c5f'}>{faNum(pos>=0?pos+1:i+1)}</text></g></g>})}
-      {bounds.map((v,i)=>{const y=Y(v),on=drag===i||hover===i;return <g key={i} className="cursor-ns-resize" onPointerDown={e=>{e.stopPropagation();(e.target as Element).setPointerCapture?.(e.pointerId);setDrag(i)}} onPointerEnter={()=>setHover(i)} onPointerLeave={()=>setHover(null)}><rect x={P-2} y={y-6} width={W-2*P+4} height="12" fill="transparent"/><line x1={P} x2={W-P} y1={y} y2={y} stroke={on?'#f3c26b':'#45b394'} strokeWidth="1.6" strokeDasharray="4 3"/><circle cx={P} cy={y} r={on?5:4} fill={on?'#f3c26b':'#45b394'} stroke="#120e09" strokeWidth="1.5"/><text x={P+8} y={y-5} fontSize="8" fill={on?'#f3c26b':'#45b394'}>R{Math.round(v)}</text>{on&&<g className="cursor-pointer" onClick={e=>{e.stopPropagation();setBounds(bs=>bs.filter((_,j)=>j!==i));setOrder([])}}><circle cx={P+10} cy={y+7} r="5.5" fill="#d95848" stroke="#120e09"/><text x={P+10} y={y+10} textAnchor="middle" fontSize="9" fontWeight="900" fill="#fff">×</text></g>}</g>})}
+    <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="aspect-square w-full select-none touch-none rounded-md border border-edge bg-[var(--theme-editor-bg)]" style={{cursor:drag!==null?'ns-resize':'crosshair'}} onClick={add} onPointerMove={e=>{if(drag!==null){const raw=Math.round(radial(e));setBounds(bs=>{const lo=drag>0?bs[drag-1]+1:.5,hi=drag<bs.length-1?bs[drag+1]-1:radialMax-.5,v=Math.max(lo,Math.min(hi,raw));return bs.map((b,i)=>i===drag?v:b)});}}} onPointerUp={()=>{setBounds(bs=>[...bs].sort((a,b)=>a-b));setDrag(null)}} onPointerLeave={()=>{setDrag(null);setHover(null)}}>
+      {innerPath?<><path d={outerPath} fill="none" stroke="rgba(var(--rgb-brass), .7)" strokeWidth="1.2"/><path d={innerPath} fill="none" stroke="var(--color-teal)" strokeWidth="1.5"/></>:<text x={W/2} y={H/2} textAnchor="middle" fill="var(--color-dim)" fontSize="10">خط داخل‌تراشی موجود نیست</text>}
+      {zones.map((z,i)=>{const pos=order.indexOf(i),cy=(Y(z.a)+Y(z.b))/2;return <g key={i}><rect x={P} y={Math.min(Y(z.a),Y(z.b))} width={W-2*P} height={Math.abs(Y(z.a)-Y(z.b))} fill={pos>=0?'rgba(var(--rgb-teal), .14)':'transparent'}/><g className="cursor-pointer" onClick={e=>{e.stopPropagation();toggle(i)}}><circle cx={W/2} cy={cy} r={pos>=0?9:8.5} fill={pos>=0?'var(--color-copper)':'var(--theme-editor-bg)'} stroke={pos>=0?'var(--theme-editor-bg)':'var(--color-dim)'} strokeDasharray={pos>=0?undefined:'2.5 2'}/><text x={W/2} y={cy+3.5} textAnchor="middle" fontSize="10" fontWeight="800" fill={pos>=0?'#fff7ec':'var(--color-dim)'}>{faNum(pos>=0?pos+1:i+1)}</text></g></g>})}
+      {bounds.map((v,i)=>{const y=Y(v),on=drag===i||hover===i;return <g key={i} className="cursor-ns-resize" onPointerDown={e=>{e.stopPropagation();(e.target as Element).setPointerCapture?.(e.pointerId);setDrag(i)}} onPointerEnter={()=>setHover(i)} onPointerLeave={()=>setHover(null)}><rect x={P-2} y={y-6} width={W-2*P+4} height="12" fill="transparent"/><line x1={P} x2={W-P} y1={y} y2={y} stroke={on?'var(--color-brass2)':'var(--color-teal)'} strokeWidth="1.6" strokeDasharray="4 3"/><circle cx={P} cy={y} r={on?5:4} fill={on?'var(--color-brass2)':'var(--color-teal)'} stroke="var(--theme-editor-bg)" strokeWidth="1.5"/><text x={P+8} y={y-5} fontSize="8" fill={on?'var(--color-brass2)':'var(--color-teal)'}>R{Math.round(v)}</text>{on&&<g className="cursor-pointer" onClick={e=>{e.stopPropagation();setBounds(bs=>bs.filter((_,j)=>j!==i));setOrder([])}}><circle cx={P+10} cy={y+7} r="5.5" fill="var(--color-danger)" stroke="var(--theme-editor-bg)"/><text x={P+10} y={y+10} textAnchor="middle" fontSize="9" fontWeight="900" fill="#fff">×</text></g>}</g>})}
     </svg>
     <p className="mt-1 text-[9.5px] leading-4 text-dim"><span className="text-teal">مرزهای افقی را بکشید یا روی پس‌زمینه کلیک کنید تا جداکننده جدید شود</span>؛ برای حذف روی مرز بروید و × را بزنید. سپس دایره‌های شماره را به ترتیب اجرا انتخاب کنید.</p>
     <button onClick={()=>onConfirm([...bounds].sort((a,b)=>a-b),valid?order:zones.map((_,i)=>i))} className="btn btn-brass mt-2 w-full justify-center !py-2 text-[11px] font-bold"><IconCheck className="h-4 w-4"/>تأیید و ساخت جی‌کد</button>
@@ -1569,7 +1588,7 @@ function ZoneOrderEditor({
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
-className="aspect-square w-full select-none touch-none rounded-md border border-edge bg-[#120e09]"
+      className="aspect-square w-full select-none touch-none rounded-md border border-edge bg-[var(--theme-editor-bg)]"
         style={{ cursor: dragIdx != null ? "ew-resize" : "crosshair" }}
         onPointerDown={(e) => {
           (e.target as Element).setPointerCapture?.(e.pointerId);
@@ -1592,14 +1611,14 @@ className="aspect-square w-full select-none touch-none rounded-md border border-
             در انتهای قطعه از میان حفره داخلی به‌عنوان خط اضافه دیده نشود. */}
         <path
           d={`${silhouette}${innerSilhouette ? ` ${innerSilhouette}` : ""}`}
-          fill="rgba(201,149,90,0.18)"
+          fill="rgba(var(--rgb-brass), 0.18)"
           fillRule="evenodd"
         />
-        {[outerTop, outerBottom].map((d, i) => d && <path key={`outer-${i}`} d={d} fill="none" stroke="rgba(227,169,78,0.5)" strokeWidth={1} />)}
-        {[innerTop, innerBottom].map((d, i) => d && <path key={`inner-${i}`} d={d} fill="none" stroke="#45b394" strokeWidth={1.1} />)}
+        {[outerTop, outerBottom].map((d, i) => d && <path key={`outer-${i}`} d={d} fill="none" stroke="rgba(var(--rgb-brass), 0.5)" strokeWidth={1} />)}
+        {[innerTop, innerBottom].map((d, i) => d && <path key={`inner-${i}`} d={d} fill="none" stroke="var(--color-teal)" strokeWidth={1.1} />)}
         {tipPair && <>
-          <line x1={X(tipPair.outerTip.z)} y1={Y(tipPair.outerTip.r)} x2={X(tipPair.innerTip.z)} y2={Y(tipPair.innerTip.r)} stroke="rgba(227,169,78,0.5)" strokeWidth={1} />
-          <line x1={X(tipPair.outerTip.z)} y1={2 * YC - Y(tipPair.outerTip.r)} x2={X(tipPair.innerTip.z)} y2={2 * YC - Y(tipPair.innerTip.r)} stroke="rgba(227,169,78,0.5)" strokeWidth={1} />
+          <line x1={X(tipPair.outerTip.z)} y1={Y(tipPair.outerTip.r)} x2={X(tipPair.innerTip.z)} y2={Y(tipPair.innerTip.r)} stroke="rgba(var(--rgb-brass), 0.5)" strokeWidth={1} />
+          <line x1={X(tipPair.outerTip.z)} y1={2 * YC - Y(tipPair.outerTip.r)} x2={X(tipPair.innerTip.z)} y2={2 * YC - Y(tipPair.innerTip.r)} stroke="rgba(var(--rgb-brass), 0.5)" strokeWidth={1} />
         </>}
 
         {/* نواحی */}
@@ -1616,21 +1635,21 @@ className="aspect-square w-full select-none touch-none rounded-md border border-
                 y={DIV_TOP}
                 width={Math.max(0.5, xb - xa)}
                 height={Math.max(1, DIV_BOTTOM - DIV_TOP)}
-                fill={selected ? "rgba(69,179,148,0.14)" : "transparent"}
+                fill={selected ? "rgba(var(--rgb-teal), 0.14)" : "transparent"}
               />
               {/* شماره اولویت */}
               <g onClick={(e) => { e.stopPropagation(); toggle(i); }} className="cursor-pointer">
                 {selected ? (
                   <>
-                    <circle cx={cx} cy={NUM_Y} r={9} fill="#e0703c" stroke="#120e09" strokeWidth={1.5} />
+                    <circle cx={cx} cy={NUM_Y} r={9} fill="var(--color-copper)" stroke="var(--theme-editor-bg)" strokeWidth={1.5} />
                     <text x={cx} y={NUM_Y + 3.5} textAnchor="middle" fontSize={10} fontWeight={800} fontFamily="Vazirmatn, sans-serif" fill="#fff7ec">
                       {faNum(pos + 1)}
                     </text>
                   </>
                 ) : (
                   <g className="transition-opacity hover:opacity-100" opacity={0.55}>
-                    <circle cx={cx} cy={NUM_Y} r={8.5} fill="none" stroke="#6f6047" strokeWidth={1} strokeDasharray="2.5 2" />
-                    <text x={cx} y={NUM_Y + 3} textAnchor="middle" fontSize={9} fontWeight={700} fontFamily="Vazirmatn, sans-serif" fill="#8b7c5f">
+                    <circle cx={cx} cy={NUM_Y} r={8.5} fill="none" stroke="var(--color-dim)" strokeWidth={1} strokeDasharray="2.5 2" />
+                    <text x={cx} y={NUM_Y + 3} textAnchor="middle" fontSize={9} fontWeight={700} fontFamily="Vazirmatn, sans-serif" fill="var(--color-dim)">
                       {faNum(i + 1)}
                     </text>
                   </g>
@@ -1658,10 +1677,10 @@ className="aspect-square w-full select-none touch-none rounded-md border border-
               onPointerLeave={() => setHoverIdx(null)}
             >
               <rect x={x - 5} y={DIV_TOP - 4} width={10} height={Math.max(12, DIV_BOTTOM - DIV_TOP + 8)} fill="transparent" />
-              <line x1={x} y1={DIV_TOP} x2={x} y2={DIV_BOTTOM} stroke={active || hov ? "#f3c26b" : "#45b394"} strokeWidth={1.6} strokeDasharray="4 3" />
+              <line x1={x} y1={DIV_TOP} x2={x} y2={DIV_BOTTOM} stroke={active || hov ? "var(--color-brass2)" : "var(--color-teal)"} strokeWidth={1.6} strokeDasharray="4 3" />
               {/* دستگیره بالای مرز */}
-              <circle cx={x} cy={DIV_TOP} r={active ? 5 : hov ? 4.5 : 4} fill={active || hov ? "#f3c26b" : "#45b394"} stroke="#120e09" strokeWidth={1.5} />
-              <text x={x} y={DIV_TOP - 8} textAnchor="middle" fontSize={8} fontFamily="JetBrains Mono, monospace" fill={active || hov ? "#f3c26b" : "#45b394"} fontWeight={700}>
+              <circle cx={x} cy={DIV_TOP} r={active ? 5 : hov ? 4.5 : 4} fill={active || hov ? "var(--color-brass2)" : "var(--color-teal)"} stroke="var(--theme-editor-bg)" strokeWidth={1.5} />
+              <text x={x} y={DIV_TOP - 8} textAnchor="middle" fontSize={8} fontFamily="JetBrains Mono, monospace" fill={active || hov ? "var(--color-brass2)" : "var(--color-teal)"} fontWeight={700}>
                 {Math.round(b)}
               </text>
               {/* دکمهٔ حذف مرز */}
@@ -1673,7 +1692,7 @@ className="aspect-square w-full select-none touch-none rounded-md border border-
                     setBounds((bs) => bs.filter((_, j) => j !== i));
                   }}
                 >
-                  <circle cx={x + 10} cy={DIV_TOP} r={5.5} fill="#d95848" stroke="#120e09" strokeWidth={1.2} />
+                  <circle cx={x + 10} cy={DIV_TOP} r={5.5} fill="var(--color-danger)" stroke="var(--theme-editor-bg)" strokeWidth={1.2} />
                   <text x={x + 10} y={DIV_TOP + 3} textAnchor="middle" fontSize={9} fontWeight={900} fill="#fff">
                     ×
                   </text>

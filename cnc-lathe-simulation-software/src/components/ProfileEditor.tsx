@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import type { EditBuf, ELine, EVert, GenResult, Holder2State, OffPatch, Op, Params, SegKind, SplitState } from "../lib/lathe";
-import { continuousPathOffset, deleteEditLines, deleteEditVertices, insertEditVertex, normalizeEditBuf, OP_INFO, RAPID_RATE, sampleOrderedProfile } from "../lib/lathe";
+import { continuousPathOffset, deleteEditLines, deleteEditVertices, innerOffsetLeftSide, insertEditVertex, normalizeEditBuf, OP_INFO, RAPID_RATE, sampleOrderedProfile } from "../lib/lathe";
+import { DEFAULT_THEME_COLORS, opColorFromTheme, rgbaCss, segColorFromTheme, shadeHex, type ThemeColors } from "../lib/theme";
 import type { SketchKind, SketchSeg, SnapPoint, SPoint } from "../lib/sketch";
 import {
   arcRadius,
@@ -9,6 +10,7 @@ import {
   cloneSeg,
   defaultCubicHandles,
   dist,
+  distToPoly,
   distToSeg,
   endFromLenAngle,
   evalSeg,
@@ -67,9 +69,10 @@ const BOX_ROTATE_CURSORS = [180,270,0,90].map(rotationCursor);
 const resizeCursor=(mode:"nw"|"ne"|"sw"|"se"|"n"|"s"|"e"|"w",rotation:number)=>{const base:{[K in typeof mode]:number}={e:0,w:0,n:90,s:90,ne:-45,sw:-45,nw:45,se:45},angle=base[mode]+rotation,svg=`<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g transform="rotate(${angle} 12 12)" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18M3 12l4-4M3 12l4 4M21 12l-4-4M21 12l-4 4" stroke="#000" stroke-width="4"/><path d="M3 12h18M3 12l4-4M3 12l4 4M21 12l-4-4M21 12l-4 4" stroke="#fff" stroke-width="2"/></g></svg>`;return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 12 12, move`;};
 
 const movePolylineSelection=(all:SketchSeg[],ids:number[],dz:number,dr:number)=>{
-  const chosen=new Set(ids),keys=new Set<string>();
-  for(const s of all)if(chosen.has(s.id)&&s.polylineId!=null){keys.add(`${s.polylineId}:${s.a.z}:${s.a.r}`);keys.add(`${s.polylineId}:${s.b.z}:${s.b.r}`);}
-  return all.map(s=>{if(chosen.has(s.id))return moveSeg(s,dz,dr);if(s.polylineId==null)return s;const a=keys.has(`${s.polylineId}:${s.a.z}:${s.a.r}`),b=keys.has(`${s.polylineId}:${s.b.z}:${s.b.r}`);if(!a&&!b)return s;const next={...s,a:a?{z:s.a.z+dz,r:s.a.r+dr}:s.a,b:b?{z:s.b.z+dz,r:s.b.r+dr}:s.b};if(s.kind==="cubic"){if(a&&s.c1)next.c1={z:s.c1.z+dz,r:s.c1.r+dr};if(b&&s.c2)next.c2={z:s.c2.z+dz,r:s.c2.r+dr};}return next;});
+  const chosen=new Set(ids),anchors:{pid:number;p:SPoint}[]=[];
+  for(const s of all)if(chosen.has(s.id)&&s.polylineId!=null){anchors.push({pid:s.polylineId,p:s.a},{pid:s.polylineId,p:s.b});}
+  const hasAnchor=(pid:number,pt:SPoint)=>anchors.some(item=>item.pid===pid&&dist(item.p,pt)<1e-7);
+  return all.map(s=>{if(chosen.has(s.id))return moveSeg(s,dz,dr);if(s.polylineId==null)return s;const a=hasAnchor(s.polylineId,s.a),b=hasAnchor(s.polylineId,s.b);if(!a&&!b)return s;const next={...s,a:a?{z:s.a.z+dz,r:s.a.r+dr}:s.a,b:b?{z:s.b.z+dz,r:s.b.r+dr}:s.b};if(s.kind==="cubic"){if(a&&s.c1)next.c1={z:s.c1.z+dz,r:s.c1.r+dr};if(b&&s.c2)next.c2={z:s.c2.z+dz,r:s.c2.r+dr};}return next;});
 };
 
 export interface EdSettings {
@@ -146,13 +149,13 @@ interface Props {
   imageImportRequest: number;
   registerImageHistory: (api:{undo:()=>void;redo:()=>void;canUndo:boolean;canRedo:boolean})=>void;
   segs: SketchSeg[];
-  onSegs: (next: SketchSeg[], commit: boolean) => void;
+  onSegs: (next: SketchSeg[], commit: boolean, splitPatch?: SplitState) => void;
   selected: number[];
   onSelected: (ids: number[]) => void;
   params: Params;
   gen: GenResult;
   split: SplitState;
-  onSplit: (s: SplitState) => void;
+  onSplit: (s: SplitState, commit?: boolean) => void;
   settings: EdSettings;
   onSettings: (patch: Partial<EdSettings>) => void;
   toolShortcuts: Record<string, string>;
@@ -180,9 +183,7 @@ interface Props {
   profileLineWidth: number;
   pointScale: number;
   disableSelectionGlow: boolean;
-  profileColor: string;
-  selectedColor: string;
-  guideLineColor: string;
+  themeColors?: ThemeColors;
 }
 
 interface PaintEdge {
@@ -254,21 +255,6 @@ function editLineGCodeIndex(lineId: number, editLines: ELine[], gen: GenResult):
   return matches[Math.min(Math.max(0, occurrence), matches.length - 1)].line;
 }
 
-const SEG_COLOR: Record<SegKind, string> = {
-  rapid: "#93a1ad",
-  round: "#b48ee0",
-  rough: "#45b394",
-  roughz: "#6ab0d8",
-  copy: "#a3c15c",
-  face: "#e3a94e",
-  finish: "#e0703c",
-  offset: "#f59a80",
-  bore: "#4cc9f0",
-  boreoff: "#c77dff",
-  borefin: "#f72585",
-  bottom: "#ffd166",
-};
-
 type LayerKey =
   | "showRough"
   | "showFinish"
@@ -283,24 +269,35 @@ type LayerKey =
   | "showGhost"
   | "showInnerArea";
 
-const CHIPS: { key: LayerKey; label: string; color: string }[] = [
-  { key: "showRound", label: "گرد کردن", color: "#b48ee0" },
-  { key: "showRough", label: "مسیر خشن", color: "#45b394" },
-  { key: "showInnerRough", label: "خشن داخل (کاسه)", color: "#4cc9f0" },
-  { key: "showOffset", label: "آفست", color: "#f59a80" },
-  { key: "showInnerOffset", label: "آفست داخل‌تراشی", color: "#c77dff" },
-  { key: "showFinish", label: "پرداخت", color: "#e0703c" },
-  { key: "showInnerFinish", label: "پرداخت داخل", color: "#f72585" },
-  { key: "showFace", label: "پیشانی", color: "#e3a94e" },
-  { key: "showBottom", label: "کف‌تراشی", color: "#ffd166" },
-  { key: "showRapids", label: "حرکت سریع", color: "#93a1ad" },
-  { key: "showGhost", label: "سایه طرح", color: "#c9955a" },
-  { key: "showInnerArea", label: "محدوده داخل‌تراشی", color: "#69d7ff" },
-];
+function getLayerChips(tc: ThemeColors): { key: LayerKey; label: string; color: string }[] {
+  return [
+    { key: "showRound", label: "گرد کردن", color: tc.opRound },
+    { key: "showRough", label: "مسیر خشن", color: tc.opRoughD },
+    { key: "showInnerRough", label: "خشن داخل (کاسه)", color: tc.opInnerRough },
+    { key: "showOffset", label: "آفست", color: tc.opOffset },
+    { key: "showInnerOffset", label: "آفست داخل‌تراشی", color: tc.opInnerOffset },
+    { key: "showFinish", label: "پرداخت", color: tc.opFinish },
+    { key: "showInnerFinish", label: "پرداخت داخل", color: tc.opInnerFinish },
+    { key: "showFace", label: "پیشانی", color: tc.opFace },
+    { key: "showBottom", label: "کف‌تراشی", color: tc.opBottom },
+    { key: "showRapids", label: "حرکت سریع", color: tc.opRapid },
+    { key: "showGhost", label: "سایه طرح", color: tc.editorRotEnv },
+    { key: "showInnerArea", label: "محدوده داخل‌تراشی", color: tc.pathEditInnerZone },
+  ];
+}
+const CHIPS = getLayerChips(DEFAULT_THEME_COLORS);
 const TOOLPATH_LAYER_KEYS = CHIPS.filter((chip) => chip.key !== "showGhost" && chip.key !== "showInnerArea").map((chip) => chip.key);
 
 /* منوی کرکره‌ای لایه‌های نمایش — جایگزین نوار چیپ‌های افقی */
-function LayerMenu({ settings, onSettings }: { settings: EdSettings; onSettings: (p: Partial<EdSettings>) => void }) {
+function LayerMenu({
+  settings,
+  onSettings,
+  themeColors = DEFAULT_THEME_COLORS,
+}: {
+  settings: EdSettings;
+  onSettings: (p: Partial<EdSettings>) => void;
+  themeColors?: ThemeColors;
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -318,7 +315,8 @@ function LayerMenu({ settings, onSettings }: { settings: EdSettings; onSettings:
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
-  const activeN = CHIPS.filter((c) => settings[c.key]).length;
+  const chips = getLayerChips(themeColors);
+  const activeN = chips.filter((c) => settings[c.key]).length;
   const allLayersOff = activeN === 0;
   const opacity = Math.min(1, Math.max(0.1, settings.layerOpacity));
   const toggleAllLayers = () => {
@@ -379,7 +377,7 @@ function LayerMenu({ settings, onSettings }: { settings: EdSettings; onSettings:
                 step={5}
                 value={Math.round(opacity * 100)}
                 onChange={(e) => onSettings({ layerOpacity: Number(e.target.value) / 100 })}
-                className="h-1.5 min-w-0 flex-1 cursor-pointer accent-[#e3a94e]"
+                className="h-1.5 min-w-0 flex-1 cursor-pointer accent-brass"
                 aria-label="شدت نمایش لایه‌ها"
               />
               <span className="shrink-0">پررنگ</span>
@@ -390,7 +388,7 @@ function LayerMenu({ settings, onSettings }: { settings: EdSettings; onSettings:
               </p>
             )}
           </div>
-          {CHIPS.map((c) => (
+          {chips.map((c) => (
             <button
               key={c.key}
               onClick={() => onSettings({ [c.key]: !settings[c.key] } as Partial<EdSettings>)}
@@ -574,6 +572,7 @@ const SNAP_COLOR: Record<string, string> = {
   cross: "#e0703c",
   axis: "#f3c26b",
   grid: "#8b7c5f",
+  split: "#f72585",
 };
 
 type SketchPointPart = "a" | "b" | "c1" | "c2" | "via";
@@ -780,6 +779,107 @@ function scaleSegment(segment: SketchSeg, origin: SPoint, factor: number): Sketc
   };
 }
 
+function moveChordAttachedPoint(
+  pt: SPoint,
+  oldA: SPoint,
+  oldB: SPoint,
+  newA: SPoint,
+  newB: SPoint
+): SPoint {
+  const vx = oldB.z - oldA.z, vy = oldB.r - oldA.r;
+  const len2 = vx * vx + vy * vy;
+  if (len2 < 1e-12) {
+    return {
+      z: pt.z + ((newA.z - oldA.z) + (newB.z - oldB.z)) * 0.5,
+      r: pt.r + ((newA.r - oldA.r) + (newB.r - oldB.r)) * 0.5,
+    };
+  }
+  const qx = pt.z - oldA.z, qy = pt.r - oldA.r;
+  const alpha = (qx * vx + qy * vy) / len2;
+  const beta = (qx * -vy + qy * vx) / len2;
+  const nvx = newB.z - newA.z, nvy = newB.r - newA.r;
+  if (nvx * nvx + nvy * nvy < 1e-12) return { ...newA };
+  return {
+    z: newA.z + alpha * nvx + beta * -nvy,
+    r: newA.r + alpha * nvy + beta * nvx,
+  };
+}
+
+/* اعمال تبدیل چرخش/مقیاس روی المان‌های انتخابی با حفظ اتصال هندسی نقاط مشترک به المان‌های مجاور */
+function transformConnectedSegments(
+  base: SketchSeg[],
+  ids: number[],
+  separatedKeys: ReadonlySet<string>,
+  transformSeg: (seg: SketchSeg) => SketchSeg
+): SketchSeg[] {
+  const chosen = new Set(ids);
+  if (!chosen.size) return base;
+
+  const transformedById = new Map<number, SketchSeg>();
+  const movedAnchors: { oldPt: SPoint; newPt: SPoint }[] = [];
+
+  for (const s of base) {
+    if (!chosen.has(s.id)) continue;
+    const t = transformSeg(s);
+    transformedById.set(s.id, t);
+    if (!separatedKeys.has(`${s.id}:a`)) {
+      movedAnchors.push({ oldPt: s.a, newPt: t.a });
+    }
+    if (!separatedKeys.has(`${s.id}:b`)) {
+      movedAnchors.push({ oldPt: s.b, newPt: t.b });
+    }
+  }
+
+  const findMovedAnchor = (segId: number, part: "a" | "b", pt: SPoint): SPoint | null => {
+    if (separatedKeys.has(`${segId}:${part}`)) return null;
+    for (const anchor of movedAnchors) {
+      if (dist(pt, anchor.oldPt) < 1e-7) return anchor.newPt;
+    }
+    return null;
+  };
+
+  return base.map((s) => {
+    const direct = transformedById.get(s.id);
+    if (direct) return direct;
+
+    const nextA = findMovedAnchor(s.id, "a", s.a);
+    const nextB = findMovedAnchor(s.id, "b", s.b);
+    if (!nextA && !nextB) return s;
+
+    const a = nextA ? { ...nextA } : s.a;
+    const b = nextB ? { ...nextB } : s.b;
+    const dzA = a.z - s.a.z, drA = a.r - s.a.r;
+    const dzB = b.z - s.b.z, drB = b.r - s.b.r;
+
+    if (s.kind === "cubic") {
+      return {
+        ...s,
+        a,
+        b,
+        c1: nextA && s.c1 ? { z: s.c1.z + dzA, r: s.c1.r + drA } : s.c1,
+        c2: nextB && s.c2 ? { z: s.c2.z + dzB, r: s.c2.r + drB } : s.c2,
+      };
+    }
+    if (s.kind === "quad") {
+      return {
+        ...s,
+        a,
+        b,
+        c1: s.c1 ? moveChordAttachedPoint(s.c1, s.a, s.b, a, b) : undefined,
+      };
+    }
+    if (s.kind === "arc") {
+      return {
+        ...s,
+        a,
+        b,
+        via: s.via ? moveChordAttachedPoint(s.via, s.a, s.b, a, b) : undefined,
+      };
+    }
+    return { ...s, a, b };
+  });
+}
+
 type MirrorSession = {
   ids: number[];
   base: SketchSeg[];
@@ -841,6 +941,7 @@ type MoveSession = {
   lastClientX: number; lastClientY: number;
   editBase?: EVert[]; editVertexIds?: number[];
   pointRefs?: { segId: number; part: SketchPointPart }[];
+  splitBase?: SplitState;
 };
 
 export default function ProfileEditor({
@@ -882,9 +983,7 @@ export default function ProfileEditor({
   profileLineWidth,
   pointScale,
   disableSelectionGlow,
-  profileColor,
-  selectedColor,
-  guideLineColor,
+  themeColors = DEFAULT_THEME_COLORS,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -894,7 +993,10 @@ export default function ProfileEditor({
   const [tool, setTool] = useState<Tool>("select");
   const paintStorageKey=`kharraat-canvas-paint-v1:${projectId}`;
   const [paintEdges,setPaintEdges]=useState<PaintEdge[]>(()=>{
-    try{return JSON.parse(localStorage.getItem(paintStorageKey)||"[]") as PaintEdge[];}catch{return [];}
+    try{
+      const parsed = JSON.parse(localStorage.getItem(paintStorageKey)||"[]");
+      return Array.isArray(parsed) ? (parsed as PaintEdge[]) : [];
+    }catch{return [];}
   });
   const [paintMenu,setPaintMenu]=useState<{id:number;x:number;y:number}|null>(null);
   const [selectedImageId,setSelectedImageId]=useState<number|null>(null);
@@ -945,12 +1047,32 @@ export default function ProfileEditor({
   const [paintMarqueeHits,setPaintMarqueeHits]=useState<number[]>([]);
   const [paintMarqueePoints,setPaintMarqueePoints]=useState<Array<{id:number;point:"a"|"b"}>>([]);
   const paintDrag=useRef<{ids:number[];point?:"a"|"b";pointId?:number;points?:Array<{id:number;point:"a"|"b"}>;start:SPoint;base:PaintEdge[];moved?:boolean}|null>(null);
-  useEffect(()=>{localStorage.setItem(paintStorageKey,JSON.stringify(paintEdges));},[paintEdges,paintStorageKey]);
+  useEffect(()=>{
+    try{
+      if(paintEdges.length===0){
+        localStorage.removeItem(paintStorageKey);
+      }else{
+        localStorage.setItem(paintStorageKey,JSON.stringify(paintEdges));
+      }
+    }catch{
+      try{
+        for(let i=localStorage.length-1;i>=0;i--){
+          const k=localStorage.key(i);
+          if(k && k.startsWith("kharraat-canvas-paint-v1:") && k!==paintStorageKey){
+            localStorage.removeItem(k);
+          }
+        }
+        if(paintEdges.length>0) localStorage.setItem(paintStorageKey,JSON.stringify(paintEdges));
+      }catch{
+        /* quota full — keep paint edges in memory without crashing React */
+      }
+    }
+  },[paintEdges,paintStorageKey]);
   const importReferenceFiles=async(files:File[],drop?:SPoint)=>{const valid=files.filter(file=>file.type.startsWith("image/")||/\.(avif|bmp|gif|jpe?g|png|svg|webp|ico|tiff?)$/i.test(file.name)),added=await Promise.all(valid.map(file=>new Promise<ReferenceImage|null>(resolve=>{const reader=new FileReader();reader.onerror=()=>resolve(null);reader.onload=()=>{const src=String(reader.result||""),probe=new Image();probe.onerror=()=>resolve(null);probe.onload=()=>{const width=100,height=100*(probe.naturalHeight||1)/(probe.naturalWidth||1);resolve({id:Date.now()+Math.random(),src,name:file.name,z:drop?drop.z-width/2:(params.blankL-width)/2,r:drop?drop.r+height/2:height/2,width,height,locked:false,black:0,gamma:1,white:255,opacity:.65,aspectLocked:true,originalRatio:width/height,grayscale:false});};probe.src=src;};reader.readAsDataURL(file);})));const images=added.filter((x):x is ReferenceImage=>!!x);if(images.length){commitImages([...referenceImages,...images]);setSelectedImageId(images[images.length-1].id);}};
   const addPaintDraft=(points:SPoint[])=>{
     if(points.length<2)return;
     const stamp=Date.now();
-    commitPaint(prev=>[...prev,...points.slice(1).map((b,i)=>({id:stamp+i,a:points[i],b,color:"#ef4444",text:"",arrowSize:17,dashed:false,textSize:17,alignText:true,hideArrow:false}))]);
+    commitPaint(prev=>[...prev,...points.slice(1).map((b,i)=>({id:stamp+i,a:points[i],b,color:themeColors.paintArrow,text:"",arrowSize:17,dashed:false,textSize:17,alignText:true,hideArrow:false}))]);
   };
   const paintHitsInRect=(rectW:{z0:number;z1:number;r0:number;r1:number},mode:"window"|"crossing")=>{
     const inside=(p:SPoint)=>p.z>=rectW.z0&&p.z<=rectW.z1&&p.r>=rectW.r0&&p.r<=rectW.r1;
@@ -1111,6 +1233,44 @@ export default function ProfileEditor({
     onSegs([...copySession.base, ...copySession.copies.map((segment) => moveSeg(segment, dz, dr))], false);
     setCopySession((session) => session ? { ...session, pointer } : session);
   }, [copyBox?.value]);
+  const applyMoveDelta = (session: MoveSession, dz: number, dr: number, commit: boolean) => {
+    const nextSplit = session.splitBase
+      ? { ...session.splitBase, z: session.splitBase.z + dz, r: session.splitBase.r + dr }
+      : undefined;
+    if (session.editBase && edit) {
+      const moving = new Set(session.editVertexIds ?? []);
+      const nextVerts = moving.size
+        ? session.editBase.map((vertex) => (moving.has(vertex.id) ? { ...vertex, z: vertex.z + dz, x: vertex.x + 2 * dr } : vertex))
+        : session.editBase;
+      onEditBuf({ ...edit, verts: nextVerts, ...(nextSplit ? { split: nextSplit } : {}) }, commit);
+    } else if (session.pointRefs?.length) {
+      const moving = new Set(session.pointRefs.map((point) => `${point.segId}:${point.part}`));
+      const nextSegs = session.base.map((segment) => {
+        const next = { ...segment };
+        for (const part of ["a", "b", "c1", "c2", "via"] as SketchPointPart[]) {
+          const point = segment[part];
+          if (point && moving.has(`${segment.id}:${part}`)) next[part] = { z: point.z + dz, r: point.r + dr };
+        }
+        return next;
+      });
+      onSegs(nextSegs, commit, nextSplit);
+    } else if (session.ids.length) {
+      onSegs(movePolylineSelection(session.base, session.ids, dz, dr), commit, nextSplit);
+    } else if (nextSplit) {
+      onSplit(nextSplit, commit);
+    }
+  };
+  const cancelMoveSession = (session: MoveSession | null) => {
+    if (!session) return;
+    if (session.editBase && edit) {
+      onEditBuf({ ...edit, verts: session.editBase, ...(session.splitBase ? { split: session.splitBase } : {}) }, false);
+    } else if (session.ids.length || session.pointRefs?.length) {
+      onSegs(session.base, false, session.splitBase);
+    } else if (session.splitBase) {
+      onSplit(session.splitBase, false);
+    }
+    setSnapHit(null);
+  };
   /* پیش‌نمایش عددی بدون ثبت در تاریخچه؛ Enter همان هندسه را به یک گام Undo تبدیل می‌کند. */
   useEffect(() => {
     if (!moveBox?.value.trim() || !moveSession) return;
@@ -1140,17 +1300,7 @@ export default function ProfileEditor({
       if (values.length === 2) { dz -= anchor.z; dr -= anchor.r; }
       else if (dz) dz = Math.abs(dz) - anchor.z; else dr = Math.abs(dr) - anchor.r;
     }
-    if (moveSession.editBase && moveSession.editVertexIds && edit) {
-      const moving = new Set(moveSession.editVertexIds);
-      onEditBuf({
-        ...edit,
-        verts: moveSession.editBase.map((vertex) => moving.has(vertex.id)
-          ? { ...vertex, z: vertex.z + dz, x: vertex.x + 2 * dr }
-          : vertex),
-      }, false);
-    } else {
-      onSegs(movePolylineSelection(moveSession.base,moveSession.ids,dz,dr), false);
-    }
+    applyMoveDelta(moveSession, dz, dr, false);
   }, [moveBox?.value, moveSession?.pointer, moveSession?.axis, moveSession?.mode]);
   const [draft, setDraft] = useState<SPoint[]>([]);
   /* در منحنی کنترلی، پس از کلیک دوم ابتدا دستهٔ متصل به نقطهٔ پایان (c2) و سپس  */
@@ -1171,6 +1321,24 @@ export default function ProfileEditor({
 
   /* ---------- حالت ویرایش مسیر — ویرایشگرِ پلی‌لاینِ پیوسته (مثل بک‌پلات سیمکو) ---------- */
   const editOpen = !!edit;
+  const activeSplit: SplitState = editOpen && edit?.split ? edit.split : split;
+  const shownSplitPoint = useMemo(() => {
+    if (!activeSplit.enabled) return null;
+    return editOpen
+      ? { z: activeSplit.z + params.gcodeShiftX, r: activeSplit.r + params.gcodeShiftY }
+      : { z: activeSplit.z, r: activeSplit.r };
+  }, [activeSplit.enabled, activeSplit.z, activeSplit.r, editOpen, params.gcodeShiftX, params.gcodeShiftY]);
+  const editInnerSplitPoint = useMemo(() => {
+    if (!editOpen || !activeSplit.enabled || !edit) return null;
+    const holder2 = edit.holder2 ?? params.holder2;
+    /* seedGcodeEdit در فضای ماشین ذخیره می‌کند: H2 نسبت به نقطه طراحی
+       در +Z به اندازه xOff و در شعاع به اندازه -yOff جابه‌جا است و شیفت جی‌کد نیز اعمال می‌شود. */
+    return { z: activeSplit.z + holder2.xOff + params.gcodeShiftX, r: activeSplit.r - holder2.yOff + params.gcodeShiftY };
+  }, [editOpen, activeSplit.enabled, activeSplit.z, activeSplit.r, edit, params.holder2, params.gcodeShiftX, params.gcodeShiftY]);
+  useEffect(() => {
+    setSplitSelected(false);
+    setSplitHovered(false);
+  }, [editOpen]);
   const toolpathLayersVisible = TOOLPATH_LAYER_KEYS.some((key) => settings[key]);
   const layerOpacity = Math.min(1, Math.max(0.1, settings.layerOpacity));
   /* فقط تغییر روشن/خاموشی مسیرها هندسهٔ SVG را بازسازی می‌کند؛ اسلایدر شفافیت
@@ -1295,15 +1463,15 @@ export default function ProfileEditor({
     setSpeedMenu(null);
   }, [toolpathLayersVisible]);
   useEffect(() => {
-    if (split.enabled) return;
+    if (activeSplit.enabled) return;
     setSplitSelected(false);
     setSplitHovered(false);
-  }, [split.enabled]);
+  }, [activeSplit.enabled]);
   useEffect(() => {
     if (tool !== "fillet") { setFilletPicks([]); setFilletBox(null); }
   }, [tool]);
   useEffect(() => {
-    if (tool !== "select") {
+    if (tool !== "select" && tool !== "move") {
       setSplitSelected(false);
       setSplitHovered(false);
     }
@@ -1366,7 +1534,7 @@ export default function ProfileEditor({
     if (!el) return;
     const ro = new ResizeObserver(() => {
       const r = el.getBoundingClientRect();
-      setSize({ w: r.width, h: r.height });
+      setSize((prev) => (prev.w === r.width && prev.h === r.height ? prev : { w: r.width, h: r.height }));
       if (r.width > 40 && r.height > 40) setCam((c) => c ?? fit(r.width, r.height));
     });
     ro.observe(el);
@@ -1467,7 +1635,7 @@ export default function ProfileEditor({
       /* در Polyline، Backspace و Ctrl+Z فقط یک رأس تأییدشده از Draft کم می‌کنند؛
          تا پیش از Enter هیچ History سراسری ساخته نشده است. */
       if (!editOpen && (tool === "polyline" || tool === "paint") && draft.length &&
-          ((e.key === "Backspace" && !lineLengthText) || ((e.ctrlKey || e.metaKey) && (e.code === "KeyZ" || e.key.toLowerCase() === "z")))) {
+          ((e.key === "Backspace" && !lineLengthText) || ((e.ctrlKey || e.metaKey) && (e.code === "KeyZ" || (e.key ?? "").toLowerCase() === "z")))) {
         e.preventDefault();
         setDraft((points) => points.slice(0, -1));
         setLineLengthText("");
@@ -1528,10 +1696,13 @@ export default function ProfileEditor({
           setSelL(replacement == null ? [] : [replacement]); setActiveLine(replacement); setSelV([]);
           return;
         }
+        return;
       }
       /* میانبر ابزارها بر پایه موقعیت فیزیکی کلید است تا با فارسی، عربی و
          سایر Layoutها نیز همان کلید لاتین تنظیم‌شده عمل کند. */
-      const k = /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase() : e.key.toLowerCase();
+      const rawCode = typeof e.code === "string" ? e.code : "";
+      const rawKey = typeof e.key === "string" ? e.key : "";
+      const k = /^Key[A-Z]$/.test(rawCode) ? rawCode.slice(3).toLowerCase() : rawKey.toLowerCase();
       const undoKey = e.code === "KeyZ" || k === "z";
       const redoKey = e.code === "KeyY" || k === "y";
       if ((e.ctrlKey || e.metaKey) && undoKey && !e.shiftKey) {
@@ -1595,8 +1766,7 @@ export default function ProfileEditor({
           return;
         }
         if (tool === "move") {
-          if (moveSession?.editBase && edit) onEditBuf({ ...edit, verts: moveSession.editBase }, false);
-          else if (moveSession) onSegs(moveSession.base, false);
+          cancelMoveSession(moveSession);
           setMoveBox(null);
           setMoveSession(null);
           drag.current = null;
@@ -1650,14 +1820,39 @@ export default function ProfileEditor({
         return;
       }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (k === "r" && tool === "move" && lastMove && selected.length) {
-        e.preventDefault();
-        const next = movePolylineSelection(segs,selected,lastMove.dz,lastMove.dr);
-        onSegs(next, true);
-        return;
+      if (k === "r" && tool === "move" && lastMove) {
+        if (editOpen && edit && (selV.length || selL.length || (splitSelected && activeSplit.enabled))) {
+          e.preventDefault();
+          const vset = new Set<number>(selV);
+          for (const lid of selL) {
+            const ln = edit.lines.find((l) => l.id === lid && bufSelectable(l));
+            if (ln) { vset.add(ln.va); vset.add(ln.vb); }
+          }
+          const nextSplit = splitSelected && activeSplit.enabled
+            ? { ...activeSplit, z: activeSplit.z + lastMove.dz, r: activeSplit.r + lastMove.dr }
+            : edit.split;
+          const nextVerts = vset.size
+            ? edit.verts.map((v) => vset.has(v.id) ? { ...v, z: v.z + lastMove.dz, x: v.x + 2 * lastMove.dr } : v)
+            : edit.verts;
+          onEditBuf({ ...edit, verts: nextVerts, split: nextSplit }, true);
+          return;
+        }
+        if (!editOpen && (selected.length || (splitSelected && split.enabled))) {
+          e.preventDefault();
+          const nextSplit = splitSelected && split.enabled
+            ? { ...split, z: split.z + lastMove.dz, r: split.r + lastMove.dr }
+            : undefined;
+          if (selected.length) {
+            const next = movePolylineSelection(segs, selected, lastMove.dz, lastMove.dr);
+            onSegs(next, true, nextSplit);
+          } else if (nextSplit) {
+            onSplit(nextSplit, true);
+          }
+          return;
+        }
       }
       const t = TOOLS.find((x) => (toolShortcuts[x.id] ?? x.key).toLowerCase() === k);
-      if (t && (!editOpen || t.id === "select")) {
+      if (t && (!editOpen || t.id === "select" || t.id === "move")) {
         chooseTool(t.id);
         cancelDraft();
       }
@@ -1713,20 +1908,62 @@ export default function ProfileEditor({
   /* ---------- اسنپ ---------- */
   const snapPts = useMemo(() => snapCandidates(segs), [segs]);
   const crossPts = useMemo(() => (settings.smartSnap ? intersectionPoints(segs) : []), [segs, settings.smartSnap]);
+  const editMoveSnapPts = useMemo(() => {
+    if (!editOpen || !edit || !settings.smartSnap) return [] as (SnapPoint & { vid?: number; isSplit?: boolean })[];
+    const out: (SnapPoint & { vid?: number; isSplit?: boolean })[] = [];
+    /* نقاط Split قرمز و آبی اولویت اسنپ صریح در حالت ویرایش مسیر دارند. */
+    if (shownSplitPoint) out.push({ p: shownSplitPoint, type: "split", isSplit: true });
+    if (editInnerSplitPoint) out.push({ p: editInnerSplitPoint, type: "split", isSplit: true });
+    if (toolpathLayersVisible) {
+      const allowedVerts = new Set<number>();
+      for (const line of edit.lines) {
+        const kind: SegKind = line.motion === 0 ? "rapid" : line.kind;
+        if (settings[KIND_VISIBLE[kind]] && (isolatedOpId == null || line.opId === isolatedOpId)) {
+          allowedVerts.add(line.va);
+          allowedVerts.add(line.vb);
+        }
+      }
+      for (const v of edit.verts) {
+        if (!allowedVerts.has(v.id)) continue;
+        const p = { z: v.z, r: v.x / 2 };
+        if (shownSplitPoint && dist(p, shownSplitPoint) < 1e-6) continue;
+        if (editInnerSplitPoint && dist(p, editInnerSplitPoint) < 1e-6) continue;
+        out.push({ p, type: "end", vid: v.id });
+      }
+    }
+    return out;
+  }, [editOpen, edit, settings, shownSplitPoint, editInnerSplitPoint, toolpathLayersVisible, isolatedOpId]);
 
-  const applySnap = (raw: SPoint, skipIds: number[] = []): { p: SPoint; hit: SnapPoint | null } => {
+  const applySnap = (
+    raw: SPoint,
+    skipIds: number[] = [],
+    opts?: { skipEditVerts?: Set<number>; skipSplit?: boolean }
+  ): { p: SPoint; hit: SnapPoint | null } => {
     const c = camRef.current;
     if (!c) return { p: raw, hit: null };
     const tolW = Math.min(30, Math.max(3, settings.snapTolerancePx)) / c.s;
     if (settings.smartSnap) {
       let best: SnapPoint | null = null;
       let bestD = tolW;
-      for (const sp of [...snapPts, ...crossPts]) {
-        if (sp.segId != null && skipIds.includes(sp.segId)) continue;
-        const d = dist(sp.p, raw);
-        if (d < bestD) {
-          bestD = d;
-          best = sp;
+      if (editOpen) {
+        for (const sp of editMoveSnapPts) {
+          if (opts?.skipSplit && sp.isSplit) continue;
+          if (sp.vid != null && opts?.skipEditVerts?.has(sp.vid)) continue;
+          const d = dist(sp.p, raw);
+          if (d < bestD || (sp.isSplit && best?.type !== "split" && Math.abs(d - bestD) < 1e-6)) {
+            bestD = d;
+            best = { p: sp.p, type: sp.type };
+          }
+        }
+      }
+      if (!editOpen) {
+        for (const sp of [...snapPts, ...crossPts]) {
+          if ((sp.segId != null && skipIds.includes(sp.segId)) || (sp.segId2 != null && skipIds.includes(sp.segId2))) continue;
+          const d = dist(sp.p, raw);
+          if (d < bestD) {
+            bestD = d;
+            best = sp;
+          }
         }
       }
       if (best) return { p: { ...best.p }, hit: best };
@@ -1738,7 +1975,8 @@ export default function ProfileEditor({
       const p = { z: Math.round(raw.z / g) * g, r: Math.round(raw.r / g) * g };
       return { p, hit: { p, type: "grid" } };
     }
-    return { p: { z: Math.round(raw.z * 10) / 10, r: Math.round(raw.r * 10) / 10 }, hit: null };
+    /* در حالت «شبکه: آزاد» (snap === 0) نقطه بدون پله‌بندی و کاملاً آزاد و پیوسته حرکت می‌کند */
+    return { p: { z: raw.z, r: raw.r }, hit: null };
   };
 
   const toWorld = (clientX: number, clientY: number): SPoint => {
@@ -1873,18 +2111,13 @@ export default function ProfileEditor({
     const poly = chainPolyline(orderChain(segs));
     if (poly.length < 3) return m;
     const sp = splitChainAt(poly, { z: split.z, r: split.r });
+    const outerBranch = split.swapped ? [...sp.inner].reverse() : sp.outer;
+    const innerBranch = split.swapped ? [...sp.outer].reverse() : sp.inner;
     for (const s of segs) {
       const mid = segMid(s);
-      let bi = 0;
-      let bd = Infinity;
-      poly.forEach((p, i) => {
-        const d = dist(p, mid);
-        if (d < bd) {
-          bd = d;
-          bi = i;
-        }
-      });
-      m.set(s.id, bi <= sp.splitIndex ? "outer" : "inner");
+      const dOuter = distToPoly(outerBranch, mid);
+      const dInner = distToPoly(innerBranch, mid);
+      m.set(s.id, dOuter <= dInner ? "outer" : "inner");
     }
     return m;
   }, [segs, split]);
@@ -1941,7 +2174,7 @@ export default function ProfileEditor({
     for (const s of segs) {
       for (const pp of ["a", "b"] as const) {
         if (separated.has(handleKey(s.id, pp))) continue;
-        if (s[pp].z === origin.z && s[pp].r === origin.r) out.push({ segId: s.id, part: pp });
+        if (dist(s[pp], origin) < 1e-7) out.push({ segId: s.id, part: pp });
       }
     }
     return out.length ? out : [{ segId, part }];
@@ -1967,7 +2200,7 @@ export default function ProfileEditor({
     p.z >= r.z0 - 1e-9 && p.z <= r.z1 + 1e-9 && p.r >= r.r0 - 1e-9 && p.r <= r.r1 + 1e-9;
 
   const marqueeHitsSplit = (r: { z0: number; z1: number; r0: number; r1: number }) =>
-    !editOpen && split.enabled && pointInRectW({ z: split.z, r: split.r }, r);
+    activeSplit.enabled && shownSplitPoint != null && pointInRectW(shownSplitPoint, r);
 
   const segSegInt = (p1: SPoint, p2: SPoint, p3: SPoint, p4: SPoint) => {
     const d = (p2.z - p1.z) * (p4.r - p3.r) - (p2.r - p1.r) * (p4.z - p3.z);
@@ -2133,8 +2366,12 @@ export default function ProfileEditor({
         if(segment.polylineId!==source.polylineId||segment.kind!=="cubic")return segment;
         const atA=dist(segment.a,vertex)<1e-8,atB=dist(segment.b,vertex)<1e-8;if(!atA&&!atB)return segment;
         const c1=atA?{...segment.a}:segment.c1,c2=atB?{...segment.b}:segment.c2;
+        const nextIndA = atA ? undefined : segment.independentA;
+        const nextIndB = atB ? undefined : segment.independentB;
         const noStart=!c1||dist(c1,segment.a)<1e-8,noEnd=!c2||dist(c2,segment.b)<1e-8;
-        return noStart&&noEnd?{...segment,kind:"line" as const,c1:undefined,c2:undefined}:{...segment,c1,c2};
+        return noStart&&noEnd
+          ? {...segment,kind:"line" as const,c1:undefined,c2:undefined,independentA:undefined,independentB:undefined}
+          : {...segment,c1,c2,independentA:nextIndA,independentB:nextIndB};
       });
     }
     /* تغییر نوع رأس نباید انتخاب فعلی Polyline را از بین ببرد. */
@@ -2151,14 +2388,16 @@ export default function ProfileEditor({
   const convertPolylineEdge=(id:number,kind:"line"|"arc"|"cubic")=>{
     commit(segs.map(segment=>{
       if(segment.id!==id||segment.polylineId==null)return segment;
-      if(kind==="line") return {...segment,kind:"line" as const,c1:undefined,c2:undefined,via:undefined};
+      if(kind==="line") return {...segment,kind:"line" as const,c1:undefined,c2:undefined,via:undefined,independentA:undefined,independentB:undefined};
       if(kind==="cubic"){
         const [c1,c2]=defaultCubicHandles(segment.a,segment.b);
-        return {...segment,kind:"cubic" as const,c1,c2,via:undefined};
+        /* تبدیل مستقیم یک ضلع Polyline به منحنی کنترلی باید دسته‌های کاملاً مستقل بسازد
+           تا با جابه‌جایی دسته‌های آن، دستهٔ منحنی کنترلی کناری هم‌راستا نشود. */
+        return {...segment,kind:"cubic" as const,c1,c2,via:undefined,independentA:true,independentB:true};
       }
       const dz=segment.b.z-segment.a.z,dr=segment.b.r-segment.a.r,length=Math.hypot(dz,dr);
       const via={z:(segment.a.z+segment.b.z)/2-(length?dr/length:0)*length*.18,r:(segment.a.r+segment.b.r)/2+(length?dz/length:0)*length*.18};
-      return {...segment,kind:"arc" as const,via,c1:undefined,c2:undefined};
+      return {...segment,kind:"arc" as const,via,c1:undefined,c2:undefined,independentA:undefined,independentB:undefined};
     }));
     onSelected([id]);setSelPoints([]);setSegmentCtxMenu(null);
   };
@@ -2208,6 +2447,7 @@ export default function ProfileEditor({
   /* سطل زباله و کلیدهای Delete/Backspace باید همهٔ انتخاب‌های فعلی، از جمله
      نقطه Split و خطوط پروفایل، را با هم حذف کنند. */
   const deleteSelection = () => {
+    if (editOpen) return;
     const hasLines = selected.length > 0;
     const hasSplit = splitSelected;
     if (hasLines) deleteSelected();
@@ -2439,23 +2679,6 @@ export default function ProfileEditor({
   const pathEndVid = lines[lines.length - 1]?.vb ?? null;
   const vById = useMemo(() => new Map(verts.map((v) => [v.id, v])), [verts]);
   const lineById = useMemo(() => new Map(lines.map((l) => [l.id, l])), [lines]);
-  const editSplitVertexId = useMemo(() => {
-    if (!split.enabled || !edit || !edit.verts.length) return null;
-    return edit.verts.reduce((best, vertex) => {
-      const current = edit.verts.find((item) => item.id === best)!;
-      const d = (vertex.z - split.z) ** 2 + (vertex.x / 2 - split.r) ** 2;
-      const bd = (current.z - split.z) ** 2 + (current.x / 2 - split.r) ** 2;
-      return d < bd ? vertex.id : best;
-    }, edit.verts[0].id);
-  }, [edit, split.enabled, split.z, split.r]);
-  const splitEditVertexConnected = (vid: number) => editSplitVertexId != null && vid === editSplitVertexId;
-  const editInnerSplitPoint = useMemo(() => {
-    if (!editOpen || !split.enabled || !edit) return null;
-    const holder2 = edit.holder2 ?? params.holder2;
-    /* seedGcodeEdit در فضای ماشین ذخیره می‌کند: H2 نسبت به نقطه طراحی
-       در +Z به اندازه xOff و در شعاع به اندازه -yOff جابه‌جا است. */
-    return { z: split.z + holder2.xOff, r: split.r - holder2.yOff };
-  }, [editOpen, split.enabled, split.z, split.r, edit, params.holder2]);
   /* نگاشت قاب هنگام خروج فقط زمانی لازم است که کاربر واقعاً در حالت ویرایش Pan
      کرده باشد. ورود/خروج ساده یا Zoom بدون Pan نباید Camera را دست‌کاری کند. */
   const editPanOccurredRef=useRef(false);
@@ -2501,15 +2724,15 @@ export default function ProfileEditor({
     const [x2, y2] = screenPt(c, b.z, b.x / 2);
     return [x1, y1, x2, y2];
   };
-  const setBufGeom = (nextVerts: EVert[], nextLines: ELine[], commit: boolean) => {
+  const setBufGeom = (nextVerts: EVert[], nextLines: ELine[], commit: boolean, nextSplit?: SplitState) => {
     if (!edit) return;
     if (!commit) {
-      onEditBuf({ ...edit, verts: nextVerts, lines: nextLines }, false);
+      onEditBuf({ ...edit, verts: nextVerts, lines: nextLines, ...(nextSplit ? { split: nextSplit } : {}) }, false);
       return;
     }
     /* اعتبارسنجی پس از هر ثبت (خواستهٔ ۹): صفرطول/تکراری/رأسِ یتیم حذف */
     const fin = normalizeEditBuf(nextVerts, nextLines);
-    onEditBuf({ ...edit, verts: fin.verts, lines: fin.lines }, true);
+    onEditBuf({ ...edit, verts: fin.verts, lines: fin.lines, ...(nextSplit ? { split: nextSplit } : {}) }, true);
   };
   useEffect(() => {
     setSelV([]);
@@ -2757,8 +2980,9 @@ export default function ProfileEditor({
   /* ---------- تعامل ماوس ---------- */
   const drag = useRef<
     | { mode: "pan"; sx: number; sy: number; cam0: Cam; moved: boolean; btn: number }
-    | { mode: "handle"; ref: HandleRef; cluster: { segId: number; part: HandleRef["part"] }[]; moved: boolean }
-    | { mode: "move"; ids: number[]; clicked: number; last: SPoint; sx: number; sy: number; moved: boolean }
+    | { mode: "handle"; ref: HandleRef; cluster: { segId: number; part: HandleRef["part"] }[]; sx: number; sy: number; moved: boolean; baseSplit?: SplitState; startPt?: SPoint }
+    | { mode: "move"; ids: number[]; clicked: number; last: SPoint; sx: number; sy: number; moved: boolean; baseSplit?: SplitState; baseSegs: SketchSeg[] }
+    | { mode: "split"; start: SPoint; baseSplit: SplitState; baseSegs: SketchSeg[]; segIds: number[]; pointRefs: { segId: number; part: SketchPointPart }[]; sx: number; sy: number; moved: boolean; hadMulti: boolean }
     | { mode: "draw"; sx: number; sy: number; cam0: Cam; moved: boolean }
     | { mode: "marquee"; sx: number; sy: number; base: number[]; moved: boolean }
     | { mode: "rwait"; sx: number; sy: number; cam0: Cam; moved: boolean }
@@ -2770,10 +2994,12 @@ export default function ProfileEditor({
         sx: number;
         sy: number;
         moved: boolean;
+        baseSplit?: SplitState;
         /** Drag روی Segmentهای H2 یعنی تغییر سراسری آفست، نه اعوجاج یک خط. */
         holder2?: { base: Holder2State; next: Holder2State; latestVerts: EVert[] };
       }
-    | { mode: "evert"; vids: number[]; start: SPoint; base: Map<number, EVert>; sx: number; sy: number; moved: boolean }
+    | { mode: "evert"; vids: number[]; start: SPoint; base: Map<number, EVert>; sx: number; sy: number; moved: boolean; baseSplit?: SplitState }
+    | { mode: "esplit"; start: SPoint; baseSplit: SplitState; baseVerts: Map<number, EVert>; sx: number; sy: number; moved: boolean; hadMulti: boolean }
     | { mode: "eoff"; id: number; last: SPoint; seed: SketchSeg; sx: number; sy: number; moved: boolean }
     | { mode: "eoffh"; id: number; part: "a" | "b" | "c1" | "c2" | "via"; sx: number; sy: number; moved: boolean }
     | null
@@ -2786,11 +3012,11 @@ export default function ProfileEditor({
     return { x: clientX - rect.left, y: clientY - rect.top };
   };
 
-  /* فقط نشان اصلی Split روی پروفایل فعال است؛ قرینهٔ سمت مقابل حذف شده است. */
+  /* فقط نشان قرمز اصلی Split قابل انتخاب و جابه‌جایی است؛ نقطه آبی هرگز مستقل انتخاب نمی‌شود. */
   const hitSplitMarker = (px: number, py: number): boolean => {
     const c = camRef.current;
-    if (!c || editOpen || !split.enabled) return false;
-    const [x, y] = screenPt(c, split.z, split.r);
+    if (!c || !activeSplit.enabled || !shownSplitPoint) return false;
+    const [x, y] = screenPt(c, shownSplitPoint.z, shownSplitPoint.r);
     return Math.hypot(px - x, py - y) <= 10;
   };
 
@@ -2861,14 +3087,22 @@ export default function ProfileEditor({
       if (!selected.length) { const hit=hitSeg(raw); if(hit) onSelected(sketchObjectIds(hit.id)); return; }
       const source=segs.filter(s=>selected.includes(s.id)), bounds=source.map(segBounds);
       if(!bounds.length)return;
+      const center = applySnap(raw).p;
       const centroid={z:(Math.min(...bounds.map(b=>b.minZ))+Math.max(...bounds.map(b=>b.maxZ)))/2,r:(Math.min(...bounds.map(b=>b.minR))+Math.max(...bounds.map(b=>b.maxR)))/2};
-      const startAngle=Math.atan2(centroid.r-raw.r,centroid.z-raw.z);
+      const startAngle=Math.atan2(centroid.r-center.r,centroid.z-center.z);
       const rect=wrapRef.current!.getBoundingClientRect();
-      setRotateSession({ids:[...selected],base:segs.map(s=>({...s})),center:raw,startAngle,pointer:centroid,angle:0,mode:"angle",step:15});
+      setRotateSession({ids:[...selected],base:segs.map(s=>({...s})),center,startAngle,pointer:centroid,angle:0,mode:"angle",step:15});
       setRotateBox({x:Math.min(rect.width-72,Math.max(4,e.clientX-rect.left+12)),y:Math.min(rect.height-48,Math.max(4,e.clientY-rect.top-48)),value:"",error:""});
+      setSnapHit(null);
       return;
     }
     if (tool === "boxscale" && e.button === 0 && !editOpen) {
+      if (boxRotateSession) {
+        onSegs(segs, true);
+        setBoxRotateSession(null);
+        setBoxRotateBox(null);
+        return;
+      }
       if (!selected.length) {
         const hit = hitSeg(raw);
         if (hit) onSelected(sketchObjectIds(hit.id));
@@ -2887,7 +3121,7 @@ export default function ProfileEditor({
           return;
         }
         const ids = [...selected];
-        const origin = raw;
+        const origin = applySnap(raw).p;
         setScaleSession({ ids, base: segs.map((segment) => ({ ...segment })), origin });
         setSnapHit(null);
         return;
@@ -2982,25 +3216,39 @@ export default function ProfileEditor({
         const base = moveSession.base.find((segment) => moveSession.ids.includes(segment.id));
         const current = base ? segs.find((segment) => segment.id === base.id) : null;
         if (base && current) setLastMove({ dz: current.a.z - base.a.z, dr: current.a.r - base.a.r });
+        else if (moveSession.splitBase && activeSplit.enabled) {
+          setLastMove({ dz: activeSplit.z - moveSession.splitBase.z, dr: activeSplit.r - moveSession.splitBase.r });
+        }
         if (moveSession.editBase && edit) onEditBuf({ ...edit }, true);
-        else onSegs(segs, true);
+        else if (moveSession.ids.length || moveSession.pointRefs?.length) {
+          onSegs(segs, true, moveSession.splitBase ? split : undefined);
+        } else if (moveSession.splitBase) {
+          onSplit(split, true);
+        }
+        setSnapHit(null);
         setMoveBox(null); setMoveSession(null);
         return;
       }
-      let ids: number[];
+      let ids: number[] = [];
       let editBase: EVert[] | undefined;
       let editVertexIds: number[] | undefined;
+      let splitBase: SplitState | undefined;
+      let origin = raw;
       if (editOpen && edit) {
         const loc = toLocal(e.clientX, e.clientY);
-        const hitVertex = hitBufVx(loc.x, loc.y);
-        const hit = hitVertex == null ? hitBufLine(loc.x, loc.y) : null;
+        const onRedSplit = hitSplitMarker(loc.x, loc.y);
+        const hitVertex = !onRedSplit ? hitBufVx(loc.x, loc.y) : null;
+        const hit = !onRedSplit && hitVertex == null ? hitBufLine(loc.x, loc.y) : null;
         const vertexSet = new Set<number>();
-        if (selV.length) {
-          ids = selV.map((id) => -id - 1);
+        const hasExistingSelection = selV.length > 0 || selL.length > 0 || (splitSelected && activeSplit.enabled);
+        if (hasExistingSelection) {
+          ids = [...selL, ...selV.map((id) => -id - 1)];
           for (const id of selV) vertexSet.add(id);
-        } else if (selL.length) {
-          ids = [...selL];
-          for (const line of edit.lines) if (ids.includes(line.id)) { vertexSet.add(line.va); vertexSet.add(line.vb); }
+          for (const line of edit.lines) if (selL.includes(line.id)) { vertexSet.add(line.va); vertexSet.add(line.vb); }
+          if (splitSelected && activeSplit.enabled) splitBase = { ...activeSplit };
+        } else if (onRedSplit && activeSplit.enabled) {
+          setSplitSelected(true);
+          splitBase = { ...activeSplit };
         } else if (hitVertex != null) {
           setSelV([hitVertex]);
           ids = [-hitVertex - 1]; // کلید داخلی برای نشست Move نقطه‌ای
@@ -3012,7 +3260,12 @@ export default function ProfileEditor({
         } else return;
         editVertexIds = [...vertexSet];
         editBase = edit.verts.map((vertex) => ({ ...vertex }));
+        if (!e.altKey && settings.smartSnap) {
+          origin = applySnap(raw).p;
+        }
       } else {
+        const loc = toLocal(e.clientX, e.clientY);
+        const hasSplitSel = splitSelected && split.enabled;
         /* انتخاب موجود همیشه بر هندسهٔ زیر کلیک اولویت دارد. */
         if (selPoints.length) {
           const refs = new Map<string, { segId: number; part: SketchPointPart }>();
@@ -3027,22 +3280,47 @@ export default function ProfileEditor({
           }
           ids = [];
           const rect = wrapRef.current!.getBoundingClientRect();
-          setMoveSession({ ids, pointRefs: [...refs.values()], base: segs.map((segment) => ({ ...segment })), origin: raw, pointer: raw, clientX: e.clientX, clientY: e.clientY, axis: "free", mode: "relative", dirX: 1, dirY: 1, lastClientX: e.clientX, lastClientY: e.clientY });
+          setMoveSession({ ids, pointRefs: [...refs.values()], splitBase: hasSplitSel ? { ...split } : undefined, base: segs.map((segment) => ({ ...segment })), origin: raw, pointer: raw, clientX: e.clientX, clientY: e.clientY, axis: "free", mode: "relative", dirX: 1, dirY: 1, lastClientX: e.clientX, lastClientY: e.clientY });
           setMoveBox({ x: Math.min(rect.width - 58, Math.max(4, e.clientX - rect.left + 12)), y: Math.min(rect.height - 42, Math.max(4, e.clientY - rect.top - 48)), value: "", error: "" });
           setLastMove(null);
           e.currentTarget.setPointerCapture?.(e.pointerId);
           return;
         }
-        const hit = hitSeg(raw);
-        if (selected.length) ids = [...selected];
-        else {
+        if (selected.length || hasSplitSel) {
+          ids = [...selected];
+          if (hasSplitSel) splitBase = { ...split };
+        } else if (hitSplitMarker(loc.x, loc.y) && split.enabled) {
+          setSplitSelected(true);
+          ids = [];
+          splitBase = { ...split };
+        } else {
+          const hitH = hitHandle(raw);
+          if (hitH) {
+            setSelPoints([hitH]);
+            const refs = new Map<string, { segId: number; part: SketchPointPart }>();
+            const members = hitH.part === "a" || hitH.part === "b" ? clusterOf(hitH.segId, hitH.part) : [hitH];
+            for (const member of members) refs.set(`${member.segId}:${member.part}`, member);
+            for (const member of [...refs.values()]) {
+              const segment = segs.find((item) => item.id === member.segId);
+              if (member.part === "a" && segment?.c1) refs.set(`${member.segId}:c1`, { segId: member.segId, part: "c1" });
+              if (member.part === "b" && segment?.c2) refs.set(`${member.segId}:c2`, { segId: member.segId, part: "c2" });
+            }
+            const rect = wrapRef.current!.getBoundingClientRect();
+            setMoveSession({ ids: [], pointRefs: [...refs.values()], base: segs.map((segment) => ({ ...segment })), origin: raw, pointer: raw, clientX: e.clientX, clientY: e.clientY, axis: "free", mode: "relative", dirX: 1, dirY: 1, lastClientX: e.clientX, lastClientY: e.clientY });
+            setMoveBox({ x: Math.min(rect.width - 58, Math.max(4, e.clientX - rect.left + 12)), y: Math.min(rect.height - 42, Math.max(4, e.clientY - rect.top - 48)), value: "", error: "" });
+            setLastMove(null);
+            drag.current = null;
+            e.currentTarget.setPointerCapture?.(e.pointerId);
+            return;
+          }
+          const hit = hitSeg(raw);
           ids = hit ? [hit.id] : [];
           if (hit) onSelected(ids);
         }
-        if (!ids.length) return;
+        if (!ids.length && !splitBase) return;
       }
       const rect = wrapRef.current!.getBoundingClientRect();
-      setMoveSession({ ids, base: segs.map((segment) => ({ ...segment })), editBase, editVertexIds, origin: raw, pointer: raw, clientX: e.clientX, clientY: e.clientY, axis: "free", mode: "relative", dirX: 1, dirY: 1, lastClientX: e.clientX, lastClientY: e.clientY });
+      setMoveSession({ ids, base: segs.map((segment) => ({ ...segment })), editBase, editVertexIds, splitBase, origin, pointer: origin, clientX: e.clientX, clientY: e.clientY, axis: "free", mode: "relative", dirX: 1, dirY: 1, lastClientX: e.clientX, lastClientY: e.clientY });
       setMoveBox({ x: Math.min(rect.width - 58, Math.max(4, e.clientX - rect.left + 12)), y: Math.min(rect.height - 42, Math.max(4, e.clientY - rect.top - 48)), value: "", error: "" });
       drag.current = null;
       return;
@@ -3051,8 +3329,8 @@ export default function ProfileEditor({
     /* هنگام Drag رأس در Edit Path، دکمه وسط یا راست فقط یک Pan موقت آغاز
        می‌کند و خود ژست جابه‌جایی رأس در drag.current حفظ می‌شود. */
     const activeDragMode = drag.current?.mode;
-    const canPanDuringDrag = activeDragMode === "handle" || activeDragMode === "move" ||
-      activeDragMode === "evert" || activeDragMode === "eline" || activeDragMode === "eoff" || activeDragMode === "eoffh";
+    const canPanDuringDrag = activeDragMode === "handle" || activeDragMode === "move" || activeDragMode === "split" ||
+      activeDragMode === "evert" || activeDragMode === "eline" || activeDragMode === "esplit" || activeDragMode === "eoff" || activeDragMode === "eoffh";
     if (canPanDuringDrag && (e.button === 1 || e.button === 2)) {
       e.preventDefault();
       editVertexPan.current = { pointerId: e.pointerId, sx: e.clientX, sy: e.clientY, cam0: camRef.current };
@@ -3074,36 +3352,72 @@ export default function ProfileEditor({
 
     /* در ابزارهای رسم نیز کشیدن یک نقطهٔ موجود، همان نقطه/دسته را جابه‌جا می‌کند.
        کلیک ساده همچنان در pointerup به‌عنوان ورودی ابزار رسم پردازش می‌شود. */
-    const drawingHandle = !editOpen ? hitHandle(raw) : null;
+    const rawCandidateHandle = !editOpen ? hitHandle(raw) : null;
+    const rawCandidateOwner = rawCandidateHandle ? segs.find((segment) => segment.id === rawCandidateHandle.segId) : undefined;
+    const rawCandidatePt = rawCandidateHandle ? rawCandidateOwner?.[rawCandidateHandle.part] : undefined;
+    const rawCandidateSelected = !!rawCandidateHandle && !!rawCandidatePt && selPoints.some((point) => {
+      const segment = segs.find((item) => item.id === point.segId), selectedPoint = segment?.[point.part];
+      if (!selectedPoint) return false;
+      return (rawCandidateHandle.part === "a" || rawCandidateHandle.part === "b") && (point.part === "a" || point.part === "b")
+        ? dist(selectedPoint, rawCandidatePt) < 1e-8
+        : point.segId === rawCandidateHandle.segId && point.part === rawCandidateHandle.part;
+    });
+    const locForSplitBeforeHandle = !editOpen && tool === "select" ? toLocal(e.clientX, e.clientY) : null;
+    /* اگر خود رأس زیر نشانگر و نقطه Split هر دو از قبل انتخاب شده باشند (و کلید کمکی فشرده نباشد)،
+       درگ از مسیر یکپارچهٔ handle انجام می‌شود تا رفتار اسنپ، کران خام و اتصال اضلاع دقیقاً مشابه سایر نقاط باشد. */
+    const onMainSplitBeforeHandle = locForSplitBeforeHandle
+      ? hitSplitMarker(locForSplitBeforeHandle.x, locForSplitBeforeHandle.y) &&
+        !(rawCandidateSelected && splitSelected && split.enabled && !e.shiftKey && !e.ctrlKey && !e.metaKey)
+      : false;
+    const drawingHandle = !editOpen && !onMainSplitBeforeHandle ? rawCandidateHandle : null;
     if (drawingHandle) {
       const cluster = drawingHandle.part === "a" || drawingHandle.part === "b"
         ? clusterOf(drawingHandle.segId, drawingHandle.part)
         : [drawingHandle];
-      drag.current = { mode: "handle", ref: drawingHandle, cluster, moved: false };
+      const owner = segs.find(segment => segment.id === drawingHandle.segId);
+      const clickedPoint = owner?.[drawingHandle.part];
+      const drawingPointSelected = !!clickedPoint && selPoints.some(point => {
+        const segment = segs.find(item => item.id === point.segId), selectedPoint = segment?.[point.part];
+        if (!selectedPoint) return false;
+        /* دو سر هم‌مکان یک رأس Polyline یک نقطهٔ هندسی‌اند؛ دسته و Via فقط
+           با شناسهٔ خودشان عضو انتخاب چندنقطه‌ای محسوب می‌شوند. */
+        return (drawingHandle.part === "a" || drawingHandle.part === "b") && (point.part === "a" || point.part === "b")
+          ? dist(selectedPoint, clickedPoint) < 1e-8
+          : point.segId === drawingHandle.segId && point.part === drawingHandle.part;
+      });
+      const partOfSelectedSeg = cluster.some((m) => selected.includes(m.segId));
+      const isVertexLike = drawingHandle.part === "a" || drawingHandle.part === "b" || drawingHandle.part === "via";
+      const keepSplitWithHandle =
+        tool === "select" &&
+        splitSelected &&
+        split.enabled &&
+        ((drawingPointSelected && (isVertexLike || selPoints.length > 1)) ||
+          (partOfSelectedSeg && isVertexLike) ||
+          e.shiftKey);
+      drag.current = {
+        mode: "handle",
+        ref: drawingHandle,
+        cluster,
+        sx: e.clientX,
+        sy: e.clientY,
+        moved: false,
+        baseSplit: keepSplitWithHandle && clickedPoint ? { ...split } : undefined,
+        startPt: clickedPoint ? { ...clickedPoint } : undefined,
+      };
       /* انتخاب نقطه مستقل از انتخاب Segment است. بدون کلید کمکی فقط خود نقطه
          فعال می‌شود؛ نقاط هم‌مکان صرفاً اتصال هندسی خود را حفظ می‌کنند. */
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        if (!drawingPointSelected && !(partOfSelectedSeg && isVertexLike && splitSelected)) setSplitSelected(false);
         /* اگر نقطه/دسته متعلق به Polyline انتخاب‌شده است، Drag آن نباید انتخاب
            کل Polyline را پاک کند؛ انتخاب فقط برای هندسهٔ خارج از گروه عوض می‌شود. */
         if(!selected.includes(drawingHandle.segId))onSelected([]);
         /* هنگام گرفتن دستهٔ Bézier متعلق به رأس انتخاب‌شده، انتخاب رأس را حفظ
            می‌کنیم تا خود نقطه و دستهٔ مقابل در تمام مدت Drag قابل مشاهده بمانند. */
-        const owner=segs.find(segment=>segment.id===drawingHandle.segId);
         const anchor=drawingHandle.part==="c1"?owner?.a:drawingHandle.part==="c2"?owner?.b:null;
         const anchorSelected=!!anchor&&selPoints.some(point=>{
           if(point.part!=="a"&&point.part!=="b")return false;
           const segment=segs.find(item=>item.id===point.segId);
           return !!segment&&dist(segment[point.part],anchor)<1e-8;
-        });
-        const clickedPoint=owner?.[drawingHandle.part];
-        const drawingPointSelected=!!clickedPoint&&selPoints.some(point=>{
-          const segment=segs.find(item=>item.id===point.segId),selectedPoint=segment?.[point.part];
-          if(!selectedPoint)return false;
-          /* دو سر هم‌مکان یک رأس Polyline یک نقطهٔ هندسی‌اند؛ دسته و Via فقط
-             با شناسهٔ خودشان عضو انتخاب چندنقطه‌ای محسوب می‌شوند. */
-          return (drawingHandle.part==="a"||drawingHandle.part==="b")&&(point.part==="a"||point.part==="b")
-            ? dist(selectedPoint,clickedPoint)<1e-8
-            : point.segId===drawingHandle.segId&&point.part===drawingHandle.part;
         });
         /* اگر نقطهٔ زیر نشانگر از قبل عضو انتخاب چندنقطه‌ای است، انتخاب را دست
            نمی‌زنیم تا Drag مشترک در همهٔ ابزارهای رسم فعال بماند. */
@@ -3126,20 +3440,95 @@ export default function ProfileEditor({
 
     if (!editOpen) {
       const loc = toLocal(e.clientX, e.clientY);
-      if (hitSplitMarker(loc.x, loc.y)) {
-        /* Split انتخابی مستقل است؛ انتخاب خطوط/نقاط قبلی را پاک می‌کنیم. */
+      if (hitSplitMarker(loc.x, loc.y) && split.enabled) {
+        if (e.ctrlKey || e.metaKey) {
+          setSplitSelected(false);
+          drag.current = null;
+          return;
+        }
+        if (e.shiftKey && splitSelected) {
+          setSplitSelected(false);
+          drag.current = null;
+          return;
+        }
+        const hadMulti = (splitSelected || e.shiftKey) && (selected.length > 0 || selPoints.length > 0);
         setSplitSelected(true);
-        onSelected([]);
-        setSelPoints([]);
-        drag.current = null;
+        if (!hadMulti) {
+          onSelected([]);
+          setSelPoints([]);
+        }
+        const refs = new Map<string, { segId: number; part: SketchPointPart }>();
+        if (hadMulti && selPoints.length) {
+          for (const point of selPoints) {
+            const members = point.part === "a" || point.part === "b" ? clusterOf(point.segId, point.part) : [point];
+            for (const member of members) refs.set(`${member.segId}:${member.part}`, member);
+          }
+          for (const member of [...refs.values()]) {
+            const segment = segs.find((item) => item.id === member.segId);
+            if (member.part === "a" && segment?.c1) refs.set(`${member.segId}:c1`, { segId: member.segId, part: "c1" });
+            if (member.part === "b" && segment?.c2) refs.set(`${member.segId}:c2`, { segId: member.segId, part: "c2" });
+          }
+        }
+        drag.current = {
+          mode: "split",
+          start: raw,
+          baseSplit: { ...split },
+          baseSegs: segs.map((segment) => ({ ...segment })),
+          segIds: hadMulti ? [...selected] : [],
+          pointRefs: [...refs.values()],
+          sx: e.clientX,
+          sy: e.clientY,
+          moved: false,
+          hadMulti: splitSelected && !e.shiftKey && (selected.length > 0 || selPoints.length > 0),
+        };
         return;
       }
-      setSplitSelected(false);
     }
 
-    /* --- حالت ویرایش مسیر — رأسِ انتخابی، سرِ افست، منحنی افست، بدنهٔ خط --- */
+    /* --- حالت ویرایش مسیر — نشان قرمز Split، رأسِ انتخابی، سرِ افست، منحنی افست، بدنهٔ خط --- */
     if (editOpen) {
       const ploc = toLocal(e.clientX, e.clientY);
+      if (hitSplitMarker(ploc.x, ploc.y) && activeSplit.enabled) {
+        if (e.ctrlKey || e.metaKey) {
+          setSplitSelected(false);
+          drag.current = null;
+          return;
+        }
+        if (e.shiftKey && splitSelected) {
+          setSplitSelected(false);
+          drag.current = null;
+          return;
+        }
+        const keepPathSel = (splitSelected || e.shiftKey) && (selL.length > 0 || selV.length > 0);
+        setSplitSelected(true);
+        setHitPicker(null);
+        setPickerHover(null);
+        const baseVerts = new Map<number, EVert>();
+        if (keepPathSel) {
+          for (const vid of selV) baseVerts.set(vid, { ...vz(vid) });
+          for (const lid of selL) {
+            const l = lineById.get(lid);
+            if (l) {
+              baseVerts.set(l.va, { ...vz(l.va) });
+              baseVerts.set(l.vb, { ...vz(l.vb) });
+            }
+          }
+        } else {
+          selectEditLines([], null, true);
+          setSelV([]);
+        }
+        drag.current = {
+          mode: "esplit",
+          start: raw,
+          baseSplit: { ...activeSplit },
+          baseVerts,
+          sx: e.clientX,
+          sy: e.clientY,
+          moved: false,
+          hadMulti: splitSelected && !e.shiftKey && (selL.length > 0 || selV.length > 0),
+        };
+        return;
+      }
       let nearVerts = hitBufVerts(ploc.x, ploc.y);
       const nearLines = hitBufLines(ploc.x, ploc.y);
       /* اگر خط هایلایت‌شده زیر/روی خطوط دیگر باشد، Drag نقطه فقط رأس‌های همان
@@ -3152,16 +3541,18 @@ export default function ProfileEditor({
       /* خود آیکن‌های S/E نیز Hit Area مستقل دارند؛ بنابراین مخصوصاً در مسیر بسته
          که آیکن از رأس فاصله دارد، Drag مستقیماً از روی آیکن آغاز می‌شود. */
       /* نشان‌های ابتدا/انتها بر Segment زیرین اولویت دارند تا با یک کلیک ساده
-         انتخاب شوند و همان لحظه امکان drag آن‌ها وجود داشته باشد. */
+         انتخاب شوند و همان لحظه امکان drag آن‌ها داشته باشد. */
       if (endpointCandidate != null) {
+        const wasSel = selV.includes(endpointCandidate);
+        const keepSplit = splitSelected && activeSplit.enabled && (wasSel || e.shiftKey);
+        if (!keepSplit && !e.ctrlKey && !e.metaKey) setSplitSelected(false);
         const chosen = selectedHitLine!=null ? [endpointCandidate] : e.shiftKey
-          ? (selV.includes(endpointCandidate) ? selV.filter((id) => id !== endpointCandidate) : [...selV, endpointCandidate])
-          : [endpointCandidate];
+          ? (wasSel ? selV.filter((id) => id !== endpointCandidate) : [...selV, endpointCandidate])
+          : (wasSel && selV.length > 1 ? [...selV] : [endpointCandidate]);
         setSelV(chosen);
         focusEditVertexInGCode(endpointCandidate);
         setHitPicker(null);
         setPickerHover(null);
-        if (splitEditVertexConnected(endpointCandidate)) { drag.current = null; return; }
         drag.current = {
           mode: "evert",
           vids: chosen,
@@ -3170,6 +3561,7 @@ export default function ProfileEditor({
           sx: ploc.x,
           sy: ploc.y,
           moved: false,
+          baseSplit: keepSplit ? { ...activeSplit } : undefined,
         };
         return;
       }
@@ -3216,9 +3608,12 @@ export default function ProfileEditor({
       setPickerHover(null);
       const bv = hitBufVx(ploc.x, ploc.y);
       if (bv != null) {
+        const wasSel = selV.includes(bv);
+        const keepSplit = splitSelected && activeSplit.enabled && (wasSel || e.shiftKey);
+        if (!keepSplit && !e.ctrlKey && !e.metaKey) setSplitSelected(false);
         const chosen = selectedHitLine!=null ? [bv] : e.shiftKey
-          ? (selV.includes(bv) ? selV.filter((id) => id !== bv) : [...selV, bv])
-          : [bv];
+          ? (wasSel ? selV.filter((id) => id !== bv) : [...selV, bv])
+          : (wasSel && selV.length > 1 ? [...selV] : [bv]);
         setSelV(chosen);
         focusEditVertexInGCode(bv);
         drag.current = {
@@ -3229,6 +3624,7 @@ export default function ProfileEditor({
           sx: ploc.x,
           sy: ploc.y,
           moved: false,
+          baseSplit: keepSplit ? { ...activeSplit } : undefined,
         };
         return;
       }
@@ -3260,16 +3656,15 @@ export default function ProfileEditor({
           setSelV([]);
           return;
         }
-        if (e.shiftKey) ids = selL.includes(bl) ? selL.filter((x) => x !== bl) : [...selL, bl];
-        else ids = selL.includes(bl) ? selL : [bl];
+        const wasLineSel = selL.includes(bl);
+        const keepSplit = splitSelected && activeSplit.enabled && (wasLineSel || e.shiftKey);
+        if (!keepSplit) setSplitSelected(false);
+        if (e.shiftKey) ids = wasLineSel ? selL.filter((x) => x !== bl) : [...selL, bl];
+        else ids = wasLineSel ? selL : [bl];
         ids = lines.filter((line) => ids.includes(line.id) && bufSelectable(line)).map((line) => line.id);
         selectEditLines(ids, bl, true);
         setSelV([]);
         const selectedLines = ids.map((id) => lineById.get(id)).filter((line): line is ELine => !!line);
-        if (editSplitVertexId != null && selectedLines.some((line) => line.va === editSplitVertexId || line.vb === editSplitVertexId)) {
-          drag.current = null;
-          return;
-        }
         const vset = new Set<number>();
         for (const l of selectedLines) { vset.add(l.va); vset.add(l.vb); }
         const base = new Map<number, EVert>();
@@ -3282,6 +3677,7 @@ export default function ProfileEditor({
           sx: e.clientX,
           sy: e.clientY,
           moved: false,
+          baseSplit: keepSplit ? { ...activeSplit } : undefined,
         };
         return;
       }
@@ -3292,16 +3688,32 @@ export default function ProfileEditor({
       /* صرفِ کلیک دوم یک ضلع را انتخاب می‌کند، اما Drag روی Polyline کاملاً
          انتخاب‌شده همچنان باید کل Polyline را حرکت دهد. ضلع فقط پس از آنکه با
          یک کلیک مستقل انتخاب شد، به‌تنهایی Drag می‌شود. */
-      const allowed = selected.includes(s.id) ? [...selected] : objectIds;
+      const wasSegSelected = selected.includes(s.id);
+      const keepSplit = splitSelected && split.enabled && (wasSegSelected || e.shiftKey);
+      if (!keepSplit && !e.ctrlKey && !e.metaKey) setSplitSelected(false);
+      const allowed = wasSegSelected ? [...selected] : objectIds;
       const movingSinglePolylineEdge=s.polylineId!=null&&allowed.length===1&&allowed[0]===s.id;
       if (!movingSinglePolylineEdge&&allowed.some((id) => segLocked(id, allowed))) {
         if (e.shiftKey) onSelected(selected.includes(s.id) ? selected.filter((x) => !objectIds.includes(x)) : [...selected, ...objectIds.filter((id) => !selected.includes(id))]);
         else if (e.ctrlKey || e.metaKey) onSelected(selected.filter((x) => !objectIds.includes(x)));
-        else if (!selected.includes(s.id)) onSelected(objectIds);
+        else {
+          setSelPoints([]);
+          if (!selected.includes(s.id)) onSelected(objectIds);
+        }
         return;
       }
       /* تصمیم نهایی کلیک در pointerup گرفته می‌شود تا درگ گروهی ممکن باشد */
-      drag.current = { mode: "move", ids: allowed, clicked: s.id, last: raw, sx: e.clientX, sy: e.clientY, moved: false };
+      drag.current = {
+        mode: "move",
+        ids: allowed,
+        clicked: s.id,
+        last: raw,
+        sx: e.clientX,
+        sy: e.clientY,
+        moved: false,
+        baseSplit: keepSplit ? { ...split } : undefined,
+        baseSegs: segs.map((seg) => ({ ...seg })),
+      };
       return;
     }
     /* فضای خالی: شروع باکس انتخابگر (پاک‌سازی در pointerup اگر کلیک بود) */
@@ -3314,8 +3726,8 @@ export default function ProfileEditor({
 
   const onPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
     const activeMode = drag.current?.mode;
-    const canPanDuringDrag = activeMode === "handle" || activeMode === "move" ||
-      activeMode === "evert" || activeMode === "eline" || activeMode === "eoff" || activeMode === "eoffh";
+    const canPanDuringDrag = activeMode === "handle" || activeMode === "move" || activeMode === "split" ||
+      activeMode === "evert" || activeMode === "eline" || activeMode === "esplit" || activeMode === "eoff" || activeMode === "eoffh";
     const auxiliaryButtonHeld = (e.buttons & 2) !== 0 || (e.buttons & 4) !== 0;
     let temporaryPan = editVertexPan.current;
     /* بعضی مرورگرها هنگام نگه‌داشتن دکمه چپ، PointerDown دکمه دوم را ارسال
@@ -3380,14 +3792,16 @@ export default function ProfileEditor({
       const entered=rotateBox?.value.match(/^-?(?:\d+(?:\.\d*)?|\.\d+)$/)?Math.abs(Number(rotateBox.value)):null;
       if(e.shiftKey) angle=Math.round(angle/90)*90;
       else if(rotateSession.mode==="step"){const step=entered&&entered>0?entered:rotateSession.step;angle=Math.round(angle/step)*step;}
-      onSegs(rotateSession.base.map(s=>rotateSession.ids.includes(s.id)?rotateSegment(s,rotateSession.center,angle):s),false);
+      onSegs(transformConnectedSegments(rotateSession.base, rotateSession.ids, separated, (s) => rotateSegment(s, rotateSession.center, angle)), false);
       setRotateSession({...rotateSession,pointer:raw,angle});
       const rect=wrapRef.current!.getBoundingClientRect();
       setRotateBox(box=>box?{...box,x:Math.min(rect.width-72,Math.max(4,e.clientX-rect.left+12)),y:Math.min(rect.height-48,Math.max(4,e.clientY-rect.top-48))}:box);
       return;
     }
     if (tool === "boxscale" && boxPivotDrag.current) {
-      setBoxScalePivot(raw);
+      const snapped = applySnap(raw);
+      setBoxScalePivot(snapped.p);
+      setSnapHit(snapped.hit);
       return;
     }
     if (tool === "boxscale" && boxRotateDrag.current) {
@@ -3397,7 +3811,7 @@ export default function ProfileEditor({
       if(e.shiftKey) angle=Math.round(angle/90)*90;
       d.angle=angle;
       setBoxRotateSession({base:d.base,ids:d.ids,pivot:d.pivot,angle});
-      onSegs(d.base.map(s=>d.ids.includes(s.id)?rotateSegment(s,d.pivot,angle):s),false);
+      onSegs(transformConnectedSegments(d.base, d.ids, separated, (s) => rotateSegment(s, d.pivot, angle)), false);
       setBoxRotateBox(box=>box?{...box,value:box.value,x:Math.max(4,e.clientX-wrapRef.current!.getBoundingClientRect().left+12),y:Math.max(4,e.clientY-wrapRef.current!.getBoundingClientRect().top-48)}:box);
       return;
     }
@@ -3425,7 +3839,7 @@ export default function ProfileEditor({
         sx = sy = f;
       }
       sx = Math.max(.001, sx); sy = Math.max(.001, sy);
-      onSegs(d.base.map((segment) => d.ids.includes(segment.id) ? scaleSegmentXY(segment, anchor, sx, sy) : segment), false);
+      onSegs(transformConnectedSegments(d.base, d.ids, separated, (segment) => scaleSegmentXY(segment, anchor, sx, sy)), false);
       return;
     }
     if (tool === "scale" && scaleSession && !scaleSession.reference && !editOpen) {
@@ -3438,7 +3852,7 @@ export default function ProfileEditor({
         : dist(scaleSession.origin, raw);
       const factor = targetLength / scaleSession.referenceLength;
       if (Number.isFinite(factor) && factor > 0) {
-        onSegs(scaleSession.base.map((segment) => scaleSession.ids.includes(segment.id) ? scaleSegment(segment, scaleSession.origin, factor) : segment), false);
+        onSegs(transformConnectedSegments(scaleSession.base, scaleSession.ids, separated, (segment) => scaleSegment(segment, scaleSession.origin, factor)), false);
       }
       setScaleSession({ ...scaleSession, pointer: raw });
       const rect = wrapRef.current!.getBoundingClientRect();
@@ -3541,26 +3955,44 @@ export default function ProfileEditor({
       const dirY: 1 | -1 = dy < -5 ? 1 : dy > 5 ? -1 : moveSession.dirY;
       setMoveSession({ ...moveSession, pointer: raw, axis, dirX, dirY, lastClientX: e.clientX, lastClientY: e.clientY });
       if (!moveBox?.value.trim()) {
-        /* حرکت آزاد Move به گام شبکه می‌چسبد؛ Alt موقتاً Snap را دور می‌زند. */
-        const snapped = e.altKey
-          ? { z: raw.z - moveSession.origin.z, r: raw.r - moveSession.origin.r }
-          : quantStep(raw, moveSession.origin);
-        const dz = nearOrigin ? 0 : axis === "y" ? 0 : snapped.z;
-        const dr = nearOrigin ? 0 : axis === "x" ? 0 : snapped.r;
-        if (moveSession.editBase && moveSession.editVertexIds && edit) {
-          const moving = new Set(moveSession.editVertexIds);
-          onEditBuf({ ...edit, verts: moveSession.editBase.map((v) => moving.has(v.id) ? { ...v, z: v.z + dz, x: v.x + 2 * dr } : v) }, false);
-        } else if (moveSession.pointRefs) {
-          const moving = new Set(moveSession.pointRefs.map((point) => `${point.segId}:${point.part}`));
-          onSegs(moveSession.base.map((segment) => {
-            const next = { ...segment };
-            for (const part of ["a", "b", "c1", "c2", "via"] as SketchPointPart[]) {
-              const point = segment[part];
-              if (point && moving.has(`${segment.id}:${part}`)) next[part] = { z: point.z + dz, r: point.r + dr };
+        let dz = 0;
+        let dr = 0;
+        if (editOpen && settings.smartSnap && !e.altKey) {
+          const skipEditVerts = new Set(moveSession.editVertexIds ?? []);
+          const skipSplit = !!moveSession.splitBase;
+          const directSnap = applySnap(raw, [], { skipEditVerts, skipSplit });
+          if (directSnap.hit && directSnap.hit.type !== "grid") {
+            dz = nearOrigin ? 0 : axis === "y" ? 0 : directSnap.p.z - moveSession.origin.z;
+            dr = nearOrigin ? 0 : axis === "x" ? 0 : directSnap.p.r - moveSession.origin.r;
+            setSnapHit(nearOrigin ? null : directSnap.hit);
+          } else {
+            const singleVid = moveSession.editVertexIds?.length === 1 ? moveSession.editVertexIds[0] : null;
+            const singleBase = singleVid != null ? moveSession.editBase?.find((v) => v.id === singleVid) : null;
+            const candidate = singleBase
+              ? { z: singleBase.z + (raw.z - moveSession.origin.z), r: singleBase.x / 2 + (raw.r - moveSession.origin.r) }
+              : null;
+            const vertSnap = candidate ? applySnap(candidate, [], { skipEditVerts, skipSplit }) : null;
+            if (singleBase && vertSnap?.hit && vertSnap.hit.type !== "grid") {
+              dz = nearOrigin ? 0 : axis === "y" ? 0 : vertSnap.p.z - singleBase.z;
+              dr = nearOrigin ? 0 : axis === "x" ? 0 : vertSnap.p.r - singleBase.x / 2;
+              setSnapHit(nearOrigin ? null : vertSnap.hit);
+            } else {
+              const q = quantStep(raw, moveSession.origin);
+              dz = nearOrigin ? 0 : axis === "y" ? 0 : q.z;
+              dr = nearOrigin ? 0 : axis === "x" ? 0 : q.r;
+              setSnapHit(null);
             }
-            return next;
-          }), false);
-        } else onSegs(movePolylineSelection(moveSession.base,moveSession.ids,dz,dr), false);
+          }
+        } else {
+          /* حرکت آزاد Move به گام شبکه می‌چسبد؛ Alt موقتاً Snap را دور می‌زند. */
+          const snapped = e.altKey
+            ? { z: raw.z - moveSession.origin.z, r: raw.r - moveSession.origin.r }
+            : quantStep(raw, moveSession.origin);
+          dz = nearOrigin ? 0 : axis === "y" ? 0 : snapped.z;
+          dr = nearOrigin ? 0 : axis === "x" ? 0 : snapped.r;
+          setSnapHit(null);
+        }
+        applyMoveDelta(moveSession, dz, dr, false);
       }
       return;
     }
@@ -3597,6 +4029,12 @@ export default function ProfileEditor({
         setCursor(nearestOnSketch(raw));
         setSnapHit(null);
       } else {
+        if (tool === "move") {
+          const ploc = toLocal(e.clientX, e.clientY);
+          setSplitHovered(hitSplitMarker(ploc.x, ploc.y));
+        } else {
+          setSplitHovered(false);
+        }
         const { p, hit } = applySnap(raw);
         setCursor(constrainDraftPoint(p));
         setSnapHit(hit);
@@ -3625,11 +4063,12 @@ export default function ProfileEditor({
       /* رأس‌های مشترک = یک‌جا جابه‌جا می‌شوند → همسایه‌ها بی‌درز دنباله می‌آیند؛
          جابه‌جایی از مبنایِ لحظهٔ کلیک و با گامِ شبکه (فقط «میزان» حرکت) */
       const { z: qz, r: qr } = quantStep(raw, d.start);
-const nv = verts.map((v) => {
-          const b0 = d.base.get(v.id);
-          return b0 ? { ...v, z: b0.z + qz, x: b0.x + 2 * qr } : v;
-        });
-        setBufGeom(nv, lines, false);
+      const nv = verts.map((v) => {
+        const b0 = d.base.get(v.id);
+        return b0 ? { ...v, z: b0.z + qz, x: b0.x + 2 * qr } : v;
+      });
+      const nextSplit = d.baseSplit ? { ...d.baseSplit, z: d.baseSplit.z + qz, r: d.baseSplit.r + qr } : undefined;
+      setBufGeom(nv, lines, false, nextSplit);
       return;
     }
     if (d.mode === "evert") {
@@ -3639,7 +4078,127 @@ const nv = verts.map((v) => {
         const origin = d.base.get(v.id);
         return origin ? { ...v, z: origin.z + qz, x: origin.x + 2 * qr } : v;
       });
-      setBufGeom(nv, lines, false);
+      const nextSplit = d.baseSplit ? { ...d.baseSplit, z: d.baseSplit.z + qz, r: d.baseSplit.r + qr } : undefined;
+      setBufGeom(nv, lines, false, nextSplit);
+      return;
+    }
+    if (d.mode === "esplit") {
+      if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 3) d.moved = true;
+      if (!d.moved || !edit) return;
+      const rawStep = e.altKey ? { z: raw.z - d.start.z, r: raw.r - d.start.r } : quantStep(raw, d.start);
+      const dz = e.shiftKey ? (Math.abs(rawStep.z) >= Math.abs(rawStep.r) ? rawStep.z : 0) : rawStep.z;
+      const dr = e.shiftKey ? (Math.abs(rawStep.z) >= Math.abs(rawStep.r) ? 0 : rawStep.r) : rawStep.r;
+      const nextSplit: SplitState = { ...d.baseSplit, z: d.baseSplit.z + dz, r: d.baseSplit.r + dr };
+      if (d.baseVerts.size > 0) {
+        const nv = verts.map((v) => {
+          const b0 = d.baseVerts.get(v.id);
+          return b0 ? { ...v, z: b0.z + dz, x: b0.x + 2 * dr } : v;
+        });
+        setBufGeom(nv, lines, false, nextSplit);
+      } else {
+        onEditBuf({ ...edit, split: nextSplit }, false);
+      }
+      return;
+    }
+    if (d.mode === "split") {
+      if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 3) d.moved = true;
+      if (!d.moved) return;
+      let dz: number;
+      let dr: number;
+      if (!d.segIds.length && !d.pointRefs.length && !e.altKey) {
+        const candidate = { z: d.baseSplit.z + (raw.z - d.start.z), r: d.baseSplit.r + (raw.r - d.start.r) };
+        const snapped = applySnap(candidate);
+        setSnapHit(snapped.hit);
+        const sdz = snapped.p.z - d.baseSplit.z;
+        const sdr = snapped.p.r - d.baseSplit.r;
+        dz = e.shiftKey ? (Math.abs(sdz) >= Math.abs(sdr) ? sdz : 0) : sdz;
+        dr = e.shiftKey ? (Math.abs(sdz) >= Math.abs(sdr) ? 0 : sdr) : sdr;
+      } else if (!d.segIds.length && d.pointRefs.length && !e.altKey) {
+        const skipIds = [...new Set(d.pointRefs.map((pt) => pt.segId))];
+        const candidate = { z: d.baseSplit.z + (raw.z - d.start.z), r: d.baseSplit.r + (raw.r - d.start.r) };
+        const snapped = applySnap(candidate, skipIds);
+        setSnapHit(snapped.hit);
+        const sdz = snapped.p.z - d.baseSplit.z;
+        const sdr = snapped.p.r - d.baseSplit.r;
+        dz = e.shiftKey ? (Math.abs(sdz) >= Math.abs(sdr) ? sdz : 0) : sdz;
+        dr = e.shiftKey ? (Math.abs(sdz) >= Math.abs(sdr) ? 0 : sdr) : sdr;
+      } else {
+        const rawDelta = { z: raw.z - d.start.z, r: raw.r - d.start.r };
+        dz = e.shiftKey ? (Math.abs(rawDelta.z) >= Math.abs(rawDelta.r) ? rawDelta.z : 0) : rawDelta.z;
+        dr = e.shiftKey ? (Math.abs(rawDelta.z) >= Math.abs(rawDelta.r) ? 0 : rawDelta.r) : rawDelta.r;
+        setSnapHit(null);
+      }
+      if (d.segIds.length) {
+        const segSet = new Set(d.segIds);
+        const moving = d.baseSegs.filter((s) => segSet.has(s.id));
+        const bounds = moving.map(segBounds);
+        const minZ = Math.min(...bounds.map((b) => b.minZ));
+        const maxZ = Math.max(...bounds.map((b) => b.maxZ));
+        const minR = Math.min(...bounds.map((b) => b.minR));
+        const maxR = Math.max(...bounds.map((b) => b.maxR));
+        dz = Math.min(L - maxZ, Math.max(-minZ, dz));
+        dr = Math.min(R - maxR, Math.max(-minR, dr));
+        let nextSegs = movePolylineSelection(d.baseSegs, d.segIds, dz, dr);
+        const extraPoints = d.pointRefs.filter((pt) => !segSet.has(pt.segId));
+        if (extraPoints.length) {
+          const movingPts = new Set(extraPoints.map((pt) => `${pt.segId}:${pt.part}`));
+          nextSegs = nextSegs.map((segment) => {
+            if (segSet.has(segment.id)) return segment;
+            const baseSeg = d.baseSegs.find((b) => b.id === segment.id) ?? segment;
+            let next = { ...segment };
+            for (const part of ["a", "b", "c1", "c2", "via"] as SketchPointPart[]) {
+              const point = baseSeg[part];
+              if (point && movingPts.has(`${segment.id}:${part}`)) {
+                next = withSegPoint(next, part, { z: point.z + dz, r: point.r + dr });
+              }
+            }
+            return segInsideStock(next, L, R) ? next : segment;
+          });
+        }
+        const nextSplit: SplitState = { ...d.baseSplit, z: d.baseSplit.z + dz, r: d.baseSplit.r + dr };
+        onSegs(nextSegs, false, nextSplit);
+      } else if (d.pointRefs.length) {
+        const moving = new Set(d.pointRefs.map((point) => `${point.segId}:${point.part}`));
+        const involvedIds = new Set(d.pointRefs.map((point) => point.segId));
+        const involvedBase = d.baseSegs.filter((s) => involvedIds.has(s.id));
+        const applyPointShift = (source: SketchSeg[], ddz: number, ddr: number) =>
+          source.map((segment) => {
+            let next = segment;
+            for (const part of ["a", "b", "c1", "c2", "via"] as SketchPointPart[]) {
+              const point = segment[part];
+              if (point && moving.has(`${segment.id}:${part}`)) {
+                next = withSegPoint(next, part, { z: point.z + ddz, r: point.r + ddr });
+              }
+            }
+            return next;
+          });
+        const valid = (cand: SketchSeg[]) => cand.every((s) => segInsideStock(s, L, R));
+        const scaleAxis = (source: SketchSeg[], ddz: number, ddr: number): number => {
+          if (Math.abs(ddz) + Math.abs(ddr) < 1e-12) return 1;
+          if (valid(applyPointShift(source, ddz, ddr))) return 1;
+          if (!valid(source)) return 0;
+          let lo = 0, hi = 1;
+          for (let i = 0; i < 12; i++) {
+            const mid = (lo + hi) / 2;
+            if (valid(applyPointShift(source, ddz * mid, ddr * mid))) lo = mid;
+            else hi = mid;
+          }
+          return lo;
+        };
+        const zScale = scaleAxis(involvedBase, dz, 0);
+        const afterZ = applyPointShift(involvedBase, dz * zScale, 0);
+        const rScale = scaleAxis(afterZ, 0, dr);
+        const finalMoved = applyPointShift(afterZ, 0, dr * rScale);
+        const movedById = new Map(finalMoved.map((s) => [s.id, s]));
+        const nextSegs = d.baseSegs.map((s) => movedById.get(s.id) ?? s);
+        const actualDz = dz * zScale;
+        const actualDr = dr * rScale;
+        const nextSplit: SplitState = { ...d.baseSplit, z: d.baseSplit.z + actualDz, r: d.baseSplit.r + actualDr };
+        onSegs(nextSegs, false, nextSplit);
+      } else {
+        const nextSplit: SplitState = { ...d.baseSplit, z: d.baseSplit.z + dz, r: d.baseSplit.r + dr };
+        onSplit(nextSplit, false);
+      }
       return;
     }
     if (d.mode === "eoff") {
@@ -3681,11 +4240,11 @@ const nv = verts.map((v) => {
       const mode: "window" | "crossing" = loc.x >= d.sx ? "window" : "crossing";
       setMarquee({ x0: d.sx, y0: d.sy, x1: loc.x, y1: loc.y, add: e.shiftKey, remove: e.ctrlKey || e.metaKey });
       if (editOpen) {
-        /* در ویرایش مسیر فقط پیش‌نمایش EditBuf محاسبه می‌شود؛ پروفایل اصلی
-           نباید حتی به‌صورت موقت داخل باکس هایلایت شود. */
+        /* در ویرایش مسیر فقط پیش‌نمایش EditBuf و نشان قرمز Split محاسبه می‌شود؛ پروفایل اصلی
+           و نشان آبی Split هرگز داخل باکس انتخاب نمی‌شوند. */
         setMarqueeHits([]);
         setMarqueePointHits([]);
-        setMarqueeSplitHit(false);
+        setMarqueeSplitHit(marqueeHitsSplit(rectW));
         setBufMarq(bufMarqueeHits(rectW, mode));
       } else {
         setBufMarq(null);
@@ -3713,29 +4272,25 @@ const nv = verts.map((v) => {
     }
 
     if (d.mode === "handle") {
+      if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 3) return;
       d.moved = true;
       if ([...separated].some((key) => Number(key.split(":")[0]) === d.ref.segId)) setSeparated(new Set());
-      /* اگر نقطهٔ درگ‌شده جزو چند نقطهٔ مستقلِ انتخاب‌شده است، همه با هم جابه‌جا می‌شوند */
-      const inMulti = selPoints.length > 1 && d.cluster.some((member) =>
-        selPoints.some((point) => point.segId === member.segId && point.part === member.part)
-      );
-      const skipIds = inMulti
-        ? [...new Set(selPoints.map((sp) => sp.segId))]
-        : d.cluster.map((c) => c.segId);
-      const snapped = applySnap(raw, skipIds);
-      let p=snapped.p;
-      setSnapHit(snapped.hit);
-
       const refSeg = segs.find((s) => s.id === d.ref.segId);
       const refPt = refSeg ? refSeg[d.ref.part] : null;
       if (!refPt) return;
-      /* Shift روی دستهٔ Bézier فقط طول همان دسته را روی محور فعلی‌اش تغییر
-         می‌دهد؛ جهت ثابت می‌ماند و اتصال الاکلنگی نیز برای Dragهای بعدی حفظ می‌شود. */
-      if(e.shiftKey&&refSeg&&(d.ref.part==="c1"||d.ref.part==="c2")){
-        const anchor=d.ref.part==="c1"?refSeg.a:refSeg.b;
-        const az=refPt.z-anchor.z,ar=refPt.r-anchor.r,length=Math.hypot(az,ar);
-        if(length>1e-9){const uz=az/length,ur=ar/length,nextLength=Math.max(0,(raw.z-anchor.z)*uz+(raw.r-anchor.r)*ur);p={z:anchor.z+uz*nextLength,r:anchor.r+ur*nextLength};setSnapHit(null);}
-      }
+
+      /* اگر نقطهٔ درگ‌شده جزو چند نقطهٔ مستقلِ انتخاب‌شده است، همه با هم جابه‌جا می‌شوند */
+      const inMulti = selPoints.length > 1 && d.cluster.some((member) =>
+        selPoints.some((point) => {
+          if (point.segId === member.segId && point.part === member.part) return true;
+          if ((member.part === "a" || member.part === "b") && (point.part === "a" || point.part === "b")) {
+            const segA = segs.find((s) => s.id === member.segId);
+            const segB = segs.find((s) => s.id === point.segId);
+            return !!segA && !!segB && dist(segA[member.part], segB[point.part]) < 1e-8;
+          }
+          return false;
+        })
+      );
 
       /* برای کنترل‌پوینت‌ها مقصد clamp نمی‌شود. کل جابه‌جایی (تکی یا چندانتخابی)
          فقط تا جایی اعمال می‌شود که هندسهٔ واقعی همهٔ منحنی‌های درگیر داخل خام بماند. */
@@ -3764,6 +4319,28 @@ const nv = verts.map((v) => {
         const parts = bySeg.get(h.segId) ?? [];
         if (!parts.includes(h.part)) parts.push(h.part);
         bySeg.set(h.segId, parts);
+      }
+
+      /* همهٔ اضلاع در حال حرکت (شامل دو ضلع متصل به هر رأس Polyline و ضلع هم‌جوار الاکلنگی) از اسنپ به خودشان مستثنی می‌شوند */
+      const skipSet = new Set<number>(bySeg.keys());
+      if (refSeg?.polylineId != null && (d.ref.part === "c1" || d.ref.part === "c2")) {
+        const anchor = d.ref.part === "c1" ? refSeg.a : refSeg.b;
+        for (const s of segs) {
+          if (s.polylineId === refSeg.polylineId && (dist(s.a, anchor) < 1e-7 || dist(s.b, anchor) < 1e-7)) {
+            skipSet.add(s.id);
+          }
+        }
+      }
+      const snapped = applySnap(raw, [...skipSet]);
+      let p = snapped.p;
+      setSnapHit(snapped.hit);
+
+      /* Shift روی دستهٔ Bézier فقط طول همان دسته را روی محور فعلی‌اش تغییر
+         می‌دهد؛ جهت ثابت می‌ماند و اتصال الاکلنگی نیز برای Dragهای بعدی حفظ می‌شود. */
+      if(e.shiftKey&&refSeg&&(d.ref.part==="c1"||d.ref.part==="c2")){
+        const anchor=d.ref.part==="c1"?refSeg.a:refSeg.b;
+        const az=refPt.z-anchor.z,ar=refPt.r-anchor.r,length=Math.hypot(az,ar);
+        if(length>1e-9){const uz=az/length,ur=ar/length,nextLength=Math.max(0,(raw.z-anchor.z)*uz+(raw.r-anchor.r)*ur);p={z:anchor.z+uz*nextLength,r:anchor.r+ur*nextLength};setSnapHit(null);}
       }
       const dz = p.z - refPt.z;
       const dr = p.r - refPt.r;
@@ -3805,7 +4382,10 @@ const nv = verts.map((v) => {
         const movedRef=merged.find(s=>s.id===d.ref.segId);
         if(movedRef?.polylineId!=null){
           const anchor=d.ref.part==="c1"?movedRef.a:movedRef.b,handle=movedRef[d.ref.part];
-          const refIndependent=d.ref.part==="c1"?movedRef.independentA:movedRef.independentB;
+          /* فقط در صورتی که هر دو طرف از طریق «تبدیل رأس به منحنی کنترلی» صراحتاً به شکل
+             جفتِ نرم (independent === false) ساخته شده باشند، هم‌راستایی الاکلنگی اعمال می‌شود؛
+             ضلع‌هایی که مستقیماً به منحنی کنترلی تبدیل شده‌اند کاملاً مستقل حرکت می‌کنند. */
+          const refSmoothLinked=d.ref.part==="c1"?movedRef.independentA===false:movedRef.independentB===false;
           if((e.ctrlKey||e.metaKey)&&handle){
             /* Ctrl در نخستین Drag اتصال الاکلنگی این رأس را دائماً می‌شکند؛
                پس از رهاکردن Ctrl نیز هر دو دسته مستقل باقی می‌مانند. */
@@ -3817,9 +4397,9 @@ const nv = verts.map((v) => {
             });
           }else if(e.shiftKey&&handle){
             /* تغییر موقت طول فقط روی دستهٔ فعال؛ وضعیت پیوند شکسته نمی‌شود. */
-          }else if(handle&&!refIndependent){
+          }else if(handle&&refSmoothLinked){
             const other=merged.find(s=>s.id!==movedRef.id&&s.polylineId===movedRef.polylineId&&s.kind==="cubic"&&
-              ((dist(s.a,anchor)<1e-8&&!s.independentA)||(dist(s.b,anchor)<1e-8&&!s.independentB)));
+              ((dist(s.a,anchor)<1e-8&&s.independentA===false)||(dist(s.b,anchor)<1e-8&&s.independentB===false)));
             if(other){
               const part=dist(other.a,anchor)<1e-8?"c1":"c2",otherHandle=other[part];
               const oldActive=refSeg?.[d.ref.part],oldActiveLength=oldActive?dist(anchor,oldActive):0;
@@ -3834,7 +4414,16 @@ const nv = verts.map((v) => {
           }
         }
       }
-      onSegs(merged, false);
+      const movedRefSeg = merged.find((s) => s.id === d.ref.segId);
+      const movedRefPt = movedRefSeg ? movedRefSeg[d.ref.part] : null;
+      const nextSplitFromHandle = d.baseSplit && d.startPt && movedRefPt
+        ? {
+            ...d.baseSplit,
+            z: d.baseSplit.z + (movedRefPt.z - d.startPt.z),
+            r: d.baseSplit.r + (movedRefPt.r - d.startPt.r),
+          }
+        : undefined;
+      onSegs(merged, false, nextSplitFromHandle);
       return;
     }
 
@@ -3854,6 +4443,8 @@ const nv = verts.map((v) => {
           }
         } else if (!d.ids.includes(d.clicked)) {
           d.ids = [d.clicked];
+          d.baseSplit = undefined;
+          setSplitSelected(false);
         }
         onSelected([...d.ids]);
         d.last = raw;
@@ -3872,7 +4463,11 @@ const nv = verts.map((v) => {
          بیرون خام بمانند، درحالی‌که انتقال کل خط از مرز عبور نمی‌کند. */
       const dz = Math.min(L - maxZ, Math.max(-minZ, requestedDz));
       const dr = Math.min(R - maxR, Math.max(-minR, requestedDr));
-      onSegs(movePolylineSelection(segs,d.ids,dz,dr), false);
+      const nextSegs = movePolylineSelection(segs, d.ids, dz, dr);
+      const nextSplit = d.baseSplit
+        ? { ...split, z: split.z + dz, r: split.r + dr }
+        : undefined;
+      onSegs(nextSegs, false, nextSplit);
     }
   };
 
@@ -3973,7 +4568,7 @@ const nv = verts.map((v) => {
   const onPointerUp = (e: React.PointerEvent<SVGSVGElement>) => {
     if (tool === "polyline" && e.detail === 2) { setDraft([]); drag.current = null; return; }
     if(imageDrag.current){const preview=imageTransformPreviewRef.current;if(imagePreviewFrame.current!=null){cancelAnimationFrame(imagePreviewFrame.current);imagePreviewFrame.current=null;}if(preview)onReferenceImages(referenceImages.map(img=>img.id===preview.id?preview:img));imageDrag.current=null;imageGestureBase.current=null;imageTransformPreviewRef.current=null;setImageTransformPreview(null);setImageDragCursor(null);lastRotationCursorStep.current=null;if(svgRef.current)svgRef.current.style.cursor="";return;}
-    if (boxPivotDrag.current) { boxPivotDrag.current=false; return; }
+    if (boxPivotDrag.current) { boxPivotDrag.current=false; setSnapHit(null); return; }
     if (boxRotateDrag.current) { boxRotateDrag.current=null; requestAnimationFrame(()=>{boxRotateInputRef.current?.focus();boxRotateInputRef.current?.select();}); return; }
     if (boxScaleDrag.current) {
       const handle = boxScaleDrag.current.handle;
@@ -4032,8 +4627,7 @@ const nv = verts.map((v) => {
     if (tool === "move") {
       if (d?.mode === "rwait" && !d.moved) {
         /* راست‌کلیک ساده دقیقاً مانند Esc: لغو Preview و خروج از Move. */
-        if (moveSession?.editBase && edit) onEditBuf({ ...edit, verts: moveSession.editBase }, false);
-        else if (moveSession) onSegs(moveSession.base, false);
+        cancelMoveSession(moveSession);
         setMoveBox(null);
         setMoveSession(null);
         chooseTool("select");
@@ -4064,7 +4658,29 @@ const nv = verts.map((v) => {
         if (d.mode === "eline" && d.holder2) {
           const fin = normalizeEditBuf(d.holder2.latestVerts, edit.lines);
           onEditBuf({ ...edit, verts: fin.verts, lines: fin.lines, holder2: d.holder2.next }, true);
-        } else setBufGeom(edit.verts, edit.lines, true);
+        } else setBufGeom(edit.verts, edit.lines, true, d.baseSplit ? edit.split : undefined);
+      }
+      return;
+    }
+    if (d?.mode === "esplit") {
+      if (edit && d.moved) {
+        if (d.baseVerts.size > 0) setBufGeom(edit.verts, edit.lines, true, edit.split);
+        else onEditBuf({ ...edit }, true);
+      } else if (!d.moved && d.hadMulti) {
+        selectEditLines([], null, true);
+        setSelV([]);
+        setSplitSelected(true);
+      }
+      return;
+    }
+    if (d?.mode === "split") {
+      if (d.moved) {
+        if (d.segIds.length || d.pointRefs.length) onSegs(segs, true, split);
+        else onSplit(split, true);
+      } else if (d.hadMulti) {
+        onSelected([]);
+        setSelPoints([]);
+        setSplitSelected(true);
       }
       return;
     }
@@ -4114,7 +4730,7 @@ const nv = verts.map((v) => {
         else {
           const ploc=toLocal(e.clientX,e.clientY),world=worldPt(camRef.current!,ploc.x,ploc.y);
           const empty=editOpen
-            ? hitBufLine(ploc.x,ploc.y)==null&&hitBufVx(ploc.x,ploc.y)==null&&hitOffSeg(ploc.x,ploc.y)==null
+            ? hitBufLine(ploc.x,ploc.y)==null&&hitBufVx(ploc.x,ploc.y)==null&&hitOffSeg(ploc.x,ploc.y)==null&&!hitSplitMarker(ploc.x,ploc.y)
             : !hitSeg(world)&&hitHandle(world)==null&&!hitSplitMarker(ploc.x,ploc.y);
           if(rightClickToolToggle&&empty){const previous=previousToolRef.current;if(!editOpen||previous==="select"||previous==="move")chooseTool(previous);}
           else if (editOpen) openSpeedMenu(e.clientX, e.clientY);
@@ -4174,27 +4790,31 @@ const nv = verts.map((v) => {
         else if(addPaint)setSelectedPaintPoints(points=>[...points,...pointHitsPaint.filter(h=>!points.some(p=>pointKey(p)===pointKey(h)))]);
         else setSelectedPaintPoints(pointHitsPaint);
       }
-      /* باکس در حالت ادیت: اول خطوط/رأس‌های برنامه؛ اگر چیزی نگرفت، رفتار همیشگیِ پروفایل */
+      /* باکس در حالت ادیت: اول خطوط/رأس‌های برنامه و نشان قرمز Split؛ نقطه آبی هرگز انتخاب نمی‌شود */
       if (editOpen) {
         const bh = bufMarqueeHits(rectW, mode);
-        if (bh.ids.length || bh.vxs.length) {
-          const remove = e.ctrlKey || e.metaKey;
-          const add = e.shiftKey;
+        const splitHitEdit = marqueeHitsSplit(rectW);
+        const remove = e.ctrlKey || e.metaKey;
+        const add = e.shiftKey;
+        if (bh.ids.length || bh.vxs.length || splitHitEdit) {
           if (remove) {
             const nextLines = selL.filter((id) => !bh.ids.includes(id));
             const nextVerts = selV.filter((id) => !bh.vxs.includes(id));
             selectEditLines(nextLines, nextLines.includes(activeLine ?? -1) ? activeLine : null, true);
             setSelV(nextVerts);
+            if (splitHitEdit) setSplitSelected(false);
             if (!nextLines.length && nextVerts.length) focusEditVertexInGCode(nextVerts[nextVerts.length - 1]);
           } else if (add) {
             const nextLines = [...selL, ...bh.ids.filter((id) => !selL.includes(id))];
             const nextVerts = [...selV, ...bh.vxs.filter((id) => !selV.includes(id))];
             selectEditLines(nextLines, bh.ids[bh.ids.length - 1] ?? activeLine, true);
             setSelV(nextVerts);
+            if (splitHitEdit) setSplitSelected(true);
             if (!nextLines.length && nextVerts.length) focusEditVertexInGCode(nextVerts[nextVerts.length - 1]);
           } else {
             selectEditLines(bh.ids, bh.ids[bh.ids.length - 1] ?? null, true);
             setSelV(bh.vxs);
+            setSplitSelected(splitHitEdit);
             if (!bh.ids.length && bh.vxs.length) focusEditVertexInGCode(bh.vxs[bh.vxs.length - 1]);
           }
           setBufMarq(null);
@@ -4205,6 +4825,7 @@ const nv = verts.map((v) => {
         if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
           selectEditLines([], null, true);
           setSelV([]);
+          setSplitSelected(false);
         }
         return;
       }
@@ -4241,7 +4862,7 @@ const nv = verts.map((v) => {
              render ثبت تاریخچه آن را پاک می‌کنیم تا پس از MouseUp حتی یک فریم
              در محل قدیمی چشمک نزند؛ حرکت بعدی موس دوباره نشانگر را می‌سازد. */
           setCursor(null);
-          onSegs(segs, true); // ثبت در تاریخچه
+          onSegs(segs, true, d.baseSplit ? split : undefined); // ثبت در تاریخچه
           const owner=segs.find(segment=>segment.id===ref.segId);
           const anchor=ref.part==="c1"?owner?.a:ref.part==="c2"?owner?.b:null;
           const keepVertex=!!anchor&&selPoints.some(point=>{
@@ -4253,19 +4874,34 @@ const nv = verts.map((v) => {
           return;
         }
         if (tool === "select") {
-          if (e.shiftKey) setSelPoints(exists ? selPoints.filter((p) => pkey(p) !== pkey(ref)) : [...selPoints, ref]);
-          else if (e.ctrlKey || e.metaKey) setSelPoints(selPoints.filter((p) => pkey(p) !== pkey(ref)));
-          else setSelPoints([ref]);
+          const clusterKeys = new Set(d.cluster.map(pkey));
+          if (e.shiftKey) setSelPoints(exists ? selPoints.filter((p) => !clusterKeys.has(pkey(p))) : [...selPoints, ref]);
+          else if (e.ctrlKey || e.metaKey) setSelPoints(selPoints.filter((p) => !clusterKeys.has(pkey(p))));
+          else {
+            const locUp = toLocal(e.clientX, e.clientY);
+            if (!editOpen && split.enabled && hitSplitMarker(locUp.x, locUp.y)) {
+              onSelected([]);
+              setSelPoints([]);
+              setSplitSelected(true);
+            } else {
+              setSelPoints([ref]);
+              setSplitSelected(false);
+            }
+          }
           return;
         }
         /* کلیک بدون Drag در ابزار رسم باید نقطهٔ مرحلهٔ رسم را ثبت کند. */
       }
       if (d.mode === "move") {
         if (d.moved) {
-          onSegs(segs, true); // ثبت در تاریخچه
+          onSegs(segs, true, d.baseSplit ? split : undefined); // ثبت در تاریخچه
           return;
         }
         /* کلیک بدون درگ روی المان */
+        if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+          setSplitSelected(false);
+          setSelPoints([]);
+        }
         const id = d.clicked;
         const objectIds = sketchObjectIds(id);
         // اتصال هندسیِ تازه‌شده را به‌صورت پایدار در همان Polyline ثبت می‌کنیم
@@ -4276,11 +4912,23 @@ const nv = verts.map((v) => {
           if (needsGroup) onSegs(segs.map(s => objectIds.includes(s.id) ? { ...s, polylineId: group } : s), false);
         }
         if (e.shiftKey) {
-          onSelected(selected.includes(id)
-            ? selected.filter((x) => !objectIds.includes(x))
-            : [...selected, ...objectIds.filter((item) => !selected.includes(item))]);
+          const selectedInObject = objectIds.filter((item) => selected.includes(item)).length;
+          const partialPolylineSelected = objectIds.length > 1 && selectedInObject > 0 && selectedInObject < objectIds.length;
+          if (partialPolylineSelected) {
+            onSelected(selected.includes(id)
+              ? selected.filter((x) => x !== id)
+              : [...selected, id]);
+          } else {
+            onSelected(selected.includes(id)
+              ? selected.filter((x) => !objectIds.includes(x))
+              : [...selected, ...objectIds.filter((item) => !selected.includes(item))]);
+          }
         } else if (e.ctrlKey || e.metaKey) {
-          onSelected(selected.filter((x) => !objectIds.includes(x)));
+          const selectedInObject = objectIds.filter((item) => selected.includes(item)).length;
+          const partialPolylineSelected = objectIds.length > 1 && selectedInObject > 0 && selectedInObject < objectIds.length;
+          onSelected(partialPolylineSelected
+            ? selected.filter((x) => x !== id)
+            : selected.filter((x) => !objectIds.includes(x)));
         } else {
           const wholePolyline=objectIds.length>1&&objectIds.every(item=>selected.includes(item));
           onSelected(wholePolyline?[id]:objectIds);
@@ -4655,6 +5303,7 @@ const nv = verts.map((v) => {
      یا حداقل یک نقطه‌اش مستقل انتخاب شده است */
   const selectedEndpointCoords=selPoints.flatMap(point=>{
     if(point.part!=="a"&&point.part!=="b")return [];
+    if(separated.has(handleKey(point.segId,point.part)))return [];
     const segment=segs.find(s=>s.id===point.segId);
     return segment?[segment[point.part]]:[];
   });
@@ -4742,8 +5391,7 @@ const nv = verts.map((v) => {
     if (boxRotateSession) onSegs(boxRotateSession.base,false);
     setBoxRotateSession(null); setBoxRotateBox(null); setBoxScalePivot(null);
     if (moveSession) {
-      if (moveSession.editBase && edit) onEditBuf({ ...edit, verts: moveSession.editBase }, false);
-      else onSegs(moveSession.base, false);
+      cancelMoveSession(moveSession);
     }
     if (copySession) onSegs(copySession.base, false);
     if (mirrorSession) onSegs(mirrorSession.base, false);
@@ -4764,8 +5412,12 @@ const nv = verts.map((v) => {
     const editCurrent = editBase ? edit?.verts.find((vertex) => vertex.id === editBase.id) : null;
     const base = moveSession.base.find((segment) => moveSession.ids.includes(segment.id));
     const current = base ? segs.find((segment) => segment.id === base.id) : null;
-    const bz = editBase?.z ?? base?.a.z, br = editBase ? editBase.x / 2 : base?.a.r;
-    const cz = editCurrent?.z ?? current?.a.z, cr = editCurrent ? editCurrent.x / 2 : current?.a.r;
+    const splitBaseZ = moveSession.splitBase ? moveSession.splitBase.z + (editOpen ? params.gcodeShiftX : 0) : undefined;
+    const splitBaseR = moveSession.splitBase ? moveSession.splitBase.r + (editOpen ? params.gcodeShiftY : 0) : undefined;
+    const bz = editBase?.z ?? base?.a.z ?? splitBaseZ;
+    const br = editBase ? editBase.x / 2 : (base?.a.r ?? splitBaseR);
+    const cz = editCurrent?.z ?? current?.a.z ?? shownSplitPoint?.z;
+    const cr = editCurrent ? editCurrent.x / 2 : (current?.a.r ?? shownSplitPoint?.r);
     if (bz != null && br != null && cz != null && cr != null) {
       moveReadout = moveSession.mode === "absolute"
         ? `${concise(cz)}, ${concise(cr)} · ABS`
@@ -4818,19 +5470,17 @@ const nv = verts.map((v) => {
       ref={wrapRef}
       onDragOver={e=>{if(e.dataTransfer.types.includes("Files"))e.preventDefault();}}
       onDrop={e=>{if(e.dataTransfer.files.length){e.preventDefault();const rect=wrapRef.current?.getBoundingClientRect(),c=camRef.current,drop=rect&&c?worldPt(c,e.clientX-rect.left,e.clientY-rect.top):undefined;void importReferenceFiles([...e.dataTransfer.files],drop);}}}
-      className={cn(
-        "relative h-full w-full overflow-hidden rounded-lg border border-edge",
-        editOpen ? "bg-[#08111f]" : "bg-[#120e09]"
-      )}
+      style={{ backgroundColor: editOpen ? themeColors.pathEditBg : themeColors.editorBg }}
+      className="relative h-full w-full overflow-hidden rounded-lg border border-edge"
     >
       <input ref={imageInputRef} type="file" accept="image/*,.webp,.avif,.svg,.tif,.tiff" multiple hidden onChange={e=>{void importReferenceFiles([...(e.target.files??[])]);e.currentTarget.value="";}}/>
       <svg
         ref={svgRef}
-        width={size.w}
-        height={size.h}
+        width="100%"
+        height="100%"
         style={{...(imageDragCursor?{cursor:imageDragCursor}:{}),"--point-scale":pointScale} as CSSProperties}
         className={cn(
-          "canvas-point-scale block touch-none select-none",
+          "canvas-point-scale block h-full w-full touch-none select-none",
           disableSelectionGlow && "disable-selection-glow",
           panMode
             ? "cursor-grab"
@@ -4870,7 +5520,7 @@ const nv = verts.map((v) => {
         }}
       >
         <defs>
-          <marker id="paintPreviewArrow" markerWidth="17" markerHeight="17" refX="15" refY="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1L16 8.5L1 16Z" fill="#ef4444" /></marker>
+          <marker id="paintPreviewArrow" markerWidth="17" markerHeight="17" refX="15" refY="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1L16 8.5L1 16Z" fill={themeColors.paintArrow} /></marker>
           {/* userSpaceOnUse مانع صفرشدن محدوده فیلتر برای خطوط کاملاً افقی/عمودی می‌شود. */}
           <filter id="curveGlow" filterUnits="userSpaceOnUse" x="-10000" y="-10000" width="20000" height="20000">
             <feGaussianBlur stdDeviation="3" result="b" />
@@ -4880,8 +5530,8 @@ const nv = verts.map((v) => {
             </feMerge>
           </filter>
           <pattern id="hatch" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
-            <rect width="7" height="7" fill="rgba(227,169,78,0.05)" />
-            <line x1="0" y1="0" x2="0" y2="7" stroke="rgba(227,169,78,0.10)" strokeWidth="1.4" />
+            <rect width="7" height="7" fill={rgbaCss(themeColors.editorBlankBox, 0.05)} />
+            <line x1="0" y1="0" x2="0" y2="7" stroke={rgbaCss(themeColors.editorBlankBox, 0.1)} strokeWidth="1.4" />
           </pattern>
           {referenceImages.map(img=><filter key={img.id} id={`ref-level-${img.id}`}><feComponentTransfer><feFuncR type="gamma" amplitude="1" exponent={1/img.gamma} offset="0"/><feFuncG type="gamma" amplitude="1" exponent={1/img.gamma} offset="0"/><feFuncB type="gamma" amplitude="1" exponent={1/img.gamma} offset="0"/></feComponentTransfer><feComponentTransfer><feFuncR type="linear" slope={255/Math.max(1,img.white-img.black)} intercept={-img.black/Math.max(1,img.white-img.black)}/><feFuncG type="linear" slope={255/Math.max(1,img.white-img.black)} intercept={-img.black/Math.max(1,img.white-img.black)}/><feFuncB type="linear" slope={255/Math.max(1,img.white-img.black)} intercept={-img.black/Math.max(1,img.white-img.black)}/></feComponentTransfer>{img.grayscale&&<feColorMatrix type="saturate" values="0"/>}</filter>)}
         </defs>
@@ -4914,7 +5564,7 @@ const nv = verts.map((v) => {
                   y1={editOpen ? 0 : cam.oy - R * cam.s}
                   x2={sx}
                   y2={editOpen ? size.h : cam.oy + R * cam.s}
-                  stroke={tick.major ? "rgba(63,79,101,0.42)" : "rgba(31,45,63,0.42)"}
+                  stroke={rgbaCss(themeColors.editorGrid, tick.major ? 0.34 : 0.16)}
                   strokeWidth={tick.major ? 1 : 0.75}
                 />
               );
@@ -4928,7 +5578,7 @@ const nv = verts.map((v) => {
                   y1={sy}
                   x2={editOpen ? size.w : cam.ox + L * cam.s}
                   y2={sy}
-                  stroke={tick.major ? "rgba(63,79,101,0.42)" : "rgba(31,45,63,0.42)"}
+                  stroke={rgbaCss(themeColors.editorGrid, tick.major ? 0.34 : 0.16)}
                   strokeWidth={tick.major ? 1 : 0.75}
                 />
               );
@@ -4937,30 +5587,30 @@ const nv = verts.map((v) => {
             {!editOpen && (
               <>
                 {gridZ.filter((tick) => tick.major).map((tick) => (
-                  <text key={`lz${tick.value}`} x={cam.ox + tick.value * cam.s} y={cam.oy + R * cam.s + 18} textAnchor="middle" fontSize="10" fill="#8b7c5f" fontFamily="JetBrains Mono, monospace">
+                  <text key={`lz${tick.value}`} x={cam.ox + tick.value * cam.s} y={cam.oy + R * cam.s + 18} textAnchor="middle" fontSize="10" fill={themeColors.editorGrid} fontFamily="JetBrains Mono, monospace">
                     {tick.value}
                   </text>
                 ))}
                 {gridR.filter((tick) => tick.value > 0).map((tick) => (
-                  <text key={`lr${tick.value}`} x={cam.ox - 8} y={cam.oy - tick.value * cam.s + 3.5} textAnchor="end" fontSize="10" fill="#8b7c5f" fontFamily="JetBrains Mono, monospace">
+                  <text key={`lr${tick.value}`} x={cam.ox - 8} y={cam.oy - tick.value * cam.s + 3.5} textAnchor="end" fontSize="10" fill={themeColors.editorGrid} fontFamily="JetBrains Mono, monospace">
                     ⌀{Math.round(tick.value * 2)}
                   </text>
                 ))}
-                <text x={cam.ox + L * cam.s + 10} y={cam.oy + 3.5} fontSize="11" fill="#a8946f" fontFamily="JetBrains Mono, monospace" fontWeight={700}>X</text>
-                <text x={cam.ox - 8} y={cam.oy - R * cam.s - 10} textAnchor="end" fontSize="11" fill="#a8946f" fontFamily="JetBrains Mono, monospace" fontWeight={700}>Y ⌀</text>
+                <text x={cam.ox + L * cam.s + 10} y={cam.oy + 3.5} fontSize="11" fill={themeColors.uiMute} fontFamily="JetBrains Mono, monospace" fontWeight={700}>X</text>
+                <text x={cam.ox - 8} y={cam.oy - R * cam.s - 10} textAnchor="end" fontSize="11" fill={themeColors.uiMute} fontFamily="JetBrains Mono, monospace" fontWeight={700}>Y ⌀</text>
               </>
             )}
           </g>
         )}
 
-        {!editOpen && <line x1={0} y1={cam.oy} x2={size.w} y2={cam.oy} stroke="rgba(227,169,78,0.35)" strokeWidth={1} strokeDasharray="10 4 2 4" />}
+        {!editOpen && <line x1={0} y1={cam.oy} x2={size.w} y2={cam.oy} stroke={rgbaCss(themeColors.editorCenterAxis, 0.38)} strokeWidth={1} strokeDasharray="10 4 2 4" />}
         <rect
           x={cam.ox}
           y={cam.oy - R * cam.s}
           width={L * cam.s}
           height={2 * R * cam.s}
           fill={editOpen ? "transparent" : "url(#hatch)"}
-          stroke={editOpen ? "rgba(55,72,94,0.22)" : "rgba(227,169,78,0.55)"}
+          stroke={editOpen ? rgbaCss(themeColors.editorGrid, 0.24) : rgbaCss(themeColors.editorBlankBox, 0.58)}
           strokeWidth={editOpen ? 0.8 : 1.3}
           strokeDasharray={editOpen ? undefined : "7 5"}
         />
@@ -4968,24 +5618,24 @@ const nv = verts.map((v) => {
         {/* محورهای ساده و نازک مثل مرجع؛ تقاطع آن‌ها خودِ مبدأ است. */}
         {editOpen && (
           <g pointerEvents="none">
-            <line x1={0} y1={cam.oy} x2={size.w} y2={cam.oy} stroke="#754052" strokeOpacity={0.9} strokeWidth={1} />
-            <line x1={cam.ox} y1={0} x2={cam.ox} y2={size.h} stroke="#3b7373" strokeOpacity={0.9} strokeWidth={1} />
+            <line x1={0} y1={cam.oy} x2={size.w} y2={cam.oy} stroke={themeColors.pathEditAxisX} strokeOpacity={0.9} strokeWidth={1} />
+            <line x1={cam.ox} y1={0} x2={cam.ox} y2={size.h} stroke={themeColors.pathEditAxisY} strokeOpacity={0.9} strokeWidth={1} />
           </g>
         )}
 
         {!editOpen && settings.showGhost && ghostPath && (
           <g style={{ opacity: (iso ? 0.15 : 1) * layerOpacity, ...fadeStyle }}>
-            <path d={ghostPath} fill="rgba(227,169,78,0.12)" stroke="rgba(227,169,78,0.4)" strokeWidth={1} />
+            <path d={ghostPath} fill={rgbaCss(themeColors.editorRotEnv, 0.14)} stroke={rgbaCss(themeColors.editorRotEnv, 0.45)} strokeWidth={1} />
           </g>
         )}
         {/* محدوده آبی داخل‌تراشی: انتهای Offset نزدیک Split → +X → محور (−Y)
             → −X روی محور → دنبال‌کردن Offset تا همان نقطه. */}
         {!editOpen && settings.showInnerArea && split.enabled && (()=>{
           const divided=splitChainAt(chainPolyline(orderChain(segs)),{z:split.z,r:split.r});
-          const inner=split.swapped?divided.outer:divided.inner;
+          const inner=split.swapped?[...divided.outer].reverse():divided.inner;
           if(inner.length<2)return null;
           const sampledInner=sampleOrderedProfile(inner.map((q,i)=>({id:i+1,z:q.z,r:q.r,smooth:false})),params.blankD/2);
-          const rawOffset=continuousPathOffset(sampledInner,Math.max(0,params.innerOffsetDist),true).reverse().map(q=>({z:q.z,r:Math.max(0,q.r)}));
+          const rawOffset=continuousPathOffset(sampledInner,Math.max(0,params.innerOffsetDist),innerOffsetLeftSide(sampledInner)).reverse().map(q=>({z:q.z,r:Math.max(0,q.r)}));
           if(rawOffset.length<2)return null;
           /* مسیر بسته‌شدن از محور باید ابتدا به سر کم‌شعاع Offset برسد. */
           const offset=rawOffset[0].r<=rawOffset[rawOffset.length-1].r?rawOffset:[...rawOffset].reverse();
@@ -4996,7 +5646,7 @@ const nv = verts.map((v) => {
           const offsetPath=offset.map(point=>{const[x,y]=P(point.z,point.r);return `L${x},${y}`;}).join(" ");
           const d=`M${sx},${sy} L${rx},${ry} L${r0x},${r0y} L${a0x},${a0y} ${offsetPath} Z`;
           return <g pointerEvents="none" style={{opacity:(iso?.18:.34)*layerOpacity,...fadeStyle}}>
-            <path d={d} fill="#69d7ff" fillOpacity={.24} stroke="#8de4ff" strokeOpacity={.42} strokeWidth={1}/>
+            <path d={d} fill={themeColors.pathEditInnerZone} fillOpacity={.24} stroke={shadeHex(themeColors.pathEditInnerZone, 0.25)} strokeOpacity={.45} strokeWidth={1}/>
           </g>;
         })()}
 
@@ -5008,7 +5658,7 @@ const nv = verts.map((v) => {
             const matchIso = iso && run.opId === isolatedOpId;
             const dim = iso && !matchIso;
             if (dim && isRapid) return null;
-            const color = SEG_COLOR[run.kind];
+            const color = segColorFromTheme(themeColors, run.kind);
             const baseOpacity = isRapid ? 0.28 : run.kind === "offset" || run.kind === "boreoff" ? 0.9 : 0.8;
             return (
               <g key={i} style={{ opacity: (dim ? 0.06 : 1) * layerOpacity, ...fadeStyle }}>
@@ -5032,7 +5682,7 @@ const nv = verts.map((v) => {
                   key={`br${i}`}
                   d={run.d}
                   fill="none"
-                  stroke={showPathBySpeed ? speedStroke(run.motion, run.feed) : SEG_COLOR[run.kind]}
+                  stroke={showPathBySpeed ? speedStroke(run.motion, run.feed) : segColorFromTheme(themeColors, run.kind)}
                   strokeOpacity={(pickerHover ? (dim ? 0.025 : 0.1) : dim ? 0.06 : isRapid ? 0.4 : 0.9) * layerOpacity}
                   strokeWidth={isRapid ? 1.1 : run.kind === "finish" ? 1.8 : 1.5}
                   strokeDasharray={isRapid ? "4 4" : run.kind === "offset" || run.kind === "boreoff" ? "7 4" : undefined}
@@ -5050,7 +5700,7 @@ const nv = verts.map((v) => {
                 <path
                   d={lineD(line)}
                   fill="none"
-                  stroke={showPathBySpeed ? speedStroke(line.motion, line.feed) : SEG_COLOR[kind]}
+                  stroke={showPathBySpeed ? speedStroke(line.motion, line.feed) : segColorFromTheme(themeColors, kind)}
                   strokeWidth={5}
                   strokeOpacity={1}
                   strokeLinecap="round"
@@ -5075,13 +5725,15 @@ const nv = verts.map((v) => {
               const [x, y] = P(pathStart.z, pathStart.x / 2);
               const hot = hoverPathEndpoint === pathStartVid;
               const selected = pathStartVid != null && selV.includes(pathStartVid);
+              const sCol = themeColors.pathEditStart;
+              const sLight = shadeHex(sCol, 0.45);
               return (
                 <g transform={`translate(${x + (pathEndsCoincident ? -13 : 0)} ${y})`} pointerEvents="none" filter="url(#curveGlow)">
-                  {pathEndsCoincident && <line x1={8} y1={0} x2={13} y2={0} stroke="#45d19f" strokeWidth={2} />}
-                  {(hot || selected) && <circle r={13} fill="#45d19f" fillOpacity={hot ? 0.28 : 0.18} stroke={selected ? "#ffd27a" : "#8fffd7"} strokeWidth={2} />}
-                  <circle r={hot || selected ? 9.5 : 8} fill={selected ? "#ffd27a" : hot ? "#17483b" : "#102b24"} stroke={selected ? "#fff3dc" : "#45d19f"} strokeWidth={2.5} />
-                  <text y={3.2} textAnchor="middle" fontSize={9} fontWeight={900} fill="#8fffd7">S</text>
-                  <text x={11} y={-9} fontSize={9} fontWeight={800} fill="#8fffd7">شروع</text>
+                  {pathEndsCoincident && <line x1={8} y1={0} x2={13} y2={0} stroke={sCol} strokeWidth={2} />}
+                  {(hot || selected) && <circle r={13} fill={sCol} fillOpacity={hot ? 0.28 : 0.18} stroke={selected ? themeColors.uiAccent2 : sLight} strokeWidth={2} />}
+                  <circle r={hot || selected ? 9.5 : 8} fill={selected ? themeColors.uiAccent2 : shadeHex(sCol, hot ? -0.55 : -0.72)} stroke={selected ? themeColors.profileHover : sCol} strokeWidth={2.5} />
+                  <text y={3.2} textAnchor="middle" fontSize={9} fontWeight={900} fill={sLight}>S</text>
+                  <text x={11} y={-9} fontSize={9} fontWeight={800} fill={sLight}>شروع</text>
                 </g>
               );
             })()}
@@ -5089,13 +5741,15 @@ const nv = verts.map((v) => {
               const [x, y] = P(pathEnd.z, pathEnd.x / 2);
               const hot = hoverPathEndpoint === pathEndVid;
               const selected = pathEndVid != null && selV.includes(pathEndVid);
+              const eCol = themeColors.pathEditEnd;
+              const eLight = shadeHex(eCol, 0.45);
               return (
                 <g transform={`translate(${x + (pathEndsCoincident ? 13 : 0)} ${y})`} pointerEvents="none" filter="url(#curveGlow)">
-                  {pathEndsCoincident && <line x1={-8} y1={0} x2={-13} y2={0} stroke="#ff756f" strokeWidth={2} />}
-                  {(hot || selected) && <circle r={16} fill="#ff756f" fillOpacity={hot ? 0.25 : 0.16} stroke={selected ? "#ffd27a" : "#ffc0bc"} strokeWidth={2} />}
-                  <path d={hot || selected ? "M 0 -13 L 13 0 L 0 13 L -13 0 Z" : "M 0 -11 L 11 0 L 0 11 L -11 0 Z"} fill={selected ? "#ffd27a" : hot ? "#592325" : "#35191a"} fillOpacity={0.9} stroke={selected ? "#fff3dc" : "#ff756f"} strokeWidth={2.5} />
-                  <text y={3.2} textAnchor="middle" fontSize={9} fontWeight={900} fill="#ffc0bc">E</text>
-                  <text x={13} y={13} fontSize={9} fontWeight={800} fill="#ffc0bc">پایان</text>
+                  {pathEndsCoincident && <line x1={-8} y1={0} x2={-13} y2={0} stroke={eCol} strokeWidth={2} />}
+                  {(hot || selected) && <circle r={16} fill={eCol} fillOpacity={hot ? 0.25 : 0.16} stroke={selected ? themeColors.uiAccent2 : eLight} strokeWidth={2} />}
+                  <path d={hot || selected ? "M 0 -13 L 13 0 L 0 13 L -13 0 Z" : "M 0 -11 L 11 0 L 0 11 L -11 0 Z"} fill={selected ? themeColors.uiAccent2 : shadeHex(eCol, hot ? -0.55 : -0.72)} fillOpacity={0.9} stroke={selected ? themeColors.profileHover : eCol} strokeWidth={2.5} />
+                  <text y={3.2} textAnchor="middle" fontSize={9} fontWeight={900} fill={eLight}>E</text>
+                  <text x={13} y={13} fontSize={9} fontWeight={800} fill={eLight}>پایان</text>
                 </g>
               );
             })()}
@@ -5108,7 +5762,7 @@ const nv = verts.map((v) => {
                   key={`of${o.id}`}
                   d={segPath(o, cam)}
                   fill="none"
-                  stroke={sel ? "#ffe9b0" : "#d9b36a"}
+                  stroke={sel ? shadeHex(themeColors.pathEditOffsetCurve, 0.35) : themeColors.pathEditOffsetCurve}
                   strokeOpacity={sel ? 1 : 0.72}
                   strokeWidth={sel ? 2.6 : 1.5}
                   strokeDasharray="6 3"
@@ -5128,28 +5782,28 @@ const nv = verts.map((v) => {
                 <g key={`oh${o.id}`}>
                   {sel && c1 && (
                     <>
-                      <line x1={ax} y1={ay} x2={c1[0]} y2={c1[1]} stroke="#6ab0d8" strokeWidth={1} strokeDasharray="3 3" />
-                      <circle cx={c1[0]} cy={c1[1]} r={5} fill="#1b2a33" stroke="#6ab0d8" strokeWidth={2} />
+                      <line x1={ax} y1={ay} x2={c1[0]} y2={c1[1]} stroke={themeColors.controlHandle} strokeWidth={1} strokeDasharray="3 3" />
+                      <circle cx={c1[0]} cy={c1[1]} r={5} fill={shadeHex(themeColors.controlHandle, -0.68)} stroke={themeColors.controlHandle} strokeWidth={2} />
                     </>
                   )}
                   {sel && c2 && (
                     <>
-                      <line x1={bx} y1={by} x2={c2[0]} y2={c2[1]} stroke="#6ab0d8" strokeWidth={1} strokeDasharray="3 3" />
-                      <circle cx={c2[0]} cy={c2[1]} r={5} fill="#1b2a33" stroke="#6ab0d8" strokeWidth={2} />
+                      <line x1={bx} y1={by} x2={c2[0]} y2={c2[1]} stroke={themeColors.controlHandle} strokeWidth={1} strokeDasharray="3 3" />
+                      <circle cx={c2[0]} cy={c2[1]} r={5} fill={shadeHex(themeColors.controlHandle, -0.68)} stroke={themeColors.controlHandle} strokeWidth={2} />
                     </>
                   )}
-                  {sel && via && <circle cx={via[0]} cy={via[1]} r={5} fill="#2b1f33" stroke="#b48ee0" strokeWidth={2} />}
-                  <circle cx={ax} cy={ay} r={sel ? 5.2 : 3.6} fill={sel ? "#0f2a22" : "#241c12"} stroke={sel ? "#ffe9b0" : "#d9b36a"} strokeWidth={2} />
-                  <circle cx={bx} cy={by} r={sel ? 5.2 : 3.6} fill={sel ? "#0f2a22" : "#241c12"} stroke={sel ? "#ffe9b0" : "#d9b36a"} strokeWidth={2} />
+                  {sel && via && <circle cx={via[0]} cy={via[1]} r={5} fill={shadeHex(themeColors.arcViaPoint, -0.68)} stroke={themeColors.arcViaPoint} strokeWidth={2} />}
+                  <circle cx={ax} cy={ay} r={sel ? 5.2 : 3.6} fill={sel ? themeColors.pointFill : themeColors.pathEditBg} stroke={sel ? shadeHex(themeColors.pathEditOffsetCurve, 0.35) : themeColors.pathEditOffsetCurve} strokeWidth={2} />
+                  <circle cx={bx} cy={by} r={sel ? 5.2 : 3.6} fill={sel ? themeColors.pointFill : themeColors.pathEditBg} stroke={sel ? shadeHex(themeColors.pathEditOffsetCurve, 0.35) : themeColors.pathEditOffsetCurve} strokeWidth={2} />
                 </g>
               );
             })}
             {hoverBuf != null && lineById.get(hoverBuf) && (
-              <path d={lineD(lineById.get(hoverBuf)!)} fill="none" stroke="#fff3dc" strokeOpacity={pickerHover ? 0.08 : 0.9} strokeWidth={2.4} strokeLinecap="round" pointerEvents="none" />
+              <path d={lineD(lineById.get(hoverBuf)!)} fill="none" stroke={themeColors.profileHover} strokeOpacity={pickerHover ? 0.08 : 0.9} strokeWidth={2.4} strokeLinecap="round" pointerEvents="none" />
             )}
             {bufMarq?.ids.map((id) => {
               const l = lineById.get(id);
-              return l ? <path key={`bm${id}`} d={lineD(l)} fill="none" stroke="#ffffff" strokeOpacity={pickerHover ? 0.08 : 0.8} strokeWidth={2.2} strokeLinecap="round" /> : null;
+              return l ? <path key={`bm${id}`} d={lineD(l)} fill="none" stroke={themeColors.pathEditSelected} strokeOpacity={pickerHover ? 0.08 : 0.8} strokeWidth={2.2} strokeLinecap="round" /> : null;
             })}
             {/* هایلایت انتخاب با pathهای مرکب و glow سبکِ مبتنی بر stroke؛
                 از Gaussian blur پرهزینه برای تک‌تک Segmentها استفاده نمی‌شود. */}
@@ -5158,34 +5812,57 @@ const nv = verts.map((v) => {
                 {showPathBySpeed ? [...selectedSpeedPaths].map(([key, group]) => (
                   <path key={key} d={group.d} fill="none" stroke={group.color} strokeOpacity={pickerHover ? 0.08 : 1} strokeWidth={iso ? 1.1 : group.width} strokeLinecap="round" filter={disableSelectionGlow?undefined:"url(#curveGlow)"} pointerEvents="none" />
                 )) : [...selectedPathsByWidth].map(([width, d]) => (
-                  <path key={width} d={d} fill="none" stroke={guideLineColor} strokeOpacity={pickerHover ? 0.08 : 1} strokeWidth={iso ? 1.1 : width} strokeLinecap="round" filter={disableSelectionGlow?undefined:"url(#curveGlow)"} pointerEvents="none" />
+                  <path key={width} d={d} fill="none" stroke={themeColors.pathEditSelected} strokeOpacity={pickerHover ? 0.08 : 1} strokeWidth={iso ? 1.1 : width} strokeLinecap="round" filter={disableSelectionGlow?undefined:"url(#curveGlow)"} pointerEvents="none" />
                 ))}
               </>
             )}
-            {/* خط Active فقط با رنگ آبی روشن مشخص می‌شود؛ بدون Glow یا تغییر ضخامت. */}
+            {/* خط Active فقط با رنگ مسیر فعال مشخص می‌شود؛ بدون Glow یا تغییر ضخامت. */}
             {activeLinePath && (
-              <path d={activeLinePath} fill="none" stroke={guideLineColor} strokeOpacity={pickerHover ? 0.08 : 1} strokeWidth={activeLineStrokeWidth} strokeLinecap="round" pointerEvents="none" />
+              <path d={activeLinePath} fill="none" stroke={themeColors.pathEditSelected} strokeOpacity={pickerHover ? 0.08 : 1} strokeWidth={activeLineStrokeWidth} strokeLinecap="round" pointerEvents="none" />
             )}
             {/* پیش‌نمایش موقت انتخاب بازه‌ای؛ تا پیش از Shift+کلیک وارد تاریخچه نمی‌شود. */}
             {rangePreviewPath && (
               <>
-                <path d={rangePreviewPath} fill="none" stroke="#fff3dc" strokeOpacity={0.18} strokeWidth={10} strokeLinecap="round" pointerEvents="none" />
-                <path d={rangePreviewPath} fill="none" stroke="#fff3dc" strokeOpacity={0.82} strokeWidth={5.2} strokeLinecap="round" pointerEvents="none" />
+                <path d={rangePreviewPath} fill="none" stroke={themeColors.profileHover} strokeOpacity={0.18} strokeWidth={10} strokeLinecap="round" pointerEvents="none" />
+                <path d={rangePreviewPath} fill="none" stroke={themeColors.profileHover} strokeOpacity={0.82} strokeWidth={5.2} strokeLinecap="round" pointerEvents="none" />
               </>
             )}
-            {/* رأس‌های خطوط انتخابی — هر رأس یک نقطه (اشتراک‌ها هم‌مکان‌اند، دو‌تایی نمی‌شود) */}
-            {showPathPoints && [...selVids].map((vid) => {
-              const v = vz(vid);
-              const [x, y] = P(v.z, v.x / 2);
-              const on = selV.includes(vid);
-              const shared = (vertexLineCount.get(vid) ?? 0) > 1;
+            {/* رأس‌های خطوط انتخابی — ابتدا دایرهٔ پایهٔ همهٔ رأس‌ها و سپس دات داخلیِ رأس‌های فعال رسم می‌شود تا هم‌پوشانی هیچ داتی را نپوشاند */}
+            {showPathPoints && (() => {
+              const allVids = [...selVids];
+              const activeCoords = selV.map((id) => vz(id));
               return (
-                <g key={`bv${vid}`} opacity={pickerHover ? 0.1 : 1}>
-                  <circle className="pt-hover" cx={x} cy={y} r={5.5} fill={shared ? "#0f2a22" : "#120e09"} stroke="#45b394" strokeWidth={2.4} />
-                  {on && <circle cx={x} cy={y} r={2.1} fill="#45b394" pointerEvents="none" />}
-                </g>
+                <>
+                  {allVids.map((vid) => {
+                    const v = vz(vid);
+                    const [x, y] = P(v.z, v.x / 2);
+                    const shared = (vertexLineCount.get(vid) ?? 0) > 1;
+                    return (
+                      <g key={`bv${vid}`} opacity={pickerHover ? 0.1 : 1}>
+                        <circle className="pt-hover" cx={x} cy={y} r={5.5} fill={shared ? themeColors.pointFill : themeColors.pathEditBg} stroke={themeColors.pointRing} strokeWidth={2.4} />
+                      </g>
+                    );
+                  })}
+                  {allVids.map((vid) => {
+                    const v = vz(vid);
+                    const on = selV.includes(vid) || activeCoords.some((ac) => Math.hypot(ac.z - v.z, ac.x - v.x) < 1e-7);
+                    if (!on) return null;
+                    const [x, y] = P(v.z, v.x / 2);
+                    return (
+                      <circle
+                        key={`bvd${vid}`}
+                        cx={x}
+                        cy={y}
+                        r={2.1}
+                        fill={themeColors.pointRing}
+                        opacity={pickerHover ? 0.1 : 1}
+                        pointerEvents="none"
+                      />
+                    );
+                  })}
+                </>
               );
-            })}
+            })()}
           </g>
         )}
 
@@ -5201,28 +5878,28 @@ const nv = verts.map((v) => {
               return `${i ? "L" : "M"}${x},${y}`;
             }).join(" ");
             return <>
-              <path d={pathOf(divided.outer, true)} fill="none" stroke={split.swapped ? "#4cc9f0" : "#e3a94e"} strokeOpacity={0.28} strokeWidth={1.6} strokeLinecap="round" />
-              <path d={pathOf(divided.inner, true)} fill="none" stroke={split.swapped ? "#e3a94e" : "#4cc9f0"} strokeOpacity={0.28} strokeWidth={1.6} strokeLinecap="round" />
-              <path d={pathOf(divided.outer)} fill="none" stroke={split.swapped ? "#4cc9f0" : profileColor} strokeWidth={2.4} strokeLinecap="round" />
-              <path d={pathOf(divided.inner)} fill="none" stroke={split.swapped ? profileColor : "#4cc9f0"} strokeWidth={2.4} strokeLinecap="round" />
+              <path d={pathOf(divided.outer, true)} fill="none" stroke={split.swapped ? themeColors.profileInner : themeColors.profileOuter} strokeOpacity={0.28} strokeWidth={1.6} strokeLinecap="round" />
+              <path d={pathOf(divided.inner, true)} fill="none" stroke={split.swapped ? themeColors.profileOuter : themeColors.profileInner} strokeOpacity={0.28} strokeWidth={1.6} strokeLinecap="round" />
+              <path d={pathOf(divided.outer)} fill="none" stroke={split.swapped ? themeColors.profileInner : themeColors.profileOuter} strokeWidth={2.4} strokeLinecap="round" />
+              <path d={pathOf(divided.inner)} fill="none" stroke={split.swapped ? themeColors.profileOuter : themeColors.profileInner} strokeWidth={2.4} strokeLinecap="round" />
             </>;
           })()}
           {/* بدون Split، رنگ معمول هر المان استفاده می‌شود. */}
           {!split.enabled && segs.map((s) => {
             const mirrorDimmed = !!mirrorSession && !mirrorSession.keepCopy && mirrorSession.ids.includes(s.id);
-            return <path key={`m${s.id}`} d={segPath(s, cam, true)} fill="none" stroke={profileColor} strokeOpacity={mirrorDimmed ? 0.07 : 0.28} strokeWidth={1.6} strokeLinecap="round" />;
+            return <path key={`m${s.id}`} d={segPath(s, cam, true)} fill="none" stroke={themeColors.profileOuter} strokeOpacity={mirrorDimmed ? 0.07 : 0.28} strokeWidth={1.6} strokeLinecap="round" />;
           })}
           {segs.map((s) => {
             const sel = selected.includes(s.id);
             const hov = selPoints.length === 0 && hoverId === s.id;
             const mirrorDimmed = !!mirrorSession && !mirrorSession.keepCopy && mirrorSession.ids.includes(s.id);
-            const base = segSide.get(s.id) === "inner" ? "#4cc9f0" : profileColor;
+            const base = segSide.get(s.id) === "inner" ? themeColors.profileInner : themeColors.profileOuter;
             return (
               <path
                 key={s.id}
                 d={segPath(s, cam)}
                 fill="none"
-                stroke={sel ? selectedColor : hov ? "#fff3dc" : split.enabled ? "transparent" : base}
+                stroke={sel ? themeColors.profileSelected : hov ? themeColors.profileHover : split.enabled ? "transparent" : base}
                 strokeWidth={iso ? 2.4 : sel ? 3.2 : hov ? 3 : 2.4}
                 strokeOpacity={mirrorDimmed ? 0.2 : 1}
                 strokeLinecap="round"
@@ -5236,7 +5913,7 @@ const nv = verts.map((v) => {
             <path
               d={segPath(hoverSeg, cam)}
               fill="none"
-              stroke="#d95848"
+              stroke={themeColors.uiDanger}
               strokeOpacity={0.75}
               strokeWidth={1.2}
               strokeDasharray="4 4"
@@ -5245,45 +5922,65 @@ const nv = verts.map((v) => {
             />
           )}
 
-          {/* دسته‌ها و نقاط المان‌های انتخاب‌شده یا دارای نقطهٔ مستقلِ انتخاب‌شده */}
-          {(mirrorSession ? [] : handleSegs).map((s) => {
-            const [ax, ay] = P(s.a.z, s.a.r);
-            const [bx, by] = P(s.b.z, s.b.r);
-            const pointIsActive = (part: HandleRef["part"]) =>
+          {/* دسته‌ها و نقاط المان‌های انتخاب‌شده یا دارای نقطهٔ مستقلِ انتخاب‌شده:
+              ابتدا تمام حلقه‌های پایهٔ همهٔ المان‌ها و سپس دات داخلیِ نقاط انتخاب‌شده رسم می‌شود
+              تا در رأس‌های مشترک (مثل نقاط میانی پلی‌لاین) حلقهٔ ضلع بعدی دات داخل نقطه را نپوشاند. */}
+          {(() => {
+            const visibleHandleSegs = mirrorSession ? [] : handleSegs;
+            const pointIsActiveOn = (s: SketchSeg, part: HandleRef["part"]) =>
               selPoints.some((point) => point.segId === s.id && point.part === part) ||
               (drag.current?.mode === "handle" && drag.current.ref.segId === s.id && drag.current.ref.part === part);
-            const endpointIsActive=(part:"a"|"b")=>selectedEndpointCoords.some(point=>dist(s[part],point)<1e-8);
-            const whole=selected.includes(s.id),showA=whole||endpointIsActive("a"),showB=whole||endpointIsActive("b");
-            const showC1=whole||pointIsActive("c1")||endpointIsActive("a"),showC2=whole||pointIsActive("c2")||endpointIsActive("b");
-            const showVia=whole||pointIsActive("via");
+            const endpointIsActiveOn = (s: SketchSeg, part: "a" | "b") =>
+              pointIsActiveOn(s, part) ||
+              (!separated.has(handleKey(s.id, part)) && selectedEndpointCoords.some((point) => dist(s[part], point) < 1e-8));
             return (
-              <g key={`h${s.id}`}>
-                {s.c1 && dist(s.c1,s.a)>1e-8 && showC1 && (
-                  <>
-                    <line x1={ax} y1={ay} x2={P(s.c1.z, s.c1.r)[0]} y2={P(s.c1.z, s.c1.r)[1]} stroke="#6ab0d8" strokeWidth={1} strokeDasharray="3 3" />
-                    <circle className="pt-hover" cx={P(s.c1.z, s.c1.r)[0]} cy={P(s.c1.z, s.c1.r)[1]} r={5} fill="#1b2a33" stroke="#6ab0d8" strokeWidth={2} />
-                  </>
-                )}
-                {s.c2 && dist(s.c2,s.b)>1e-8 && showC2 && (
-                  <>
-                    <line x1={bx} y1={by} x2={P(s.c2.z, s.c2.r)[0]} y2={P(s.c2.z, s.c2.r)[1]} stroke="#6ab0d8" strokeWidth={1} strokeDasharray="3 3" />
-                    <circle className="pt-hover" cx={P(s.c2.z, s.c2.r)[0]} cy={P(s.c2.z, s.c2.r)[1]} r={5} fill="#1b2a33" stroke="#6ab0d8" strokeWidth={2} />
-                  </>
-                )}
-                {s.via && showVia && (
-                  <circle className="pt-hover" cx={P(s.via.z, s.via.r)[0]} cy={P(s.via.z, s.via.r)[1]} r={5} fill="#2b1f33" stroke="#b48ee0" strokeWidth={2} />
-                )}
-                {showA&&<circle className="pt-hover" cx={ax} cy={ay} r={5.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2.4} />}
-                {showB&&<circle className="pt-hover" cx={bx} cy={by} r={5.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2.4} />}
-                {/* نقطه فعال داخل Handle و روی همه لایه‌های پایه رسم می‌شود. */}
-                {s.c1 && pointIsActive("c1") && <circle cx={P(s.c1.z, s.c1.r)[0]} cy={P(s.c1.z, s.c1.r)[1]} r={2.1} fill="#6ab0d8" pointerEvents="none" />}
-                {s.c2 && pointIsActive("c2") && <circle cx={P(s.c2.z, s.c2.r)[0]} cy={P(s.c2.z, s.c2.r)[1]} r={2.1} fill="#6ab0d8" pointerEvents="none" />}
-                {s.via && pointIsActive("via") && <circle cx={P(s.via.z, s.via.r)[0]} cy={P(s.via.z, s.via.r)[1]} r={2.1} fill="#b48ee0" pointerEvents="none" />}
-                {pointIsActive("a") && <circle cx={ax} cy={ay} r={2.1} fill="#45b394" pointerEvents="none" />}
-                {pointIsActive("b") && <circle cx={bx} cy={by} r={2.1} fill="#45b394" pointerEvents="none" />}
-              </g>
+              <>
+                {visibleHandleSegs.map((s) => {
+                  const [ax, ay] = P(s.a.z, s.a.r);
+                  const [bx, by] = P(s.b.z, s.b.r);
+                  const activeA = endpointIsActiveOn(s, "a");
+                  const activeB = endpointIsActiveOn(s, "b");
+                  const whole = selected.includes(s.id), showA = whole || activeA, showB = whole || activeB;
+                  const showC1 = whole || pointIsActiveOn(s, "c1") || activeA, showC2 = whole || pointIsActiveOn(s, "c2") || activeB;
+                  const showVia = whole || pointIsActiveOn(s, "via");
+                  return (
+                    <g key={`h${s.id}`}>
+                      {s.c1 && dist(s.c1, s.a) > 1e-8 && showC1 && (
+                        <>
+                          <line x1={ax} y1={ay} x2={P(s.c1.z, s.c1.r)[0]} y2={P(s.c1.z, s.c1.r)[1]} stroke={themeColors.controlHandle} strokeWidth={1} strokeDasharray="3 3" />
+                          <circle className="pt-hover" cx={P(s.c1.z, s.c1.r)[0]} cy={P(s.c1.z, s.c1.r)[1]} r={5} fill={shadeHex(themeColors.controlHandle, -0.68)} stroke={themeColors.controlHandle} strokeWidth={2} />
+                        </>
+                      )}
+                      {s.c2 && dist(s.c2, s.b) > 1e-8 && showC2 && (
+                        <>
+                          <line x1={bx} y1={by} x2={P(s.c2.z, s.c2.r)[0]} y2={P(s.c2.z, s.c2.r)[1]} stroke={themeColors.controlHandle} strokeWidth={1} strokeDasharray="3 3" />
+                          <circle className="pt-hover" cx={P(s.c2.z, s.c2.r)[0]} cy={P(s.c2.z, s.c2.r)[1]} r={5} fill={shadeHex(themeColors.controlHandle, -0.68)} stroke={themeColors.controlHandle} strokeWidth={2} />
+                        </>
+                      )}
+                      {s.via && showVia && (
+                        <circle className="pt-hover" cx={P(s.via.z, s.via.r)[0]} cy={P(s.via.z, s.via.r)[1]} r={5} fill={shadeHex(themeColors.arcViaPoint, -0.68)} stroke={themeColors.arcViaPoint} strokeWidth={2} />
+                      )}
+                      {showA && <circle className="pt-hover" cx={ax} cy={ay} r={5.5} fill={themeColors.pointFill} stroke={themeColors.pointRing} strokeWidth={2.4} />}
+                      {showB && <circle className="pt-hover" cx={bx} cy={by} r={5.5} fill={themeColors.pointFill} stroke={themeColors.pointRing} strokeWidth={2.4} />}
+                    </g>
+                  );
+                })}
+                {visibleHandleSegs.map((s) => {
+                  const [ax, ay] = P(s.a.z, s.a.r);
+                  const [bx, by] = P(s.b.z, s.b.r);
+                  return (
+                    <g key={`hd${s.id}`} pointerEvents="none">
+                      {s.c1 && dist(s.c1, s.a) > 1e-8 && pointIsActiveOn(s, "c1") && <circle cx={P(s.c1.z, s.c1.r)[0]} cy={P(s.c1.z, s.c1.r)[1]} r={2.1} fill={themeColors.controlHandle} />}
+                      {s.c2 && dist(s.c2, s.b) > 1e-8 && pointIsActiveOn(s, "c2") && <circle cx={P(s.c2.z, s.c2.r)[0]} cy={P(s.c2.z, s.c2.r)[1]} r={2.1} fill={themeColors.controlHandle} />}
+                      {s.via && pointIsActiveOn(s, "via") && <circle cx={P(s.via.z, s.via.r)[0]} cy={P(s.via.z, s.via.r)[1]} r={2.1} fill={themeColors.arcViaPoint} />}
+                      {endpointIsActiveOn(s, "a") && <circle cx={ax} cy={ay} r={2.1} fill={themeColors.pointRing} />}
+                      {endpointIsActiveOn(s, "b") && <circle cx={bx} cy={by} r={2.1} fill={themeColors.pointRing} />}
+                    </g>
+                  );
+                })}
+              </>
             );
-          })}
+          })()}
 
         </g>
 
@@ -5291,33 +5988,33 @@ const nv = verts.map((v) => {
         {previewSeg && (
           <g>
             {tool==="paint"&&draft.length>1
-              ? draft.slice(1).map((point,index)=><line key={index} x1={P(draft[index].z,draft[index].r)[0]} y1={P(draft[index].z,draft[index].r)[1]} x2={P(point.z,point.r)[0]} y2={P(point.z,point.r)[1]} stroke="#ef4444" strokeWidth={profileLineWidth} markerEnd="url(#paintPreviewArrow)" pointerEvents="none" />)
-              : tool==="polyline"&&draft.length>1&&<path d={draft.map((point,index)=>`${index?"L":"M"}${P(point.z,point.r)[0]},${P(point.z,point.r)[1]}`).join(" ")} fill="none" stroke="#45b394" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
+              ? draft.slice(1).map((point,index)=><line key={index} x1={P(draft[index].z,draft[index].r)[0]} y1={P(draft[index].z,draft[index].r)[1]} x2={P(point.z,point.r)[0]} y2={P(point.z,point.r)[1]} stroke={themeColors.paintArrow} strokeWidth={profileLineWidth} markerEnd="url(#paintPreviewArrow)" pointerEvents="none" />)
+              : tool==="polyline"&&draft.length>1&&<path d={draft.map((point,index)=>`${index?"L":"M"}${P(point.z,point.r)[0]},${P(point.z,point.r)[1]}`).join(" ")} fill="none" stroke={themeColors.profileSelected} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
             }
             {tool==="paint" ? (
-              <path d={segPath(previewSeg,cam)} fill="none" stroke="#ef4444" strokeWidth={profileLineWidth} markerEnd="url(#paintPreviewArrow)" pointerEvents="none" />
+              <path d={segPath(previewSeg,cam)} fill="none" stroke={themeColors.paintArrow} strokeWidth={profileLineWidth} markerEnd="url(#paintPreviewArrow)" pointerEvents="none" />
             ) : straightDrawing && measuredLineEnd && lineCursor ? (
               <>
-                <path d={segPath(previewSeg, cam)} fill="none" stroke="#45b394" strokeWidth={2.2} strokeLinecap="round" opacity={0.95} />
-                <circle cx={P(measuredLineEnd.z, measuredLineEnd.r)[0]} cy={P(measuredLineEnd.z, measuredLineEnd.r)[1]} r={4.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2} pointerEvents="none" />
-                <line x1={P(measuredLineEnd.z, measuredLineEnd.r)[0]} y1={P(measuredLineEnd.z, measuredLineEnd.r)[1]} x2={P(lineCursor.z,lineCursor.r)[0]} y2={P(lineCursor.z,lineCursor.r)[1]} stroke="#6ab0d8" strokeWidth={1.5} strokeDasharray="5 4" strokeLinecap="round" pointerEvents="none" />
+                <path d={segPath(previewSeg, cam)} fill="none" stroke={themeColors.profileSelected} strokeWidth={2.2} strokeLinecap="round" opacity={0.95} />
+                <circle cx={P(measuredLineEnd.z, measuredLineEnd.r)[0]} cy={P(measuredLineEnd.z, measuredLineEnd.r)[1]} r={4.5} fill={themeColors.pointFill} stroke={themeColors.pointRing} strokeWidth={2} pointerEvents="none" />
+                <line x1={P(measuredLineEnd.z, measuredLineEnd.r)[0]} y1={P(measuredLineEnd.z, measuredLineEnd.r)[1]} x2={P(lineCursor.z,lineCursor.r)[0]} y2={P(lineCursor.z,lineCursor.r)[1]} stroke={themeColors.controlHandle} strokeWidth={1.5} strokeDasharray="5 4" strokeLinecap="round" pointerEvents="none" />
               </>
-            ) : <path d={segPath(previewSeg,cam)} fill="none" stroke="#45b394" strokeWidth={2.2} strokeDasharray="6 4" strokeLinecap="round" opacity={0.95} />}
+            ) : <path d={segPath(previewSeg,cam)} fill="none" stroke={themeColors.profileSelected} strokeWidth={2.2} strokeDasharray="6 4" strokeLinecap="round" opacity={0.95} />}
             {previewSeg.kind === "cubic" && previewSeg.c1 && previewSeg.c2 ? (
               <>
                 {/* خطوط اتصال دسته‌ها به نقاط انتهایی */}
-                <line x1={P(previewSeg.a.z, previewSeg.a.r)[0]} y1={P(previewSeg.a.z, previewSeg.a.r)[1]} x2={P(previewSeg.c1.z, previewSeg.c1.r)[0]} y2={P(previewSeg.c1.z, previewSeg.c1.r)[1]} stroke="#6ab0d8" strokeWidth={1.2} strokeDasharray="3 3" />
-                <line x1={P(previewSeg.b.z, previewSeg.b.r)[0]} y1={P(previewSeg.b.z, previewSeg.b.r)[1]} x2={P(previewSeg.c2.z, previewSeg.c2.r)[0]} y2={P(previewSeg.c2.z, previewSeg.c2.r)[1]} stroke="#6ab0d8" strokeWidth={1.2} strokeDasharray="3 3" />
+                <line x1={P(previewSeg.a.z, previewSeg.a.r)[0]} y1={P(previewSeg.a.z, previewSeg.a.r)[1]} x2={P(previewSeg.c1.z, previewSeg.c1.r)[0]} y2={P(previewSeg.c1.z, previewSeg.c1.r)[1]} stroke={themeColors.controlHandle} strokeWidth={1.2} strokeDasharray="3 3" />
+                <line x1={P(previewSeg.b.z, previewSeg.b.r)[0]} y1={P(previewSeg.b.z, previewSeg.b.r)[1]} x2={P(previewSeg.c2.z, previewSeg.c2.r)[0]} y2={P(previewSeg.c2.z, previewSeg.c2.r)[1]} stroke={themeColors.controlHandle} strokeWidth={1.2} strokeDasharray="3 3" />
                 {/* نقاط شروع و پایان */}
-                <circle cx={P(previewSeg.a.z, previewSeg.a.r)[0]} cy={P(previewSeg.a.z, previewSeg.a.r)[1]} r={4.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2} />
-                <circle cx={P(previewSeg.b.z, previewSeg.b.r)[0]} cy={P(previewSeg.b.z, previewSeg.b.r)[1]} r={4.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2} />
+                <circle cx={P(previewSeg.a.z, previewSeg.a.r)[0]} cy={P(previewSeg.a.z, previewSeg.a.r)[1]} r={4.5} fill={themeColors.pointFill} stroke={themeColors.pointRing} strokeWidth={2} />
+                <circle cx={P(previewSeg.b.z, previewSeg.b.r)[0]} cy={P(previewSeg.b.z, previewSeg.b.r)[1]} r={4.5} fill={themeColors.pointFill} stroke={themeColors.pointRing} strokeWidth={2} />
                 {/* دستهٔ در حال تنظیم برجسته‌تر: ابتدا c2 (پایان)، سپس c1 (شروع) */}
-                <circle cx={P(previewSeg.c1.z, previewSeg.c1.r)[0]} cy={P(previewSeg.c1.z, previewSeg.c1.r)[1]} r={draftSecondSet.current ? 6 : 4} fill="#1b2a33" stroke={draftSecondSet.current ? "#f3c26b" : "#6ab0d8"} strokeWidth={2} />
-                <circle cx={P(previewSeg.c2.z, previewSeg.c2.r)[0]} cy={P(previewSeg.c2.z, previewSeg.c2.r)[1]} r={!draftSecondSet.current ? 6 : 4} fill="#1b2a33" stroke={!draftSecondSet.current ? "#f3c26b" : "#6ab0d8"} strokeWidth={2} />
+                <circle cx={P(previewSeg.c1.z, previewSeg.c1.r)[0]} cy={P(previewSeg.c1.z, previewSeg.c1.r)[1]} r={draftSecondSet.current ? 6 : 4} fill={shadeHex(themeColors.controlHandle, -0.68)} stroke={draftSecondSet.current ? themeColors.uiAccent2 : themeColors.controlHandle} strokeWidth={2} />
+                <circle cx={P(previewSeg.c2.z, previewSeg.c2.r)[0]} cy={P(previewSeg.c2.z, previewSeg.c2.r)[1]} r={!draftSecondSet.current ? 6 : 4} fill={shadeHex(themeColors.controlHandle, -0.68)} stroke={!draftSecondSet.current ? themeColors.uiAccent2 : themeColors.controlHandle} strokeWidth={2} />
               </>
             ) : tool!=="paint" ? (
               draft.map((p, i) => (
-                <circle key={i} cx={P(p.z, p.r)[0]} cy={P(p.z, p.r)[1]} r={4.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2} />
+                <circle key={i} cx={P(p.z, p.r)[0]} cy={P(p.z, p.r)[1]} r={4.5} fill={themeColors.pointFill} stroke={themeColors.pointRing} strokeWidth={2} />
               ))
             ) : null}
           </g>
@@ -5326,7 +6023,7 @@ const nv = verts.map((v) => {
             صورت در موقعیت شروع Drag باقی می‌ماند و با خود هندسه اشتباه می‌شود. */}
         {tool !== "paint" && tool !== "select" && tool !== "move" && tool !== "rotate" && tool !== "copy" && tool !== "mirror" && tool !== "scale" && tool !== "boxscale" && cursor && drag.current?.mode !== "handle" &&
           !(straightDrawing && measuredLineEnd) && (
-          <circle cx={P(cursor.z, cursor.r)[0]} cy={P(cursor.z, cursor.r)[1]} r={4} fill="none" stroke="#45b394" strokeWidth={1.6} />
+          <circle cx={P(cursor.z, cursor.r)[0]} cy={P(cursor.z, cursor.r)[1]} r={4} fill="none" stroke={themeColors.pointRing} strokeWidth={1.6} />
         )}
 
         {/* نشانگر اسنپ */}
@@ -5384,8 +6081,8 @@ const nv = verts.map((v) => {
               width={8}
               height={8}
               transform={`rotate(45 ${x} ${y})`}
-              fill="#168cff"
-              stroke="#120e09"
+              fill={themeColors.splitMirrorPoint}
+              stroke={editOpen ? themeColors.pathEditBg : themeColors.editorBg}
               strokeWidth={1.2}
             />
             <circle cx={x} cy={y} r={1.25} fill="#ffffff" />
@@ -5393,20 +6090,20 @@ const nv = verts.map((v) => {
         })()}
 
         {/* نقطه Split */}
-        {split.enabled && (
-          <g>
+        {shownSplitPoint && (
+          <g pointerEvents={tool === "select" || tool === "move" ? undefined : "none"}>
             {(() => {
-              const [x, y] = P(split.z, split.r);
+              const [x, y] = P(shownSplitPoint.z, shownSplitPoint.r);
               return (
-                <g style={{ cursor: "pointer" }}>
+                <g style={tool === "select" || tool === "move" ? { cursor: "pointer" } : undefined}>
                   {(splitSelected || splitHovered || marqueeSplitHit) && (
                     <circle
                       cx={x}
                       cy={y}
                       r={splitSelected ? 8 : 7}
-                      fill={marqueeSplitHit ? "#4aa3ff" : "#f72585"}
+                      fill={marqueeSplitHit ? themeColors.marqueeWindow : themeColors.splitPoint}
                       fillOpacity={splitSelected ? 0.2 : 0.12}
-                      stroke={splitSelected ? "#fff3dc" : marqueeSplitHit ? "#8fc5ff" : "#ff84bc"}
+                      stroke={splitSelected ? themeColors.profileHover : marqueeSplitHit ? shadeHex(themeColors.marqueeWindow, 0.35) : shadeHex(themeColors.splitPoint, 0.35)}
                       strokeWidth={splitSelected ? 1.6 : 1}
                     />
                   )}
@@ -5416,8 +6113,8 @@ const nv = verts.map((v) => {
                     width={8}
                     height={8}
                     transform={`rotate(45 ${x} ${y})`}
-                    fill={splitSelected ? "#ffd27a" : splitHovered ? "#ff5ba6" : "#f72585"}
-                    stroke="#120e09"
+                    fill={splitSelected ? themeColors.uiAccent2 : splitHovered ? shadeHex(themeColors.splitPoint, 0.22) : themeColors.splitPoint}
+                    stroke={editOpen ? themeColors.pathEditBg : themeColors.editorBg}
                     strokeWidth={1.2}
                   />
                   <circle cx={x} cy={y} r={1.25} fill="#ffffff" />
@@ -5437,7 +6134,7 @@ const nv = verts.map((v) => {
                 key={`pv-${id}`}
                 d={segPath(s, cam)}
                 fill="none"
-                stroke={marquee.remove ? "#d95848" : marquee.x1 >= marquee.x0 ? "#4aa3ff" : "#3faf5d"}
+                stroke={marquee.remove ? themeColors.uiDanger : marquee.x1 >= marquee.x0 ? themeColors.marqueeWindow : themeColors.marqueeCrossing}
                 strokeWidth={4.5}
                 strokeLinecap="round"
                 strokeDasharray={marquee.remove ? "7 4" : undefined}
@@ -5453,7 +6150,7 @@ const nv = verts.map((v) => {
             const pt = s ? s[ph.part] : null;
             if (!s || !pt) return null;
             const [x, y] = P(pt.z, pt.r);
-            const c = marquee.remove ? "#d95848" : "#ffd27a";
+            const c = marquee.remove ? themeColors.uiDanger : themeColors.uiAccent2;
             return (
               <g key={`pvp-${i}`} pointerEvents="none">
                 <circle cx={x} cy={y} r={8.5} fill="none" stroke={c} strokeWidth={1.8} strokeDasharray="3 2.5" opacity={0.9} />
@@ -5467,15 +6164,15 @@ const nv = verts.map((v) => {
           <g>
             {(() => {
               const crossing = marquee.x1 < marquee.x0;
-              const c = crossing ? "#3faf5d" : "#4aa3ff";
+              const c = crossing ? themeColors.marqueeCrossing : themeColors.marqueeWindow;
               const x = Math.min(marquee.x0, marquee.x1);
               const y = Math.min(marquee.y0, marquee.y1);
               const w = Math.abs(marquee.x1 - marquee.x0);
               const h = Math.abs(marquee.y1 - marquee.y0);
               return (
                 <>
-                  <rect x={x} y={y} width={w} height={h} fill={crossing ? "rgba(63,175,93,0.10)" : "rgba(74,163,255,0.10)"} stroke={c} strokeWidth={1.4} strokeDasharray={crossing ? "6 3" : undefined} />
-                  <text x={x + 6} y={y - 7} fontSize={10.5} fontFamily="Vazirmatn, sans-serif" fontWeight={700} fill={c} stroke="#120e09" strokeWidth={3} paintOrder="stroke">
+                  <rect x={x} y={y} width={w} height={h} fill={rgbaCss(c, 0.11)} stroke={c} strokeWidth={1.4} strokeDasharray={crossing ? "6 3" : undefined} />
+                  <text x={x + 6} y={y - 7} fontSize={10.5} fontFamily="Vazirmatn, sans-serif" fontWeight={700} fill={c} stroke={editOpen ? themeColors.pathEditBg : themeColors.editorBg} strokeWidth={3} paintOrder="stroke">
                     {crossing ? "متقاطع" : "پنجره‌ای"} • {editOpen ? (bufMarq?.ids.length ?? 0) : marqueeHits.length} المان، {editOpen ? (bufMarq?.vxs.length ?? 0) : marqueePointHits.length + (marqueeSplitHit ? 1 : 0)} نقطه
                     {marquee.remove ? " − حذف" : marquee.add ? " + افزودن" : ""}
                   </text>
@@ -5488,31 +6185,31 @@ const nv = verts.map((v) => {
         {/* پیش‌نمایش Fillet: خطوط Trim‌شده و Arc مماس پیش از Enter */}
         {tool === "fillet" && filletCalc?.result && (
           <g pointerEvents="none" filter="url(#curveGlow)">
-            <path d={segPath(filletCalc.result.first, cam)} fill="none" stroke="#ffd166" strokeWidth={3} strokeDasharray="7 3" />
-            <path d={segPath(filletCalc.result.second, cam)} fill="none" stroke="#ffd166" strokeWidth={3} strokeDasharray="7 3" />
-            <path d={segPath(filletCalc.result.arc, cam)} fill="none" stroke="#28dfc2" strokeWidth={3.5} />
+            <path d={segPath(filletCalc.result.first, cam)} fill="none" stroke={themeColors.uiAccent2} strokeWidth={3} strokeDasharray="7 3" />
+            <path d={segPath(filletCalc.result.second, cam)} fill="none" stroke={themeColors.uiAccent2} strokeWidth={3} strokeDasharray="7 3" />
+            <path d={segPath(filletCalc.result.arc, cam)} fill="none" stroke={themeColors.transformGuide} strokeWidth={3.5} />
           </g>
         )}
 
         {rotateSession && <g pointerEvents="none">
           {rotateGhost && rotateSession.base.filter(s=>rotateSession.ids.includes(s.id)).map(s=><path key={`rotate-ghost-${s.id}`} d={segPath(s,cam)} fill="none" stroke="#28dfc2" strokeWidth={2} opacity={.25}/>)}
-          <line x1={P(rotateSession.center.z,rotateSession.center.r)[0]} y1={P(rotateSession.center.z,rotateSession.center.r)[1]} x2={P(rotateSession.pointer.z,rotateSession.pointer.r)[0]} y2={P(rotateSession.pointer.z,rotateSession.pointer.r)[1]} stroke="#28dfc2" strokeWidth={1.2} strokeDasharray="5 4"/>
-          <circle cx={P(rotateSession.center.z,rotateSession.center.r)[0]} cy={P(rotateSession.center.z,rotateSession.center.r)[1]} r={4} fill="#071018" stroke="#28dfc2" strokeWidth={1.5}/>
+          <line x1={P(rotateSession.center.z,rotateSession.center.r)[0]} y1={P(rotateSession.center.z,rotateSession.center.r)[1]} x2={P(rotateSession.pointer.z,rotateSession.pointer.r)[0]} y2={P(rotateSession.pointer.z,rotateSession.pointer.r)[1]} stroke={themeColors.transformGuide} strokeWidth={1.2} strokeDasharray="5 4"/>
+          <circle cx={P(rotateSession.center.z,rotateSession.center.r)[0]} cy={P(rotateSession.center.z,rotateSession.center.r)[1]} r={4} fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth={1.5}/>
         </g>}
 
         {tool === "boxscale" && boxScaleGhost && boxRotateSession && (
-          <g pointerEvents="none" opacity={0.25}>{boxRotateSession.base.filter(s=>boxRotateSession.ids.includes(s.id)).map(s=><path key={`box-rotate-ghost-${s.id}`} d={segPath(s,cam)} fill="none" stroke="#28dfc2" strokeWidth={2}/>)}</g>
+          <g pointerEvents="none" opacity={0.25}>{boxRotateSession.base.filter(s=>boxRotateSession.ids.includes(s.id)).map(s=><path key={`box-rotate-ghost-${s.id}`} d={segPath(s,cam)} fill="none" stroke={themeColors.transformGuide} strokeWidth={2}/>)}</g>
         )}
 
         {tool === "boxscale" && boxScaleGhost && boxScaleDrag.current && (
           <g pointerEvents="none" opacity={0.25}>
             {boxScaleDrag.current.base.filter((s) => boxScaleDrag.current!.ids.includes(s.id)).map((s) => (
-              <path key={`box-scale-drag-ghost-${s.id}`} d={segPath(s, cam)} fill="none" stroke="#28dfc2" strokeWidth={2} />
+              <path key={`box-scale-drag-ghost-${s.id}`} d={segPath(s, cam)} fill="none" stroke={themeColors.transformGuide} strokeWidth={2} />
             ))}
             {(() => {
               const gb=boxScaleDrag.current!.bounds;
               const [gx0,gyTop]=P(gb.minZ,gb.maxR), [gx1,gyBottom]=P(gb.maxZ,gb.minR);
-              return <rect x={gx0} y={gyTop} width={gx1-gx0} height={gyBottom-gyTop} fill="none" stroke="#28dfc2" strokeWidth={1.1} strokeDasharray="5 4" />;
+              return <rect x={gx0} y={gyTop} width={gx1-gx0} height={gyBottom-gyTop} fill="none" stroke={themeColors.transformGuide} strokeWidth={1.1} strokeDasharray="5 4" />;
             })()}
           </g>
         )}
@@ -5520,12 +6217,12 @@ const nv = verts.map((v) => {
         {tool === "boxscale" && boxScaleGhost && boxScaleNumericBase.current && (boxScaleWidthText != null || boxScaleHeightText != null) && (
           <g pointerEvents="none" opacity={0.25}>
             {boxScaleNumericBase.current.segs.filter((s) => selected.includes(s.id)).map((s) => (
-              <path key={`box-scale-ghost-${s.id}`} d={segPath(s, cam)} fill="none" stroke="#28dfc2" strokeWidth={2} />
+              <path key={`box-scale-ghost-${s.id}`} d={segPath(s, cam)} fill="none" stroke={themeColors.transformGuide} strokeWidth={2} />
             ))}
             {(() => {
               const gb=boxScaleNumericBase.current!.bounds;
               const [gx0,gyTop]=P(gb.minZ,gb.maxR), [gx1,gyBottom]=P(gb.maxZ,gb.minR);
-              return <rect x={gx0} y={gyTop} width={gx1-gx0} height={gyBottom-gyTop} fill="none" stroke="#28dfc2" strokeWidth={1.1} strokeDasharray="5 4" />;
+              return <rect x={gx0} y={gyTop} width={gx1-gx0} height={gyBottom-gyTop} fill="none" stroke={themeColors.transformGuide} strokeWidth={1.1} strokeDasharray="5 4" />;
             })()}
           </g>
         )}
@@ -5536,10 +6233,10 @@ const nv = verts.map((v) => {
           const b = boxScaleBounds; const [x0,yTop]=P(b.minZ,b.maxR), [x1,yBottom]=P(b.maxZ,b.minR);
           const handles = [{h:"nw",x:x0,y:yTop},{h:"n",x:(x0+x1)/2,y:yTop},{h:"ne",x:x1,y:yTop},{h:"e",x:x1,y:(yTop+yBottom)/2},{h:"se",x:x1,y:yBottom},{h:"s",x:(x0+x1)/2,y:yBottom},{h:"sw",x:x0,y:yBottom},{h:"w",x:x0,y:(yTop+yBottom)/2}];
           return <g pointerEvents="all">
-            <rect x={x0} y={yTop} width={x1-x0} height={yBottom-yTop} fill="none" stroke="#28dfc2" strokeWidth={1.2} strokeDasharray="5 4" />
-            {handles.map(({h,x,y})=><rect key={h} x={x-4} y={y-4} width={8} height={8} rx={1} fill="#071018" stroke="#28dfc2" strokeWidth={1.5} style={{cursor:`${h}-resize`}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation(); svgRef.current?.setPointerCapture?.(e.pointerId); boxScaleLastHandle.current=h; boxScaleDrag.current={handle:h,base:segs.map(s=>({...s})),ids:[...selected],bounds:{...b}};}} />)}
-            {[{x:x0-7,y:yTop-7},{x:x1+7,y:yTop-7},{x:x1+7,y:yBottom+7},{x:x0-7,y:yBottom+7}].map((p,i)=><circle key={`rh-${i}`} cx={p.x} cy={p.y} r={5} fill="transparent" stroke="none" style={{cursor:BOX_ROTATE_CURSORS[i]}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation();svgRef.current?.setPointerCapture?.(e.pointerId);const pivot=boxScalePivot??{z:(b.minZ+b.maxZ)/2,r:(b.minR+b.maxR)/2};const w=toWorld(e.clientX,e.clientY);const session={base:segs.map(s=>({...s})),ids:[...selected],pivot,angle:0};boxRotateDrag.current={...session,startAngle:Math.atan2(w.r-pivot.r,w.z-pivot.z)};setBoxRotateSession(session);const rect=wrapRef.current!.getBoundingClientRect();setBoxRotateBox({x:e.clientX-rect.left+12,y:e.clientY-rect.top-48,value:"",error:""});}}/>)}
-            {(()=>{const pivot=boxScalePivot??{z:(b.minZ+b.maxZ)/2,r:(b.minR+b.maxR)/2};const [px,py]=P(pivot.z,pivot.r);return <g style={{cursor:"move"}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation();svgRef.current?.setPointerCapture?.(e.pointerId);boxPivotDrag.current=true;}}><circle cx={px} cy={py} r={9} fill="transparent"/><path d={`M${px-6} ${py}H${px+6}M${px} ${py-6}V${py+6}`} stroke="#28dfc2" strokeWidth={1.8}/></g>;})()}
+            <rect x={x0} y={yTop} width={x1-x0} height={yBottom-yTop} fill="none" stroke={themeColors.transformGuide} strokeWidth={1.2} strokeDasharray="5 4" />
+            {handles.map(({h,x,y})=><rect key={h} x={x-4} y={y-4} width={8} height={8} rx={1} fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth={1.5} style={{cursor:`${h}-resize`}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation(); if(boxRotateSession){onSegs(segs,true);setBoxRotateSession(null);setBoxRotateBox(null);} svgRef.current?.setPointerCapture?.(e.pointerId); boxScaleLastHandle.current=h; boxScaleDrag.current={handle:h,base:segs.map(s=>({...s})),ids:[...selected],bounds:{...b}};}} />)}
+            {[{x:x0-7,y:yTop-7},{x:x1+7,y:yTop-7},{x:x1+7,y:yBottom+7},{x:x0-7,y:yBottom+7}].map((p,i)=><circle key={`rh-${i}`} cx={p.x} cy={p.y} r={5} fill="transparent" stroke="none" style={{cursor:BOX_ROTATE_CURSORS[i]}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation();if(boxRotateSession){onSegs(segs,true);}svgRef.current?.setPointerCapture?.(e.pointerId);const pivot=boxScalePivot??{z:(b.minZ+b.maxZ)/2,r:(b.minR+b.maxR)/2};const w=toWorld(e.clientX,e.clientY);const session={base:segs.map(s=>({...s})),ids:[...selected],pivot,angle:0};boxRotateDrag.current={...session,startAngle:Math.atan2(w.r-pivot.r,w.z-pivot.z)};setBoxRotateSession(session);const rect=wrapRef.current!.getBoundingClientRect();setBoxRotateBox({x:e.clientX-rect.left+12,y:e.clientY-rect.top-48,value:"",error:""});}}/>)}
+            {(()=>{const pivot=boxScalePivot??{z:(b.minZ+b.maxZ)/2,r:(b.minR+b.maxR)/2};const [px,py]=P(pivot.z,pivot.r);return <g style={{cursor:"move"}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation();svgRef.current?.setPointerCapture?.(e.pointerId);boxPivotDrag.current=true;}}><circle cx={px} cy={py} r={9} fill="transparent"/><path d={`M${px-6} ${py}H${px+6}M${px} ${py-6}V${py+6}`} stroke={themeColors.transformGuide} strokeWidth={1.8}/></g>;})()}
           </g>;
         })()}
 
@@ -5559,11 +6256,11 @@ const nv = verts.map((v) => {
           const [x2, y2] = P(pointer.z, pointer.r);
           return (
             <g pointerEvents="none">
-              <line x1={x1} y1={y1} x2={xc} y2={yc} stroke="#28dfc2" strokeWidth={1.2} strokeDasharray="5 4" opacity={0.95} />
+              <line x1={x1} y1={y1} x2={xc} y2={yc} stroke={themeColors.transformGuide} strokeWidth={1.2} strokeDasharray="5 4" opacity={0.95} />
               {entered != null && entered > 0 && fullLength > entered && (
-                <line x1={xc} y1={yc} x2={x2} y2={y2} stroke="#28dfc2" strokeWidth={1.2} strokeDasharray="5 4" opacity={0.25} />
+                <line x1={xc} y1={yc} x2={x2} y2={y2} stroke={themeColors.transformGuide} strokeWidth={1.2} strokeDasharray="5 4" opacity={0.25} />
               )}
-              <circle cx={x1} cy={y1} r={3} fill="#071018" stroke="#28dfc2" strokeWidth={1.3} />
+              <circle cx={x1} cy={y1} r={3} fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth={1.3} />
             </g>
           );
         })()}
@@ -5574,12 +6271,12 @@ const nv = verts.map((v) => {
           const [x2, y2] = P(mirrorSession.cursor!.z, mirrorSession.cursor!.r);
           const horizontal = Math.abs(mirrorSession.cursor!.r - mirrorSession.p1!.r) < 1e-9;
           const vertical = Math.abs(mirrorSession.cursor!.z - mirrorSession.p1!.z) < 1e-9;
-          const guideColor = horizontal ? "#754052" : vertical ? "#3b7373" : "#28dfc2";
+          const guideColor = horizontal ? themeColors.pathEditAxisX : vertical ? themeColors.pathEditAxisY : themeColors.transformGuide;
           return (
             <g pointerEvents="none">
               <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={guideColor} strokeWidth={1.2} strokeDasharray="5 4" opacity={0.95} />
-              <circle cx={x1} cy={y1} r={3} fill="#071018" stroke={guideColor} strokeWidth={1.3} />
-              <circle cx={x2} cy={y2} r={3} fill="#071018" stroke={guideColor} strokeWidth={1.3} />
+              <circle cx={x1} cy={y1} r={3} fill={themeColors.editorBg} stroke={guideColor} strokeWidth={1.3} />
+              <circle cx={x2} cy={y2} r={3} fill={themeColors.editorBg} stroke={guideColor} strokeWidth={1.3} />
             </g>
           );
         })()}
@@ -5588,11 +6285,11 @@ const nv = verts.map((v) => {
         {copySession && (() => {
           const [x1, y1] = P(copySession.origin.z, copySession.origin.r);
           const [x2, y2] = P(copySession.pointer.z, copySession.pointer.r);
-          const guideColor = copySession.axis === "x" ? "#754052" : copySession.axis === "y" ? "#3b7373" : "#28dfc2";
+          const guideColor = copySession.axis === "x" ? themeColors.pathEditAxisX : copySession.axis === "y" ? themeColors.pathEditAxisY : themeColors.transformGuide;
           return (
             <g pointerEvents="none">
               <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={guideColor} strokeWidth={1.2} strokeDasharray="5 4" opacity={0.95} />
-              <circle cx={x1} cy={y1} r={3} fill="#071018" stroke={guideColor} strokeWidth={1.3} />
+              <circle cx={x1} cy={y1} r={3} fill={themeColors.editorBg} stroke={guideColor} strokeWidth={1.3} />
             </g>
           );
         })()}
@@ -5620,21 +6317,21 @@ const nv = verts.map((v) => {
           }
           const [x2, y2] = P(guidePoint.z, guidePoint.r);
           const guideColor = moveSession.axis === "x"
-            ? "#754052"
+            ? themeColors.pathEditAxisX
             : moveSession.axis === "y"
-              ? "#3b7373"
-              : moveSession.mode === "absolute" ? "#a99cff" : "#28dfc2";
+              ? themeColors.pathEditAxisY
+              : moveSession.mode === "absolute" ? themeColors.arcViaPoint : themeColors.transformGuide;
           return (
             <g pointerEvents="none">
               <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={guideColor} strokeWidth={1.2} strokeDasharray="5 4" opacity={0.95} />
-              <circle cx={x1} cy={y1} r={3} fill="#071018" stroke={guideColor} strokeWidth={1.3} />
+              <circle cx={x1} cy={y1} r={3} fill={themeColors.editorBg} stroke={guideColor} strokeWidth={1.3} />
             </g>
           );
         })()}
 
         {/* بالاترین لایه بوم: خطوط نمایشی جهت‌دار، انتخاب و Handle نقاط. */}
-        {imageScaleSession&&(()=>{const [x1,y1]=P(imageScaleSession.p1.z,imageScaleSession.p1.r),p2=imageScaleSession.p2??cursor;if(!p2)return <circle cx={x1} cy={y1} r="4" fill="#071018" stroke="#28dfc2" strokeWidth="2"/>;const [x2,y2]=P(p2.z,p2.r);return <g pointerEvents="none"><line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#28dfc2" strokeWidth="1.5" strokeDasharray="5 3"/><circle cx={x1} cy={y1} r="4" fill="#071018" stroke="#28dfc2" strokeWidth="2"/><circle cx={x2} cy={y2} r="4" fill="#071018" stroke="#28dfc2" strokeWidth="2"/></g>;})()}
-        {selectedImageId!=null&&(()=>{const img=displayImages.find(v=>v.id===selectedImageId);if(!img)return null;const x=cam.ox+img.z*cam.s,y=cam.oy-img.r*cam.s,w=img.width*cam.s,h=img.height*cam.s;return <g ref={selectedImageControlsRef} transform={`rotate(${img.rotation??0} ${x+w/2} ${y+h/2})`}><rect data-ref-image="true" x={x} y={y} width={w} height={h} fill="none" stroke={img.locked?"#ef4444":"#28dfc2"} strokeWidth="1.2" strokeDasharray="5 4"/>{(["nw","ne","sw","se","n","s","e","w"] as const).map(mode=>{const hx=mode.includes("w")?x:mode.includes("e")?x+w:x+w/2,hy=mode.includes("n")?y:mode.includes("s")?y+h:y+h/2;return <rect data-ref-image="true" key={mode} x={hx-4} y={hy-4} width="8" height="8" rx="1" fill="#071018" stroke="#28dfc2" strokeWidth="1.5" style={{cursor:img.locked?"not-allowed":resizeCursor(mode,img.rotation??0)}} onPointerDown={e=>{e.stopPropagation();if(img.locked)return;svgRef.current?.setPointerCapture?.(e.pointerId);const rect=svgRef.current!.getBoundingClientRect();imageDrag.current={id:img.id,start:worldPt(cam,e.clientX-rect.left,e.clientY-rect.top),base:{...img},mode};setImageDragCursor(resizeCursor(mode,img.rotation??0));}}/>;})}{[{x:x-7,y:y-7},{x:x+w+7,y:y-7},{x:x+w+7,y:y+h+7},{x:x-7,y:y+h+7}].map((p,i)=><circle data-ref-image="true" key={`rotate-${i}`} cx={p.x} cy={p.y} r="5" fill="transparent" style={{cursor:rotationCursor([180,270,0,90][i]+(img.rotation??0))}} onPointerDown={e=>{e.stopPropagation();if(img.locked)return;svgRef.current?.setPointerCapture?.(e.pointerId);const rect=svgRef.current!.getBoundingClientRect(),start=worldPt(cam,e.clientX-rect.left,e.clientY-rect.top),center={z:img.z+img.width/2,r:img.r-img.height/2};imageDrag.current={id:img.id,start,base:{...img},mode:"rotate",startAngle:Math.atan2(start.r-center.r,start.z-center.z),cursorBaseAngle:[180,270,0,90][i]};setImageDragCursor(rotationCursor([180,270,0,90][i]+Math.round((img.rotation??0)/5)*5));}}/>)}</g>;})()}
+        {imageScaleSession&&(()=>{const [x1,y1]=P(imageScaleSession.p1.z,imageScaleSession.p1.r),p2=imageScaleSession.p2??cursor;if(!p2)return <circle cx={x1} cy={y1} r="4" fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth="2"/>;const [x2,y2]=P(p2.z,p2.r);return <g pointerEvents="none"><line x1={x1} y1={y1} x2={x2} y2={y2} stroke={themeColors.transformGuide} strokeWidth="1.5" strokeDasharray="5 3"/><circle cx={x1} cy={y1} r="4" fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth="2"/><circle cx={x2} cy={y2} r="4" fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth="2"/></g>;})()}
+        {selectedImageId!=null&&(()=>{const img=displayImages.find(v=>v.id===selectedImageId);if(!img)return null;const x=cam.ox+img.z*cam.s,y=cam.oy-img.r*cam.s,w=img.width*cam.s,h=img.height*cam.s;return <g ref={selectedImageControlsRef} transform={`rotate(${img.rotation??0} ${x+w/2} ${y+h/2})`}><rect data-ref-image="true" x={x} y={y} width={w} height={h} fill="none" stroke={img.locked?themeColors.uiDanger:themeColors.transformGuide} strokeWidth="1.2" strokeDasharray="5 4"/>{(["nw","ne","sw","se","n","s","e","w"] as const).map(mode=>{const hx=mode.includes("w")?x:mode.includes("e")?x+w:x+w/2,hy=mode.includes("n")?y:mode.includes("s")?y+h:y+h/2;return <rect data-ref-image="true" key={mode} x={hx-4} y={hy-4} width="8" height="8" rx="1" fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth="1.5" style={{cursor:img.locked?"not-allowed":resizeCursor(mode,img.rotation??0)}} onPointerDown={e=>{e.stopPropagation();if(img.locked)return;svgRef.current?.setPointerCapture?.(e.pointerId);const rect=svgRef.current!.getBoundingClientRect();imageDrag.current={id:img.id,start:worldPt(cam,e.clientX-rect.left,e.clientY-rect.top),base:{...img},mode};setImageDragCursor(resizeCursor(mode,img.rotation??0));}}/>;})}{[{x:x-7,y:y-7},{x:x+w+7,y:y-7},{x:x+w+7,y:y+h+7},{x:x-7,y:y+h+7}].map((p,i)=><circle data-ref-image="true" key={`rotate-${i}`} cx={p.x} cy={p.y} r="5" fill="transparent" style={{cursor:rotationCursor([180,270,0,90][i]+(img.rotation??0))}} onPointerDown={e=>{e.stopPropagation();if(img.locked)return;svgRef.current?.setPointerCapture?.(e.pointerId);const rect=svgRef.current!.getBoundingClientRect(),start=worldPt(cam,e.clientX-rect.left,e.clientY-rect.top),center={z:img.z+img.width/2,r:img.r-img.height/2};imageDrag.current={id:img.id,start,base:{...img},mode:"rotate",startAngle:Math.atan2(start.r-center.r,start.z-center.z),cursorBaseAngle:[180,270,0,90][i]};setImageDragCursor(rotationCursor([180,270,0,90][i]+Math.round((img.rotation??0)/5)*5));}}/>)}</g>;})()}
 
         {showCanvasPaintTool&&paintEdges.map(edge=>{
           const ax=cam.ox+edge.a.z*cam.s,ay=cam.oy-edge.a.r*cam.s,bx=cam.ox+edge.b.z*cam.s,by=cam.oy-edge.b.r*cam.s;
@@ -5681,12 +6378,12 @@ const nv = verts.map((v) => {
       </div>})()}
 
       {boxRotateBox && boxRotateSession && <div className="absolute z-50" style={{left:boxRotateBox.x,top:boxRotateBox.y,width:`${Math.max(72,28+boxRotateBox.value.length*8)}px`}} dir="ltr">
-        <input ref={boxRotateInputRef} value={boxRotateBox.value} placeholder="Angle" className="h-[30px] w-full rounded-[5px] border border-[#00a9c7] bg-[#071018]/95 px-2 text-center font-mono text-xs text-[#d9f7f5] outline-none" onChange={e=>{const value=latinDigits(e.target.value).replace(/[^0-9.\-]/g,"");setBoxRotateBox({...boxRotateBox,value,error:""});const n=Number(value);if(boxScaleLive&&value&&Number.isFinite(n)){onSegs(boxRotateSession.base.map(s=>boxRotateSession.ids.includes(s.id)?rotateSegment(s,boxRotateSession.pivot,n):s),false);setBoxRotateSession({...boxRotateSession,angle:n});}}} onKeyDown={e=>{e.stopPropagation();if(e.key==="Escape"){onSegs(boxRotateSession.base,false);setBoxRotateSession(null);setBoxRotateBox(null);return;}if(e.key!=="Enter"&&e.code!=="Space")return;e.preventDefault();const n=boxRotateBox.value?Number(boxRotateBox.value):boxRotateSession.angle;if(!Number.isFinite(n))return;onSegs(boxRotateSession.base.map(s=>boxRotateSession.ids.includes(s.id)?rotateSegment(s,boxRotateSession.pivot,n):s),true);setBoxRotateSession(null);setBoxRotateBox(null);}}/>
+        <input ref={boxRotateInputRef} value={boxRotateBox.value} placeholder="Angle" className="h-[30px] w-full rounded-[5px] border border-[#00a9c7] bg-[#071018]/95 px-2 text-center font-mono text-xs text-[#d9f7f5] outline-none" onChange={e=>{const value=latinDigits(e.target.value).replace(/[^0-9.\-]/g,"");setBoxRotateBox({...boxRotateBox,value,error:""});const n=Number(value);if(boxScaleLive&&value&&Number.isFinite(n)){onSegs(transformConnectedSegments(boxRotateSession.base,boxRotateSession.ids,separated,s=>rotateSegment(s,boxRotateSession.pivot,n)),false);setBoxRotateSession({...boxRotateSession,angle:n});}}} onKeyDown={e=>{e.stopPropagation();if(e.key==="Escape"){onSegs(boxRotateSession.base,false);setBoxRotateSession(null);setBoxRotateBox(null);return;}if(e.key!=="Enter"&&e.code!=="Space")return;e.preventDefault();const n=boxRotateBox.value?Number(boxRotateBox.value):boxRotateSession.angle;if(!Number.isFinite(n))return;onSegs(transformConnectedSegments(boxRotateSession.base,boxRotateSession.ids,separated,s=>rotateSegment(s,boxRotateSession.pivot,n)),true);setBoxRotateSession(null);setBoxRotateBox(null);}}/>
         <div className="mt-1 text-center font-mono text-[10px] font-bold text-[#26e6c7]">{concise(boxRotateSession.angle)}°</div>
       </div>}
 
       {rotateBox && rotateSession && <div className="absolute z-50" style={{left:rotateBox.x,top:rotateBox.y,width:`${Math.max(72,28+rotateBox.value.length*8)}px`}} dir="ltr">
-        <input ref={rotateInputRef} value={rotateBox.value} placeholder={rotateSession.mode==="angle"?"Angle":"Step"} className={cn("h-[30px] w-full rounded-[5px] border bg-[#071018]/95 px-2 text-center font-mono text-xs text-[#d9f7f5] outline-none",rotateBox.error?"border-danger":"border-[#00a9c7]")} onChange={e=>{const value=latinDigits(e.target.value).replace(/[^0-9.\-]/g,"");setRotateBox({...rotateBox,value,error:""});const n=Number(value);if(rotateLive&&rotateSession.mode==="angle"&&value&&Number.isFinite(n)){onSegs(rotateSession.base.map(s=>rotateSession.ids.includes(s.id)?rotateSegment(s,rotateSession.center,n):s),false);setRotateSession({...rotateSession,angle:n});}}} onKeyDown={e=>{e.stopPropagation();if(e.key==="Tab"){e.preventDefault();setRotateSession({...rotateSession,mode:rotateSession.mode==="angle"?"step":"angle"});return;}if(e.key==="Escape"){onSegs(rotateSession.base,false);setRotateSession(null);setRotateBox(null);chooseTool("select");return;}if(e.key!=="Enter")return;let angle=rotateSession.angle;if(rotateSession.mode==="angle"&&rotateBox.value){const n=Number(rotateBox.value);if(!Number.isFinite(n)){setRotateBox({...rotateBox,error:"نامعتبر"});return;}angle=n;}onSegs(rotateSession.base.map(s=>rotateSession.ids.includes(s.id)?rotateSegment(s,rotateSession.center,angle):s),true);setRotateSession(null);setRotateBox(null);chooseTool("select");}}/>
+        <input ref={rotateInputRef} value={rotateBox.value} placeholder={rotateSession.mode==="angle"?"Angle":"Step"} className={cn("h-[30px] w-full rounded-[5px] border bg-[#071018]/95 px-2 text-center font-mono text-xs text-[#d9f7f5] outline-none",rotateBox.error?"border-danger":"border-[#00a9c7]")} onChange={e=>{const value=latinDigits(e.target.value).replace(/[^0-9.\-]/g,"");setRotateBox({...rotateBox,value,error:""});const n=Number(value);if(rotateLive&&rotateSession.mode==="angle"&&value&&Number.isFinite(n)){onSegs(transformConnectedSegments(rotateSession.base,rotateSession.ids,separated,s=>rotateSegment(s,rotateSession.center,n)),false);setRotateSession({...rotateSession,angle:n});}}} onKeyDown={e=>{e.stopPropagation();if(e.key==="Tab"){e.preventDefault();setRotateSession({...rotateSession,mode:rotateSession.mode==="angle"?"step":"angle"});return;}if(e.key==="Escape"){onSegs(rotateSession.base,false);setRotateSession(null);setRotateBox(null);chooseTool("select");return;}if(e.key!=="Enter")return;let angle=rotateSession.angle;if(rotateSession.mode==="angle"&&rotateBox.value){const n=Number(rotateBox.value);if(!Number.isFinite(n)){setRotateBox({...rotateBox,error:"نامعتبر"});return;}angle=n;}onSegs(transformConnectedSegments(rotateSession.base,rotateSession.ids,separated,s=>rotateSegment(s,rotateSession.center,angle)),true);setRotateSession(null);setRotateBox(null);chooseTool("select");}}/>
         <div className="mt-1 whitespace-nowrap text-center font-mono text-[10px] font-bold text-[#26e6c7]">{concise(rotateSession.angle)}° · {rotateSession.mode==="angle"?"زاویه":"پله"}</div>
       </div>}
 
@@ -5867,6 +6564,8 @@ const nv = verts.map((v) => {
           if (!(value>0)) return;
           const source=boxScaleNumericBase.current ?? {segs,bounds:b};
           const sb=source.bounds, sw=sb.maxZ-sb.minZ, sh=sb.maxR-sb.minR;
+          const denom = axis==="x" ? sw : sh;
+          if (!(denom > 1e-9)) return;
           const handle=boxScaleLastHandle.current;
           const anchor={
             z: (axis==="x" || effectiveLock) && handle?.includes("e") ? sb.minZ
@@ -5876,13 +6575,21 @@ const nv = verts.map((v) => {
               : (axis==="y" || effectiveLock) && handle?.includes("s") ? sb.maxR
               : (sb.minR+sb.maxR)/2,
           };
-          const f=axis==="x"?value/sw:value/sh;
-          onSegs(source.segs.map(s=>selected.includes(s.id)?scaleSegmentXY(s,anchor,axis==="x"||effectiveLock?f:1,axis==="y"||effectiveLock?f:1):s),commit);
+          const f=value/denom;
+          onSegs(
+            transformConnectedSegments(
+              source.segs,
+              selected,
+              separated,
+              (s) => scaleSegmentXY(s, anchor, axis==="x"||effectiveLock?f:1, axis==="y"||effectiveLock?f:1)
+            ),
+            commit
+          );
         };
         const lockIcon=effectiveLock?<svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>:<svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M16 10V7a4 4 0 0 0-7.5-2"/></svg>;
         return <>
-          <input ref={boxScaleWidthInputRef} value={boxScaleWidthText ?? concise(width)} title="عرض افقی" className="absolute z-50 w-16 rounded border border-teal/60 bg-[#071018]/95 px-1 py-0.5 text-center font-mono text-[10px] text-teal outline-none" style={{left:(x0+x1)/2-32,top:yTop-27}} onFocus={e=>{boxScaleNumericBase.current={segs:segs.map(s=>({...s})),bounds:{...b}};e.currentTarget.select();}} onChange={e=>{const v=e.currentTarget.value;setBoxScaleWidthText(v);if(boxScaleLive)applyDimension("x",Number(v),false);}} onKeyDown={e=>{if(e.key==="Enter")e.currentTarget.blur();}} onBlur={e=>{applyDimension("x",Number(e.currentTarget.value),true);setBoxScaleWidthText(null);boxScaleNumericBase.current=null;}}/>
-          <input ref={boxScaleHeightInputRef} value={boxScaleHeightText ?? concise(height)} title="ارتفاع عمودی" className="absolute z-50 w-16 rounded border border-teal/60 bg-[#071018]/95 px-1 py-0.5 text-center font-mono text-[10px] text-teal outline-none" style={{left:x1+9,top:(yTop+yBottom)/2-11}} onFocus={e=>{boxScaleNumericBase.current={segs:segs.map(s=>({...s})),bounds:{...b}};e.currentTarget.select();}} onChange={e=>{const v=e.currentTarget.value;setBoxScaleHeightText(v);if(boxScaleLive)applyDimension("y",Number(v),false);}} onKeyDown={e=>{if(e.key==="Enter")e.currentTarget.blur();}} onBlur={e=>{applyDimension("y",Number(e.currentTarget.value),true);setBoxScaleHeightText(null);boxScaleNumericBase.current=null;}}/>
+          <input ref={boxScaleWidthInputRef} value={boxScaleWidthText ?? concise(width)} title="عرض افقی" className="absolute z-50 w-16 rounded border border-teal/60 bg-[#071018]/95 px-1 py-0.5 text-center font-mono text-[10px] text-teal outline-none" style={{left:(x0+x1)/2-32,top:yTop-27}} onFocus={e=>{boxScaleNumericBase.current={segs:segs.map(s=>({...s})),bounds:{...b}};e.currentTarget.select();}} onChange={e=>{const v=e.currentTarget.value;setBoxScaleWidthText(v);if(boxScaleLive)applyDimension("x",Number(v),false);}} onKeyDown={e=>{if(e.key==="Enter")e.currentTarget.blur();}} onBlur={()=>{if(boxScaleWidthText!=null)applyDimension("x",Number(boxScaleWidthText),true);setBoxScaleWidthText(null);boxScaleNumericBase.current=null;}}/>
+          <input ref={boxScaleHeightInputRef} value={boxScaleHeightText ?? concise(height)} title="ارتفاع عمودی" className="absolute z-50 w-16 rounded border border-teal/60 bg-[#071018]/95 px-1 py-0.5 text-center font-mono text-[10px] text-teal outline-none" style={{left:x1+9,top:(yTop+yBottom)/2-11}} onFocus={e=>{boxScaleNumericBase.current={segs:segs.map(s=>({...s})),bounds:{...b}};e.currentTarget.select();}} onChange={e=>{const v=e.currentTarget.value;setBoxScaleHeightText(v);if(boxScaleLive)applyDimension("y",Number(v),false);}} onKeyDown={e=>{if(e.key==="Enter")e.currentTarget.blur();}} onBlur={()=>{if(boxScaleHeightText!=null)applyDimension("y",Number(boxScaleHeightText),true);setBoxScaleHeightText(null);boxScaleNumericBase.current=null;}}/>
           <button title={boxScaleLocked?"باز کردن نسبت":shiftDown?"قفل موقت با Shift":"قفل نسبت"} className="absolute z-50 grid h-6 w-6 place-items-center rounded border border-edge bg-panel/95 text-mute" style={{left:x0-29,top:yTop-29}} onClick={()=>setBoxScaleLocked(v=>!v)}>{lockIcon}</button>
         </>;
       })()}
@@ -5900,7 +6607,7 @@ const nv = verts.map((v) => {
               const amount = value.match(/^(?:\d+(?:\.\d*)?|\.\d+)$/) ? Number(value) : null;
               if (amount != null && amount > 0) {
                 const factor = amount / scaleSession.referenceLength!;
-                onSegs(scaleSession.base.map((segment) => scaleSession.ids.includes(segment.id) ? scaleSegment(segment, scaleSession.origin, factor) : segment), false);
+                onSegs(transformConnectedSegments(scaleSession.base, scaleSession.ids, separated, (segment) => scaleSegment(segment, scaleSession.origin, factor)), false);
               }
               setScaleBox({ ...scaleBox, value, error: "" });
             }}
@@ -5914,7 +6621,7 @@ const nv = verts.map((v) => {
               const amount = scaleBox.value ? Number(scaleBox.value) : dist(scaleSession.origin, scaleSession.pointer ?? scaleSession.reference!);
               if (!Number.isFinite(amount) || amount <= 0) { setScaleBox({ ...scaleBox, error: "مقدار نامعتبر" }); return; }
               const factor = amount / scaleSession.referenceLength!;
-              const next = scaleSession.base.map((segment) => scaleSession.ids.includes(segment.id) ? scaleSegment(segment, scaleSession.origin, factor) : segment);
+              const next = transformConnectedSegments(scaleSession.base, scaleSession.ids, separated, (segment) => scaleSegment(segment, scaleSession.origin, factor));
               onSegs(next, true); setScaleSession(null); setScaleBox(null); chooseTool("select");
             }}
           />
@@ -6004,8 +6711,7 @@ const nv = verts.map((v) => {
             onKeyDown={(e) => {
               e.stopPropagation();
               if (e.key === "Escape") {
-                if (moveSession.editBase && edit) onEditBuf({ ...edit, verts: moveSession.editBase }, false);
-                else onSegs(moveSession.base, false);
+                cancelMoveSession(moveSession);
                 setMoveBox(null);
                 setMoveSession(null);
                 drag.current = null;
@@ -6038,13 +6744,8 @@ const nv = verts.map((v) => {
       if (values.length === 2) { dz -= anchor.z; dr -= anchor.r; }
       else if (dz) dz = Math.abs(dz) - anchor.z; else dr = Math.abs(dr) - anchor.r;
     }
-              if (moveSession.editBase && moveSession.editVertexIds && edit) {
-                const moving = new Set(moveSession.editVertexIds);
-                onEditBuf({ ...edit, verts: moveSession.editBase.map((v) => moving.has(v.id) ? { ...v, z: v.z + dz, x: v.x + 2 * dr } : v) }, true);
-              } else {
-                const next = movePolylineSelection(moveSession.base,moveSession.ids,dz,dr);
-                onSegs(next, true);
-              }
+              applyMoveDelta(moveSession, dz, dr, true);
+              setSnapHit(null);
               setLastMove({ dz, dr }); setMoveBox(null); setMoveSession(null);
             }} />
           <div className={cn(
@@ -6074,8 +6775,7 @@ const nv = verts.map((v) => {
                   setScaleBox(null);
                 }
                 if (t.id === "move" && moveSession) {
-                  if (moveSession.editBase && edit) onEditBuf({ ...edit, verts: moveSession.editBase }, false);
-                  else onSegs(moveSession.base, false);
+                  cancelMoveSession(moveSession);
                   setMoveBox(null);
                   setMoveSession(null);
                   drag.current = null;
@@ -6108,11 +6808,11 @@ const nv = verts.map((v) => {
           </button>
           <button
             onClick={deleteSelection}
-            disabled={!selected.length && !splitSelected}
-            title={selected.length && splitSelected ? "حذف خطوط و نقطه Split (Delete)" : splitSelected ? "حذف نقطه Split (Delete)" : "حذف انتخابی (Delete)"}
+            disabled={editOpen || (!selected.length && !splitSelected)}
+            title={!editOpen && selected.length && splitSelected ? "حذف خطوط و نقطه Split (Delete)" : !editOpen && splitSelected ? "حذف نقطه Split (Delete)" : "حذف انتخابی (Delete)"}
             className={cn(
               "grid h-[27px] w-full place-items-center border-t border-edge transition-colors",
-              selected.length || splitSelected ? "text-danger/80 hover:bg-danger/15 hover:text-danger" : "text-dim/40"
+              !editOpen && (selected.length || splitSelected) ? "text-danger/80 hover:bg-danger/15 hover:text-danger" : "text-dim/40"
             )}
           >
             <IconTrash className="h-3.5 w-3.5" />
@@ -6249,8 +6949,8 @@ const nv = verts.map((v) => {
 
       {/* نشان ایزوله */}
       {iso && isoOp && tool === "select" && (
-        <div className="anim-in absolute top-12 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full border py-1.5 pr-3 pl-1.5 text-[11.5px] font-bold shadow-lg shadow-black/40 backdrop-blur-sm" style={{ borderColor: `${OP_INFO[isoOp.type].color}77`, background: "#1d1710ee", color: OP_INFO[isoOp.type].color }}>
-          <span className="inline-block h-2 w-2 rounded-full" style={{ background: OP_INFO[isoOp.type].color }} />
+        <div className="anim-in absolute top-12 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full border bg-panel/95 py-1.5 pr-3 pl-1.5 text-[11.5px] font-bold shadow-lg shadow-black/40 backdrop-blur-sm" style={{ borderColor: rgbaCss(opColorFromTheme(themeColors, isoOp.type), 0.5), color: opColorFromTheme(themeColors, isoOp.type) }}>
+          <span className="inline-block h-2 w-2 rounded-full" style={{ background: opColorFromTheme(themeColors, isoOp.type) }} />
           نمای ایزوله: {OP_INFO[isoOp.type].name}
           <button onClick={onClearIsolate} className="grid h-5 w-5 place-items-center rounded-full transition-colors hover:bg-white/10" title="خروج (Esc)">
             <IconX className="h-3 w-3" />
@@ -6260,7 +6960,7 @@ const nv = verts.map((v) => {
 
       {/* ---------- بالا-راست: منوی لایه‌ها + کلید «ویرایش مسیر» (سمت چپِ منو) ---------- */}
       <div dir="rtl" className="absolute top-2.5 right-2.5 z-20 flex items-start gap-2">
-        <LayerMenu settings={settings} onSettings={onSettings} />
+        <LayerMenu settings={settings} onSettings={onSettings} themeColors={themeColors} />
         <button
           onClick={() => onEditToggle(!editOpen)}
           title="ویرایشِ مسیرِ جی‌کد به‌صورت یک خطِ یکپارچه (مثل سیمکو) — فایل فقط با «تأیید» به‌روز می‌شود"
@@ -6396,7 +7096,7 @@ const nv = verts.map((v) => {
                 onBlur={() => setPickerHover(null)}
                 onClick={() => { selectEditLines([id], id, true); setSelV([]); setHitPicker(null); setPickerHover(null); }}
               >
-                <span className="h-2 w-2 rounded-full" style={{ background: showPathBySpeed ? speedStroke(l.motion, l.feed) : SEG_COLOR[l.motion === 0 ? "rapid" : l.kind] }} />
+                <span className="h-2 w-2 rounded-full" style={{ background: showPathBySpeed ? speedStroke(l.motion, l.feed) : segColorFromTheme(themeColors, l.motion === 0 ? "rapid" : l.kind) }} />
                 <span>خط {id.toLocaleString("fa-IR")} · {l.motion === 0 ? "حرکت سریع" : OP_INFO[ops.find((o) => o.id === l.opId)?.type ?? "finish"].name}</span>
               </button>
             ) : null; })}

@@ -1,3 +1,4 @@
+@import "./fonts.css";
 @import "tailwindcss";
 @import "./preferences.css";
 
@@ -25,6 +26,42 @@
   --color-ok: #8fbf5a;
 }
 
+:root {
+  --color-header-bg: #1d1710;
+  --color-input-bg: #14100b;
+  --color-brass-ink: #241a0c;
+  --rgb-bg: 20, 16, 11;
+  --rgb-panel: 29, 23, 16;
+  --rgb-panel2: 37, 29, 19;
+  --rgb-panel3: 45, 35, 24;
+  --rgb-edge: 58, 46, 31;
+  --rgb-edge2: 77, 61, 40;
+  --rgb-ink: 241, 231, 212;
+  --rgb-mute: 168, 148, 111;
+  --rgb-dim: 111, 96, 71;
+  --rgb-brass: 227, 169, 78;
+  --rgb-brass2: 243, 194, 107;
+  --rgb-copper: 224, 112, 60;
+  --rgb-teal: 69, 179, 148;
+  --rgb-steel: 154, 167, 180;
+  --rgb-ok: 143, 191, 90;
+  --rgb-danger: 217, 88, 72;
+  --rgb-gcode-active: 227, 169, 78;
+  --theme-editor-bg: #120e09;
+  --theme-pathedit-bg: #08111f;
+  --theme-sim-bg: #120e09;
+  --theme-view3d-bg: #14100b;
+  --theme-gcode-bg: #1d1710;
+  --theme-gcode-active: #e3a94e;
+  --theme-gcode-tok-g: #e3a94e;
+  --theme-gcode-tok-m: #e0703c;
+  --theme-gcode-tok-ax: #63c8ac;
+  --theme-gcode-tok-f: #c9b78d;
+  --theme-gcode-tok-c: #77684c;
+  --theme-gcode-tok-n: #6f6047;
+  --theme-profile-hover: #fff3dc;
+}
+
 html,
 body,
 #root {
@@ -34,30 +71,30 @@ body,
 body {
   font-family: var(--font-body);
   background:
-    radial-gradient(1100px 500px at 85% -10%, rgba(227, 169, 78, 0.07), transparent 60%),
-    radial-gradient(900px 600px at 0% 110%, rgba(69, 179, 148, 0.05), transparent 60%),
+    radial-gradient(1100px 500px at 85% -10%, rgba(var(--rgb-brass), 0.07), transparent 60%),
+    radial-gradient(900px 600px at 0% 110%, rgba(var(--rgb-teal), 0.05), transparent 60%),
     var(--color-bg);
   color: var(--color-ink);
   overflow: hidden;
 }
 
 ::selection {
-  background: rgba(227, 169, 78, 0.35);
+  background: rgba(var(--rgb-brass), 0.35);
 }
 
 /* ---------- scrollbars ---------- */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #4d3d28 transparent;
+  scrollbar-color: var(--color-edge2) transparent;
 }
 *::-webkit-scrollbar {
   width: 9px;
   height: 9px;
 }
 *::-webkit-scrollbar-thumb {
-  background: #4d3d28;
+  background: var(--color-edge2);
   border-radius: 8px;
-  border: 2px solid #1d1710;
+  border: 2px solid var(--color-panel);
 }
 *::-webkit-scrollbar-track {
   background: transparent;
@@ -74,12 +111,61 @@ input[type="number"]::-webkit-outer-spin-button {
   margin: 0;
 }
 
-.field-input {
-  @apply w-full rounded-md border border-edge bg-bg/70 px-2 py-1.5 text-[13px] font-medium text-ink outline-none transition-colors;
-}
-.field-input:focus {
-  border-color: rgba(227, 169, 78, 0.7);
-  box-shadow: 0 0 0 3px rgba(227, 169, 78, 0.12);
+@layer components {
+  .field-input {
+    @apply w-full rounded-md border border-edge px-2 py-1.5 text-[13px] font-medium text-ink outline-none transition-colors;
+    background-color: var(--color-input-bg);
+  }
+  .field-input:focus {
+    border-color: rgba(var(--rgb-brass), 0.7);
+    box-shadow: 0 0 0 3px rgba(var(--rgb-brass), 0.14);
+  }
+
+  /* ---------- buttons ---------- */
+  .btn {
+    @apply inline-flex items-center gap-1.5 rounded-md border border-edge bg-panel2 px-2.5 py-1.5 text-[12.5px] font-semibold text-ink/90 transition-all select-none;
+  }
+  .btn:hover:not(:disabled) {
+    border-color: var(--color-edge2);
+    background: var(--color-panel3);
+    transform: translateY(-1px);
+  }
+  .btn:active:not(:disabled) {
+    transform: translateY(0);
+  }
+  .btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+  .btn-brass {
+    @apply border-brass/60 bg-brass;
+    color: var(--color-brass-ink);
+  }
+  .btn-brass:hover:not(:disabled) {
+    @apply border-brass2 bg-brass2;
+    box-shadow: 0 4px 18px rgba(var(--rgb-brass), 0.35);
+  }
+  .btn-teal {
+    @apply border-teal/50 text-teal;
+  }
+  .btn-teal:hover:not(:disabled) {
+    @apply border-teal bg-teal/10;
+    box-shadow: 0 4px 18px rgba(var(--rgb-teal), 0.25);
+  }
+
+  .chip-toggle {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-all select-none;
+  }
+
+  /* ---------- gcode ---------- */
+  .gc-line {
+    @apply block whitespace-pre px-3 py-[1px] font-mono text-[11.5px] leading-[1.55] border-r-2 border-transparent;
+  }
+  .gc-line-active {
+    border-right-color: var(--theme-gcode-active);
+    background-color: rgba(var(--rgb-gcode-active), 0.14);
+    color: var(--color-ink);
+  }
 }
 
 /* custom scrubber — always LTR, thumb and fill painted together */
@@ -94,14 +180,14 @@ input[type="number"]::-webkit-outer-spin-button {
   -webkit-tap-highlight-color: transparent;
 }
 .scrub-track:focus-visible .scrub-rail {
-  box-shadow: 0 0 0 3px rgba(227, 169, 78, 0.25);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-brass), 0.25);
 }
 .scrub-rail {
   position: relative;
   width: 100%;
   height: 6px;
   border-radius: 4px;
-  background: #3b2f20;
+  background: var(--color-edge);
 }
 .scrub-fill {
   position: absolute;
@@ -110,7 +196,7 @@ input[type="number"]::-webkit-outer-spin-button {
   left: 0;
   width: 0%;
   border-radius: 4px;
-  background: linear-gradient(90deg, #b57f2e, var(--color-brass));
+  background: linear-gradient(90deg, var(--color-brass), var(--color-brass2));
   pointer-events: none;
 }
 .scrub-thumb {
@@ -121,15 +207,15 @@ input[type="number"]::-webkit-outer-spin-button {
   height: 16px;
   border-radius: 50%;
   background: var(--color-brass2);
-  border: 3px solid #1d1710;
-  box-shadow: 0 0 8px rgba(227, 169, 78, 0.6);
+  border: 3px solid var(--color-panel);
+  box-shadow: 0 0 8px rgba(var(--rgb-brass), 0.6);
   transform: translate(-50%, -50%);
   pointer-events: none;
-  transition: scale 0.12s ease;
+  transition: transform 0.12s ease;
 }
 .scrub-track:hover .scrub-thumb,
 .scrub-track:active .scrub-thumb {
-  scale: 1.2;
+  transform: translate(-50%, -50%) scale(1.2);
 }
 .scrub-tip {
   position: absolute;
@@ -139,7 +225,7 @@ input[type="number"]::-webkit-outer-spin-button {
   padding: 2px 8px;
   border-radius: 6px;
   border: 1px solid var(--color-edge2);
-  background: rgba(29, 23, 16, 0.95);
+  background: rgba(var(--rgb-panel), 0.95);
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--color-brass2);
@@ -150,52 +236,13 @@ input[type="number"]::-webkit-outer-spin-button {
   z-index: 5;
 }
 
-/* ---------- buttons ---------- */
-.btn {
-  @apply inline-flex items-center gap-1.5 rounded-md border border-edge bg-panel2 px-2.5 py-1.5 text-[12.5px] font-semibold text-ink/90 transition-all select-none;
-}
-.btn:hover:not(:disabled) {
-  border-color: var(--color-edge2);
-  background: var(--color-panel3);
-  transform: translateY(-1px);
-}
-.btn:active:not(:disabled) {
-  transform: translateY(0);
-}
-.btn:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-.btn-brass {
-  @apply border-brass/60 bg-brass text-[#241a0c];
-}
-.btn-brass:hover:not(:disabled) {
-  @apply border-brass2 bg-brass2;
-  box-shadow: 0 4px 18px rgba(227, 169, 78, 0.35);
-}
-.btn-teal {
-  @apply border-teal/50 text-teal;
-}
-.btn-teal:hover:not(:disabled) {
-  @apply border-teal bg-teal/10;
-  box-shadow: 0 4px 18px rgba(69, 179, 148, 0.25);
-}
-
-.chip-toggle {
-  @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-all select-none;
-}
-
-/* ---------- gcode ---------- */
-.gc-line {
-  @apply block whitespace-pre px-3 py-[1px] font-mono text-[11.5px] leading-[1.55] border-r-2 border-transparent;
-}
-.gc-tok-g { color: var(--color-brass); font-weight: 700; }
-.gc-tok-m { color: var(--color-copper); font-weight: 700; }
-.gc-tok-ax { color: #63c8ac; }
-.gc-tok-f { color: #c9b78d; }
-.gc-tok-c { color: #77684c; font-style: italic; }
-.gc-tok-n { color: #6f6047; }
-.gc-tok-d { color: #8b7c5f; }
+.gc-tok-g { color: var(--theme-gcode-tok-g); font-weight: 700; }
+.gc-tok-m { color: var(--theme-gcode-tok-m); font-weight: 700; }
+.gc-tok-ax { color: var(--theme-gcode-tok-ax); }
+.gc-tok-f { color: var(--theme-gcode-tok-f); }
+.gc-tok-c { color: var(--theme-gcode-tok-c); font-style: italic; }
+.gc-tok-n { color: var(--theme-gcode-tok-n); }
+.gc-tok-d { color: var(--theme-gcode-tok-n); }
 
 /* ---------- animations ---------- */
 @keyframes toast-in {
@@ -233,12 +280,12 @@ input[type="number"]::-webkit-outer-spin-button {
   to { transform: rotate(360deg); }
 }
 
-/* نقاط تعاملی — با رفتن نشانگر موس، سفید می‌شوند */
+/* نقاط تعاملی — با رفتن نشانگر موس، به رنگ هایلایت المان زیر موس درمی‌آیند */
 .pt-hover {
   cursor: pointer;
   transition: fill 0.12s ease, stroke 0.12s ease;
 }
 .pt-hover:hover {
-  fill: #ffffff !important;
-  stroke: #ffffff !important;
+  fill: var(--theme-profile-hover, #ffffff) !important;
+  stroke: var(--theme-profile-hover, #ffffff) !important;
 }

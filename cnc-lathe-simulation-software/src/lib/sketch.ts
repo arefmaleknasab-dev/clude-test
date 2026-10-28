@@ -296,12 +296,13 @@ export function cloneSeg(s: SketchSeg, dz = 0, dr = 0): SketchSeg {
 
 /* ---------------- اسنپ هوشمند ---------------- */
 
-export type SnapType = "end" | "mid" | "center" | "ctrl" | "cross" | "axis" | "grid";
+export type SnapType = "end" | "mid" | "center" | "ctrl" | "cross" | "axis" | "grid" | "split";
 
 export interface SnapPoint {
   p: SPoint;
   type: SnapType;
   segId?: number;
+  segId2?: number;
 }
 
 export const SNAP_FA: Record<SnapType, string> = {
@@ -312,6 +313,7 @@ export const SNAP_FA: Record<SnapType, string> = {
   cross: "تقاطع",
   axis: "محور",
   grid: "شبکه",
+  split: "نقطهٔ Split",
 };
 
 /** نقاط مهم هندسی برای چسبندگی (به‌جز شبکه که پویا محاسبه می‌شود) */
@@ -347,12 +349,21 @@ export function intersectionPoints(segs: SketchSeg[]): SnapPoint[] {
   const out: SnapPoint[] = [];
   for (let i = 0; i < polys.length && out.length < 60; i++) {
     for (let j = i + 1; j < polys.length && out.length < 60; j++) {
+      const sA = segs[i];
+      const sB = segs[j];
       const A = polys[i];
       const B = polys[j];
       for (let x = 0; x < A.length - 1; x++) {
         for (let y = 0; y < B.length - 1; y++) {
           const hit = segIntersect(A[x], A[x + 1], B[y], B[y + 1]);
-          if (hit && !out.some((o) => dist(o.p, hit) < 0.4)) out.push({ p: hit, type: "cross" });
+          if (!hit) continue;
+          /* رئوس مشترک دو ضلع متصل (مانند Polyline) نقطه انتها هستند، نه تقاطع مستقل */
+          const onEndA = dist(hit, sA.a) < 1e-6 || dist(hit, sA.b) < 1e-6;
+          const onEndB = dist(hit, sB.a) < 1e-6 || dist(hit, sB.b) < 1e-6;
+          if (onEndA && onEndB) continue;
+          if (!out.some((o) => dist(o.p, hit) < 0.4)) {
+            out.push({ p: hit, type: "cross", segId: sA.id, segId2: sB.id });
+          }
         }
       }
     }
@@ -362,8 +373,9 @@ export function intersectionPoints(segs: SketchSeg[]): SnapPoint[] {
 
 /* ---------------- نزدیک‌ترین نقطه روی المان (برای انتخاب) ---------------- */
 
-export function distToSeg(s: SketchSeg, p: SPoint): number {
-  const pts = segPoints(s, s.kind === "line" ? 1 : 40);
+export function distToPoly(pts: SPoint[], p: SPoint): number {
+  if (pts.length === 0) return Infinity;
+  if (pts.length === 1) return Math.hypot(p.z - pts[0].z, p.r - pts[0].r);
   let best = Infinity;
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i];
@@ -379,39 +391,36 @@ export function distToSeg(s: SketchSeg, p: SPoint): number {
   return best;
 }
 
+export function distToSeg(s: SketchSeg, p: SPoint): number {
+  const pts = segPoints(s, s.kind === "line" ? 1 : 40);
+  return distToPoly(pts, p);
+}
+
 /* ---------------- تبدیل به پروفایل موتور تراش ---------------- */
 
 let ppUid = 90000;
 
 /**
- * تخت‌سازی اسکچ به نقاط پروفایل: همهٔ المان‌ها نمونه‌برداری، بر اساس z مرتب و
- * در z های یکسان بیشترین شعاع (پوشش بیرونی) انتخاب می‌شود تا پروفایل تراش
- * همیشه معتبر و بدون زیربرش باشد.
+ * تخت‌سازی اسکچ به نقاط پروفایل با حفظ ترتیب زنجیره و خطوط قائم (+۹۰° و −۹۰°)
+ * تا شیارهای Uشکل، پله‌های عمودی و گوشه‌های تیز در عملیات خشن شعاعی و افست حذف نشوند.
  */
 export function flattenSketch(segs: SketchSeg[], blankR: number, blankL: number): PPoint[] {
+  if (segs.length === 0) return [];
+  const ordered = chainPolyline(orderChain(segs));
+  if (ordered.length >= 2) {
+    return branchPathPoints(ordered, blankR, blankL);
+  }
   const raw: SPoint[] = [];
   for (const s of segs) {
     const pts = s.kind === "line" ? [s.a, s.b] : segPoints(s);
     for (const p of pts) {
       if (!Number.isFinite(p.z) || !Number.isFinite(p.r)) continue;
-      /* نقطهٔ واقعی روی محور باید R=0 بماند؛ کف ۰٫۲mm ابتدای مسیر پرداخت خارج
-         را از پروفایل اصلی جدا می‌کرد و یک زاویهٔ مصنوعی می‌ساخت. */
       raw.push({ z: Math.min(blankL, Math.max(0, p.z)), r: Math.min(blankR, Math.max(0, p.r)) });
     }
   }
   if (raw.length < 2) return [];
   raw.sort((x, y) => x.z - y.z);
-  const merged: SPoint[] = [];
-  for (const p of raw) {
-    const last = merged[merged.length - 1];
-    if (last && Math.abs(last.z - p.z) < 0.06) {
-      if (p.r > last.r) last.r = p.r;
-    } else {
-      merged.push({ ...p });
-    }
-  }
-  if (merged.length < 2) return [];
-  return merged.map((p) => ({ id: ++ppUid, z: p.z, r: p.r, smooth: false }));
+  return raw.map((p) => ({ id: ++ppUid, z: p.z, r: p.r, smooth: false }));
 }
 
 /**
@@ -449,66 +458,273 @@ export interface ChainItem {
   reversed: boolean;
 }
 
-const endKey = (p: SPoint) => `${Math.round(p.z * 1000)},${Math.round(p.r * 1000)}`;
+const VERT_TOL = 1e-3;
+
+function branchMidRAtZ(branch: SPoint[], z: number): number | null {
+  let lo = Infinity;
+  let hi = -Infinity;
+  let hit = false;
+  for (let i = 0; i < branch.length - 1; i++) {
+    const a = branch[i];
+    const b = branch[i + 1];
+    const dz = b.z - a.z;
+    if (Math.abs(dz) <= 1e-7) {
+      if (Math.abs(z - a.z) <= 1e-5) {
+        const rMin = Math.min(a.r, b.r);
+        const rMax = Math.max(a.r, b.r);
+        if (rMin < lo) lo = rMin;
+        if (rMax > hi) hi = rMax;
+        hit = true;
+      }
+    } else if ((a.z <= z + 1e-9 && b.z >= z - 1e-9) || (b.z <= z + 1e-9 && a.z >= z - 1e-9)) {
+      const t = Math.max(0, Math.min(1, (z - a.z) / dz));
+      const r = a.r + (b.r - a.r) * t;
+      if (r < lo) lo = r;
+      if (r > hi) hi = r;
+      hit = true;
+    }
+  }
+  return hit ? 0.5 * (lo + hi) : null;
+}
+
+function branchWeightedMean(branch: SPoint[]): SPoint {
+  if (branch.length === 0) return { z: 0, r: 0 };
+  if (branch.length === 1) return { z: branch[0].z, r: branch[0].r };
+  let sumLen = 0;
+  let sumZ = 0;
+  let sumR = 0;
+  for (let i = 0; i < branch.length - 1; i++) {
+    const a = branch[i];
+    const b = branch[i + 1];
+    const len = Math.hypot(b.z - a.z, b.r - a.r);
+    sumLen += len;
+    sumZ += 0.5 * (a.z + b.z) * len;
+    sumR += 0.5 * (a.r + b.r) * len;
+  }
+  if (sumLen <= 1e-9) {
+    return {
+      z: 0.5 * (branch[0].z + branch[branch.length - 1].z),
+      r: 0.5 * (branch[0].r + branch[branch.length - 1].r),
+    };
+  }
+  return { z: sumZ / sumLen, r: sumR / sumLen };
+}
 
 /**
- * مرتب‌سازی المان‌ها به ترتیب مسیر (زنجیره): از یک انتهای آزاد شروع می‌کند و
- * المان‌های متصل را به‌ترتیب به هم می‌چسباند. اگر چند زنجیره جدا وجود داشته
- * باشد، پشت سر هم برمی‌گرداند.
+ * مقایسهٔ پادمتقارن دو شاخه برای تشخیص «شاخهٔ خارجی (مثبت) در برابر شاخهٔ داخلی (منفی)»:
+ * ۱) اگر دو شاخه در بازهٔ طولی Z هم‌پوشانی دارند (پروفیل برگشتی مانند کاسه/لیوان/گلدان)،
+ *    شاخه‌ای که در بازهٔ مشترک شعاع بزرگ‌تری دارد شاخهٔ بیرونی است.
+ * ۲) در غیر این صورت، شاخهٔ سمت سه‌نظام (Z کوچک‌تر) شاخهٔ اول/بیرونی و شاخهٔ سمت دهانه (Z بزرگ‌تر)
+ *    شاخهٔ دوم/داخلی است؛ و در حالت کاملاً قائم، شعاع بزرگ‌تر بیرونی است.
+ */
+function compareOuterVsInnerBranches(branchA: SPoint[], branchB: SPoint[]): number {
+  let minZA = Infinity, maxZA = -Infinity;
+  for (const p of branchA) {
+    if (p.z < minZA) minZA = p.z;
+    if (p.z > maxZA) maxZA = p.z;
+  }
+  let minZB = Infinity, maxZB = -Infinity;
+  for (const p of branchB) {
+    if (p.z < minZB) minZB = p.z;
+    if (p.z > maxZB) maxZB = p.z;
+  }
+  const ovLo = Math.max(minZA, minZB);
+  const ovHi = Math.min(maxZA, maxZB);
+  if (ovHi - ovLo > 0.2) {
+    const SAMPLES = 24;
+    let sumDiff = 0;
+    let count = 0;
+    for (let k = 0; k < SAMPLES; k++) {
+      const z = ovLo + ((k + 0.5) / SAMPLES) * (ovHi - ovLo);
+      const rA = branchMidRAtZ(branchA, z);
+      const rB = branchMidRAtZ(branchB, z);
+      if (rA != null && rB != null) {
+        sumDiff += rA - rB;
+        count++;
+      }
+    }
+    if (count > 0) {
+      const avgDiff = sumDiff / count;
+      if (Math.abs(avgDiff) > 1e-4) return avgDiff;
+    }
+  }
+  const meanA = branchWeightedMean(branchA);
+  const meanB = branchWeightedMean(branchB);
+  const dz = meanB.z - meanA.z;
+  if (Math.abs(dz) > 1e-4) return dz;
+  return meanA.r - meanB.r;
+}
+
+function reverseChainItems(chain: ChainItem[]): ChainItem[] {
+  const out: ChainItem[] = new Array(chain.length);
+  for (let i = 0; i < chain.length; i++) {
+    const it = chain[chain.length - 1 - i];
+    out[i] = { seg: it.seg, reversed: !it.reversed };
+  }
+  return out;
+}
+
+function orientChainCanonically(chain: ChainItem[]): ChainItem[] {
+  if (chain.length === 0) return chain;
+  const pts = chainPolyline(chain);
+  const m = pts.length - 1;
+  if (m < 1) return chain;
+
+  /* حلقهٔ بسته: جهت ساعت‌گرد در مختصات (Z به راست، R به بالا) یعنی بیرون در بالا به +Z و داخل در پایین به -Z */
+  if (dist(pts[0], pts[m]) <= VERT_TOL && pts.length >= 4) {
+    let area2 = 0;
+    for (let i = 0; i < m; i++) {
+      area2 += pts[i].z * pts[i + 1].r - pts[i + 1].z * pts[i].r;
+    }
+    area2 += pts[m].z * pts[0].r - pts[0].z * pts[m].r;
+    return area2 > 1e-6 ? reverseChainItems(chain) : chain;
+  }
+
+  let maxZ = -Infinity;
+  for (const p of pts) if (p.z > maxZ) maxZ = p.z;
+  let firstMax = -1;
+  let lastMax = -1;
+  for (let i = 0; i <= m; i++) {
+    if (pts[i].z >= maxZ - 1e-5) {
+      if (firstMax < 0) firstMax = i;
+      lastMax = i;
+    }
+  }
+
+  /* اگر بیشترین Z درون زنجیره باشد (لبهٔ برگشتی کاسه/لیوان)، دو نیمهٔ زنجیره حول لبه مقایسه می‌شوند */
+  if (firstMax > 0 && lastMax < m) {
+    const branchA = pts.slice(0, lastMax + 1);
+    const branchB = pts.slice(firstMax);
+    const score = compareOuterVsInnerBranches(branchA, branchB);
+    return score < -1e-6 ? reverseChainItems(chain) : chain;
+  }
+
+  /* پروفیل تک‌شاخه (بدون برگشت از لبه): از چپ به راست (Z کوچک‌تر به Z بزرگ‌تر) */
+  const dz = pts[m].z - pts[0].z;
+  if (Math.abs(dz) > 1e-5) return dz < 0 ? reverseChainItems(chain) : chain;
+  const dr = pts[0].r - pts[m].r;
+  if (Math.abs(dr) > 1e-5) return dr < 0 ? reverseChainItems(chain) : chain;
+  return chain;
+}
+
+/**
+ * مرتب‌سازی المان‌ها به ترتیب مسیر (زنجیره): المان‌های متصل را دوطرفه به هم
+ * می‌چسباند و جهت زنجیره را به‌صورت هندسی و مستقل از ترتیب آرایهٔ segs
+ * (خارج ← لبه ← داخل، یا چپ به راست) تثبیت می‌کند تا افزودن خط جدید به هر سر
+ * پلی‌لاین هرگز جای شاخهٔ داخلی و خارجی را عوض نکند.
  */
 export function orderChain(segs: SketchSeg[]): ChainItem[] {
   if (segs.length === 0) return [];
-  if (segs.length === 1) return [{ seg: segs[0], reversed: false }];
-  const unused = new Map<number, SketchSeg>(segs.map((s) => [s.id, s]));
-  const out: ChainItem[] = [];
-  const chainEnd = (it: ChainItem): SPoint => (it.reversed ? it.seg.a : it.seg.b);
 
-  /* شمارش اتصال هر نقطه انتهایی برای یافتن انتهای آزاد زنجیره */
-  const count = new Map<string, number>();
+  /* خوشه‌بندی نقاط انتهایی با تلرانس فاصلهٔ واقعی (بدون خطای مرزی گردکردن شبکه‌ای) */
+  const clusters: SPoint[] = [];
+  const vertOf = (p: SPoint): number => {
+    for (let i = 0; i < clusters.length; i++) {
+      if (Math.hypot(clusters[i].z - p.z, clusters[i].r - p.r) <= VERT_TOL) return i;
+    }
+    clusters.push({ z: p.z, r: p.r });
+    return clusters.length - 1;
+  };
+  const vEnds = new Map<number, { va: number; vb: number }>();
+  const deg = new Map<number, number>();
   for (const s of segs) {
-    for (const k of [endKey(s.a), endKey(s.b)]) count.set(k, (count.get(k) ?? 0) + 1);
+    const va = vertOf(s.a);
+    const vb = vertOf(s.b);
+    vEnds.set(s.id, { va, vb });
+    deg.set(va, (deg.get(va) ?? 0) + 1);
+    deg.set(vb, (deg.get(vb) ?? 0) + 1);
   }
 
+  const unused = new Map<number, SketchSeg>(segs.map((s) => [s.id, s]));
+  const chains: ChainItem[][] = [];
+  const itemStartV = (it: ChainItem): number => {
+    const e = vEnds.get(it.seg.id)!;
+    return it.reversed ? e.vb : e.va;
+  };
+  const itemEndV = (it: ChainItem): number => {
+    const e = vEnds.get(it.seg.id)!;
+    return it.reversed ? e.va : e.vb;
+  };
+
+  /* در گره‌های چندشاخه (T-junction)، ادامهٔ هم‌گروه در Polyline و شاخه‌های غیردنباله‌کوتاه اولویت دارند */
+  const pickBestNeighbor = (tipV: number, preferPolyId: number | undefined, asTail: boolean): ChainItem | null => {
+    let best: ChainItem | null = null;
+    let bestScore = -Infinity;
+    for (const s of unused.values()) {
+      const e = vEnds.get(s.id)!;
+      if (e.va !== tipV && e.vb !== tipV) continue;
+      const reversed = asTail ? e.va !== tipV : e.vb !== tipV;
+      const otherV = e.va === tipV ? e.vb : e.va;
+      let otherUnused = 0;
+      for (const rem of unused.values()) {
+        if (rem.id === s.id) continue;
+        const re = vEnds.get(rem.id)!;
+        if (re.va === otherV || re.vb === otherV) otherUnused++;
+      }
+      const samePoly = preferPolyId != null && s.polylineId === preferPolyId ? 100 : 0;
+      const continues = otherUnused > 0 ? 10 : 0;
+      const len = Math.min(9, segLength(s) * 0.01);
+      const score = samePoly + continues + len;
+      if (score > bestScore) {
+        bestScore = score;
+        best = { seg: s, reversed };
+      }
+    }
+    return best;
+  };
+
   while (unused.size) {
-    /* شروع زنجیره بعدی: ترجیحاً المانی با انتهای آزاد */
     let first: SketchSeg | undefined;
     for (const s of unused.values()) {
-      if ((count.get(endKey(s.a)) ?? 0) <= 1 || (count.get(endKey(s.b)) ?? 0) <= 1) {
+      const e = vEnds.get(s.id)!;
+      if ((deg.get(e.va) ?? 0) <= 1 || (deg.get(e.vb) ?? 0) <= 1) {
         first = s;
         break;
       }
     }
     if (!first) first = unused.values().next().value as SketchSeg;
     unused.delete(first.id);
-    /* جهت شروع: انتهای آزاد در ابتدای زنجیره قرار گیرد */
-    const aFree = (count.get(endKey(first.a)) ?? 0) <= 1;
-    const bFree = (count.get(endKey(first.b)) ?? 0) <= 1;
+    const fe = vEnds.get(first.id)!;
+    const aFree = (deg.get(fe.va) ?? 0) <= 1;
+    const bFree = (deg.get(fe.vb) ?? 0) <= 1;
     const chain: ChainItem[] = [{ seg: first, reversed: !aFree && bFree }];
+
     /* گسترش از انتها */
-    for (;;) {
-      const tip = endKey(chainEnd(chain[chain.length - 1]));
-      let next: SketchSeg | undefined;
-      let rev = false;
-      for (const s of unused.values()) {
-        if (endKey(s.a) === tip) {
-          next = s;
-          rev = false;
-          break;
-        }
-        if (endKey(s.b) === tip) {
-          next = s;
-          rev = true;
-          break;
-        }
-      }
+    for (let guard = 0; guard <= segs.length; guard++) {
+      const lastItem = chain[chain.length - 1];
+      const next = pickBestNeighbor(itemEndV(lastItem), lastItem.seg.polylineId, true);
       if (!next) break;
-      unused.delete(next.id);
-      chain.push({ seg: next, reversed: rev });
-      if (chain.length > segs.length + 2) break;
+      unused.delete(next.seg.id);
+      chain.push(next);
     }
-    out.push(...chain);
+    /* گسترش از ابتدا (در صورتی که نقطهٔ شروع وسط زنجیره یا گره بوده باشد) */
+    for (let guard = 0; guard <= segs.length; guard++) {
+      const firstItem = chain[0];
+      const prev = pickBestNeighbor(itemStartV(firstItem), firstItem.seg.polylineId, false);
+      if (!prev) break;
+      unused.delete(prev.seg.id);
+      chain.unshift(prev);
+    }
+
+    chains.push(orientChainCanonically(chain));
   }
-  return out;
+
+  if (chains.length > 1) {
+    chains.sort((cA, cB) => {
+      const pA = chainPolyline(cA);
+      const pB = chainPolyline(cB);
+      let minZA = Infinity, maxZA = -Infinity;
+      for (const q of pA) { if (q.z < minZA) minZA = q.z; if (q.z > maxZA) maxZA = q.z; }
+      let minZB = Infinity, maxZB = -Infinity;
+      for (const q of pB) { if (q.z < minZB) minZB = q.z; if (q.z > maxZB) maxZB = q.z; }
+      const disjointZ = maxZA <= minZB + 1e-3 || maxZB <= minZA + 1e-3;
+      if (disjointZ) return minZA - minZB;
+      if (cB.length !== cA.length) return cB.length - cA.length;
+      return (pA[0]?.z ?? 0) - (pB[0]?.z ?? 0);
+    });
+  }
+
+  return chains.flat();
 }
 
 /** نمونه‌برداری زنجیره به چندضلعی پیوسته (به ترتیب مسیر) */
@@ -525,8 +741,8 @@ export function chainPolyline(chain: ChainItem[]): SPoint[] {
 }
 
 export interface SplitResult {
-  outer: SPoint[]; // شاخه خارج کاسه (قبل از نقطه Split در مسیر)
-  inner: SPoint[]; // شاخه داخل کاسه (بعد از نقطه Split در مسیر)
+  outer: SPoint[]; // شاخه خارج کاسه (از انتهای آزاد خارجی تا نقطه Split)
+  inner: SPoint[]; // شاخه داخل کاسه (از نقطه Split تا انتهای آزاد داخلی)
   splitIndex: number; // اندیس رأس Split در چندضلعی زنجیره
   splitAt: SPoint; // نزدیک‌ترین نقطه زنجیره به نقطه Split
   outerDir: 1 | -1; // جهت حرکت طولی شاخه خارجی (+۱ پیشرو / ‎−۱‎ برگشت)
@@ -534,10 +750,11 @@ export interface SplitResult {
 }
 
 /**
- * تقسیم زنجیره در نزدیک‌ترین نقطهٔ مسیر به Split + تشخیص جهت هر شاخه.
+ * تقسیم زنجیره در نزدیک‌ترین نقطهٔ مسیر به Split + تشخیص جهت و سمت هندسی هر شاخه.
  * نزدیک‌ترین نقطه روی خودِ پاره‌خط‌ها (پرتو) پیدا می‌شود — نه فقط رأس‌ها —
  * تا مثلاً نقطهٔ وسط لبه دقیقاً روی ضخامت لبه بیفتد و شاخه داخلی تمیز جدا شود.
- * جهت هر شاخه از روی اختلاف Z ابتدا و انتهای آن تعیین می‌شود.
+ * همچنین حتی اگر زنجیرهٔ ورودی از داخل به خارج پیمایش شده باشد، شاخهٔ خارجی همیشه
+ * از انتهای آزاد به Split و شاخهٔ داخلی از Split به انتهای آزاد برگردانده می‌شود.
  */
 export function splitChainAt(poly: SPoint[], split: SPoint): SplitResult {
   let bi = 0;
@@ -560,8 +777,11 @@ export function splitChainAt(poly: SPoint[], split: SPoint): SplitResult {
       proj = { z: px, r: pr };
     }
   }
-  const outer = [...poly.slice(0, bi + 1), { ...proj }];
-  const inner = [{ ...proj }, ...poly.slice(bi + 1)];
+  const rawOuter = [...poly.slice(0, bi + 1), { ...proj }];
+  const rawInner = [{ ...proj }, ...poly.slice(bi + 1)];
+  const reversedBranches = compareOuterVsInnerBranches(rawOuter, rawInner) < -1e-6;
+  const outer = reversedBranches ? [...rawInner].reverse() : rawOuter;
+  const inner = reversedBranches ? [...rawOuter].reverse() : rawInner;
   const dir = (arr: SPoint[]): 1 | -1 => (arr.length < 2 || arr[arr.length - 1].z >= arr[0].z ? 1 : -1);
   return { outer, inner, splitIndex: bi, splitAt: proj, outerDir: dir(outer), innerDir: dir(inner) };
 }
@@ -622,25 +842,19 @@ export function branchPathPoints(branch: SPoint[], blankR: number, blankL: numbe
     .map((p) => ({ id: ++branchUid, z: Math.min(blankL, Math.max(0, p.z)), r: Math.min(blankR, Math.max(0, p.r)), smooth: false }));
 }
 
-export function branchPoints(branch: SPoint[], blankR: number, blankL: number, keep: "max" | "min"): PPoint[] {
+export function branchPoints(branch: SPoint[], blankR: number, blankL: number, _keep: "max" | "min"): PPoint[] {
   const raw: SPoint[] = [];
   for (const p of branch) {
     if (!Number.isFinite(p.z) || !Number.isFinite(p.r)) continue;
-    raw.push({ z: Math.min(blankL, Math.max(0, p.z)), r: Math.min(blankR, Math.max(0, p.r)) });
-  }
-  if (raw.length < 2) return [];
-  raw.sort((x, y) => x.z - y.z);
-  const merged: SPoint[] = [];
-  for (const p of raw) {
-    const last = merged[merged.length - 1];
-    if (last && Math.abs(last.z - p.z) < 0.06) {
-      if (keep === "max" ? p.r > last.r : p.r < last.r) last.r = p.r;
-    } else {
-      merged.push({ ...p });
+    const clamped = { z: Math.min(blankL, Math.max(0, p.z)), r: Math.min(blankR, Math.max(0, p.r)) };
+    const last = raw[raw.length - 1];
+    if (!last || Math.hypot(clamped.z - last.z, clamped.r - last.r) > 1e-6) {
+      raw.push(clamped);
     }
   }
-  if (merged.length < 2) return [];
-  return merged.map((p) => ({ id: ++branchUid, z: p.z, r: p.r, smooth: false }));
+  if (raw.length < 2) return [];
+  if (raw[raw.length - 1].z < raw[0].z - 1e-6) raw.reverse();
+  return raw.map((p) => ({ id: ++branchUid, z: p.z, r: p.r, smooth: false }));
 }
 
 /** اعتبارسنجی داده‌های ذخیره‌شده */
@@ -671,6 +885,8 @@ export function normalizeSketch(raw: unknown): SketchSeg[] | null {
       arcDivisions: typeof s.arcDivisions === "number" && Number.isFinite(s.arcDivisions)
         ? Math.max(2, Math.min(500, Math.round(s.arcDivisions)))
         : undefined,
+      independentA: typeof s.independentA === "boolean" ? s.independentA : undefined,
+      independentB: typeof s.independentB === "boolean" ? s.independentB : undefined,
     });
   }
   for (const s of out) segUid = Math.max(segUid, s.id);

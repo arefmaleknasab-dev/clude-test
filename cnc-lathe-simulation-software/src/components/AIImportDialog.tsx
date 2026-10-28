@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { parseIllustrator, transformAiSegments, type AiDocument } from "../lib/ai";
 import type { SketchSeg } from "../lib/sketch";
+import { DEFAULT_THEME_COLORS, type ThemeColors } from "../lib/theme";
 import { IconCheck, IconX } from "./icons";
 import { cn } from "../utils/cn";
 
@@ -19,7 +20,15 @@ function pathOf(segment: SketchSeg) {
   return `M${p(segment.a)} L${p(segment.b)}`;
 }
 
-export default function AIImportDialog({ onClose, onImport }: { onClose: () => void; onImport: (segments: SketchSeg[], length: number, diameter: number) => void }) {
+export default function AIImportDialog({
+  onClose,
+  onImport,
+  themeColors = DEFAULT_THEME_COLORS,
+}: {
+  onClose: () => void;
+  onImport: (segments: SketchSeg[], length: number, diameter: number) => void;
+  themeColors?: ThemeColors;
+}) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [doc, setDoc] = useState<AiDocument | null>(null);
   const [fileName, setFileName] = useState("");
@@ -75,16 +84,16 @@ export default function AIImportDialog({ onClose, onImport }: { onClose: () => v
           <button className="btn !p-2" onClick={onClose}><IconX className="h-4 w-4" /></button>
         </header>
         <div className="grid min-h-0 flex-1 gap-3 overflow-y-auto p-3 md:grid-cols-[1fr_260px]">
-          <div className="relative min-h-[360px] overflow-hidden rounded-lg border border-edge bg-[#070b10]">
+          <div className="relative min-h-[360px] overflow-hidden rounded-lg border border-edge" style={{ backgroundColor: themeColors.editorBg }}>
             {!doc ? <button className="absolute inset-0 m-auto h-24 w-60 rounded-lg border border-dashed border-teal/50 text-sm font-bold text-teal hover:bg-teal/10" onClick={() => inputRef.current?.click()}>انتخاب فایل AI</button> : (
               <>
               {/* مقادیر اصلی خط‌کش قابل ویرایش‌اند و مستقیماً Scale را تغییر می‌دهند. */}
-              <label className="absolute top-1.5 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded border border-[#9aa7b4]/60 bg-[#071018]/95 px-1.5 py-1 text-[9px] text-[#9aa7b4] shadow-lg" onPointerDown={(e) => e.stopPropagation()}>
+              <label className="absolute top-1.5 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded border border-edge2 bg-panel/95 px-1.5 py-1 text-[9px] text-mute shadow-lg" onPointerDown={(e) => e.stopPropagation()}>
                 W
                 <input type="number" min={.001} step={.1} value={Number(width.toFixed(3))} onChange={(e) => setFinalDimension("width", Number(e.target.value))} className="w-16 bg-transparent text-center font-mono text-[10px] text-ink outline-none" dir="ltr" />
                 mm
               </label>
-              <label className="absolute top-1/2 right-1.5 z-20 flex -translate-y-1/2 items-center gap-1 rounded border border-[#9aa7b4]/60 bg-[#071018]/95 px-1.5 py-1 text-[9px] text-[#9aa7b4] shadow-lg" onPointerDown={(e) => e.stopPropagation()}>
+              <label className="absolute top-1/2 right-1.5 z-20 flex -translate-y-1/2 items-center gap-1 rounded border border-edge2 bg-panel/95 px-1.5 py-1 text-[9px] text-mute shadow-lg" onPointerDown={(e) => e.stopPropagation()}>
                 H
                 <input type="number" min={.001} step={.1} value={Number(height.toFixed(3))} onChange={(e) => setFinalDimension("height", Number(e.target.value))} className="w-16 bg-transparent text-center font-mono text-[10px] text-ink outline-none" dir="ltr" />
                 mm
@@ -93,19 +102,19 @@ export default function AIImportDialog({ onClose, onImport }: { onClose: () => v
                 className="h-full min-h-[360px] w-full"
                 viewBox={`${-canvasWidth * .08} ${-canvasHeight * .08} ${canvasWidth * 1.16 || 1} ${canvasHeight * 1.16 || 1}`}
               >
-                <rect width={canvasWidth} height={canvasHeight} fill="#111923" stroke="#334155" strokeWidth={Math.max(canvasWidth, canvasHeight) / 500} />
+                <rect width={canvasWidth} height={canvasHeight} fill={themeColors.uiPanel2} stroke={themeColors.editorBlankBox} strokeWidth={Math.max(canvasWidth, canvasHeight) / 500} />
                 {/* خط‌کش‌ها همیشه به Bounding Box خود طرح قفل‌اند؛ حاشیه و قاب صفحه
                     فقط فضای اطراف را تغییر می‌دهند و روی اندازه‌گیری اثر ندارند. */}
                 <defs>
-                  <marker id="ai-ruler-arrow-x" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto-start-reverse" markerUnits="strokeWidth"><path d="M0 0 8 4 0 8z" fill="#9aa7b4" /></marker>
-                  <marker id="ai-ruler-arrow-y" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto-start-reverse" markerUnits="strokeWidth"><path d="M0 0 8 4 0 8z" fill="#9aa7b4" /></marker>
+                  <marker id="ai-ruler-arrow-x" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto-start-reverse" markerUnits="strokeWidth"><path d="M0 0 8 4 0 8z" fill={themeColors.uiMute} /></marker>
+                  <marker id="ai-ruler-arrow-y" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto-start-reverse" markerUnits="strokeWidth"><path d="M0 0 8 4 0 8z" fill={themeColors.uiMute} /></marker>
                 </defs>
                 <g pointerEvents="none">
-                  <line x1={designX} y1={designY - height * .045} x2={designX + width} y2={designY - height * .045} stroke="#9aa7b4" strokeWidth={1.2} markerStart="url(#ai-ruler-arrow-x)" markerEnd="url(#ai-ruler-arrow-x)" vectorEffect="non-scaling-stroke" />
-                  <line x1={designX + width * 1.045} y1={designY} x2={designX + width * 1.045} y2={designY + height} stroke="#9aa7b4" strokeWidth={1.2} markerStart="url(#ai-ruler-arrow-y)" markerEnd="url(#ai-ruler-arrow-y)" vectorEffect="non-scaling-stroke" />
+                  <line x1={designX} y1={designY - height * .045} x2={designX + width} y2={designY - height * .045} stroke={themeColors.uiMute} strokeWidth={1.2} markerStart="url(#ai-ruler-arrow-x)" markerEnd="url(#ai-ruler-arrow-x)" vectorEffect="non-scaling-stroke" />
+                  <line x1={designX + width * 1.045} y1={designY} x2={designX + width * 1.045} y2={designY + height} stroke={themeColors.uiMute} strokeWidth={1.2} markerStart="url(#ai-ruler-arrow-y)" markerEnd="url(#ai-ruler-arrow-y)" vectorEffect="non-scaling-stroke" />
                 </g>
-                <g fill="none" stroke="#46d7ba" strokeWidth={Math.max(canvasWidth, canvasHeight) / 350} vectorEffect="non-scaling-stroke">{preview.map((segment) => <path key={segment.id} d={pathOf({ ...segment, a: { z: designX + segment.a.z, r: designY + height - segment.a.r }, b: { z: designX + segment.b.z, r: designY + height - segment.b.r }, c1: segment.c1 ? { z: designX + segment.c1.z, r: designY + height - segment.c1.r } : undefined, c2: segment.c2 ? { z: designX + segment.c2.z, r: designY + height - segment.c2.r } : undefined })} />)}</g>
-                <g transform={`translate(${designX + anchor.x * width} ${designY + anchor.y * height})`}><circle r={Math.max(canvasWidth, canvasHeight) / 90} fill="#ffcf66" stroke="#111" strokeWidth={2} vectorEffect="non-scaling-stroke" /><path d={`M${-Math.max(canvasWidth,canvasHeight)/50} 0H${Math.max(canvasWidth,canvasHeight)/50}M0 ${-Math.max(canvasWidth,canvasHeight)/50}V${Math.max(canvasWidth,canvasHeight)/50}`} stroke="#ffcf66" strokeWidth={1.25} vectorEffect="non-scaling-stroke" /></g>
+                <g fill="none" stroke={themeColors.profileOuter} strokeWidth={Math.max(canvasWidth, canvasHeight) / 350} vectorEffect="non-scaling-stroke">{preview.map((segment) => <path key={segment.id} d={pathOf({ ...segment, a: { z: designX + segment.a.z, r: designY + height - segment.a.r }, b: { z: designX + segment.b.z, r: designY + height - segment.b.r }, c1: segment.c1 ? { z: designX + segment.c1.z, r: designY + height - segment.c1.r } : undefined, c2: segment.c2 ? { z: designX + segment.c2.z, r: designY + height - segment.c2.r } : undefined })} />)}</g>
+                <g transform={`translate(${designX + anchor.x * width} ${designY + anchor.y * height})`}><circle r={Math.max(canvasWidth, canvasHeight) / 90} fill={themeColors.transformGuide} stroke={themeColors.editorBg} strokeWidth={2} vectorEffect="non-scaling-stroke" /><path d={`M${-Math.max(canvasWidth,canvasHeight)/50} 0H${Math.max(canvasWidth,canvasHeight)/50}M0 ${-Math.max(canvasWidth,canvasHeight)/50}V${Math.max(canvasWidth,canvasHeight)/50}`} stroke={themeColors.transformGuide} strokeWidth={1.25} vectorEffect="non-scaling-stroke" /></g>
               </svg>
               </>
             )}

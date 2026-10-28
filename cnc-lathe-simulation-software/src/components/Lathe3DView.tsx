@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { SketchSeg } from "../lib/sketch";
 import { chainPolyline, orderChain } from "../lib/sketch";
+import { DEFAULT_THEME_COLORS, hexToRgb01, type ThemeColors } from "../lib/theme";
 
 /* ------------------------------------------------------------------ */
 /*  نمای سه‌بعدی حرفه‌ای تراش (Lathe) — WebGL2 خام، بدون وابستگی خارجی    */
@@ -9,12 +10,16 @@ import { chainPolyline, orderChain } from "../lib/sketch";
 /* ------------------------------------------------------------------ */
 
 interface Props {
+  /** شناسه پروژه برای حفظ سبک وضعیت دوربین/گزینه‌ها هنگام بستن و باز کردن پنل */
+  projectId?: string;
   /** اسکچ زنده (در حالت ویرایش مسیر: اسکچ پیش‌نویس) */
   sketch: SketchSeg[];
   blankD: number;
   blankL: number;
   /** حالت کاسه (Split): دیوارهٔ دوجداره است و سر قطعه درپوش ندارد */
   split: boolean;
+  /** پالت رنگ فعال نرم‌افزار */
+  themeColors?: ThemeColors;
 }
 
 interface P2 {
@@ -188,28 +193,67 @@ function mul(a: Float32Array, b: Float32Array) {
     }
   return o;
 }
+function matRotZ(theta: number) {
+  const c = Math.cos(theta);
+  const s = Math.sin(theta);
+  const m = new Float32Array(16);
+  m[0] = c;
+  m[1] = s;
+  m[4] = -s;
+  m[5] = c;
+  m[10] = 1;
+  m[15] = 1;
+  return m;
+}
+function matTranslate(tx: number, ty: number, tz: number) {
+  const m = new Float32Array(16);
+  m[0] = 1;
+  m[5] = 1;
+  m[10] = 1;
+  m[12] = tx;
+  m[13] = ty;
+  m[14] = tz;
+  m[15] = 1;
+  return m;
+}
 
 /* ---------- شیدرها ---------- */
 const VS = `#version 300 es
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNor;
 uniform mat4 uVP;
+uniform mat4 uModel;
 out vec3 vPos;
 out vec3 vNor;
-void main(){ vPos=aPos; vNor=aNor; gl_Position=uVP*vec4(aPos,1.0); }`;
+out vec3 vLoc;
+void main(){
+  vec4 wp = uModel * vec4(aPos, 1.0);
+  vPos = wp.xyz;
+  vNor = mat3(uModel) * aNor;
+  vLoc = aPos;
+  gl_Position = uVP * wp;
+}`;
 
 const FS = `#version 300 es
 precision highp float;
 in vec3 vPos;
 in vec3 vNor;
+in vec3 vLoc;
 uniform vec3 uEye;
 uniform float uCut;
+uniform vec2 uCutCS;
 uniform int uMode;
 uniform vec4 uColor;
+uniform vec3 uBaseColor;
+uniform vec3 uRimColor;
 out vec4 o;
 void main(){
   if(uMode==1){ o=uColor; return; }
-  if(uCut>0.5 && vPos.y>0.0 && vPos.z>0.0) discard;
+  if(uCut>0.5){
+    float cu = vLoc.y * uCutCS.x + vLoc.z * uCutCS.y;
+    float cv = -vLoc.y * uCutCS.y + vLoc.z * uCutCS.x;
+    if(cu>0.0 && cv>0.0) discard;
+  }
   vec3 n=normalize(vNor);
   vec3 v=normalize(uEye-vPos);
   if(dot(n,v)<0.0) n=-n;
@@ -227,12 +271,12 @@ void main(){
   float e=smoothstep(-0.35,0.7,r.y);
   vec3 env=mix(vec3(0.07,0.06,0.05),vec3(0.62,0.66,0.72),e);
   float fres=pow(1.0-max(dot(n,v),0.0),3.0);
-  vec3 base=vec3(0.69,0.72,0.77);
+  vec3 base=uBaseColor;
   vec3 amb=mix(vec3(0.07,0.06,0.05),vec3(0.20,0.21,0.24),n.y*0.5+0.5);
   vec3 c=base*(amb+d1*0.62+d2*0.26+d3*0.12);
   c=mix(c,env*base*1.15,0.38);
   c+=vec3(1.0,0.97,0.9)*sp*0.55+vec3(0.8,0.9,1.0)*sp2*0.2;
-  c+=vec3(0.89,0.66,0.31)*fres*0.28;
+  c+=uRimColor*fres*0.28;
   c=pow(c,vec3(0.93));
   o=vec4(c,1.0);
 }`;
@@ -263,14 +307,13 @@ function buildScene(blankD: number, blankL: number): Scene {
   const L = blankL;
   const out: number[] = [];
   const push = (...v: number[]) => out.push(...v);
-  /* شبکهٔ کف */
-  const floorY = -R * 1.08;
+  /* شبکهٔ کف (در ارتفاع پایه صفر؛ ارتفاع واقعی بر حسب چرخش قطعه در رندر اعمال می‌شود) */
   const step = niceStep(Math.max(L, blankD) * 1.6);
   const ext = Math.ceil((Math.max(L, blankD) * 1.1) / step) * step;
   const g0 = out.length / 3;
   for (let v = -ext; v <= ext + 1e-9; v += step) {
-    push(-ext, floorY, v, ext, floorY, v);
-    push(v, floorY, -ext, v, floorY, ext);
+    push(-ext, 0, v, ext, 0, v);
+    push(v, 0, -ext, v, 0, ext);
   }
   const grid: [number, number] = [g0, out.length / 3 - g0];
   /* محور تراش (خط‌چین) */
@@ -319,6 +362,8 @@ function fitCam(blankD: number, blankL: number, view = VIEWS.iso): Cam {
 interface GLState {
   gl: WebGL2RenderingContext;
   prog: WebGLProgram;
+  vs: WebGLShader;
+  fs: WebGLShader;
   u: Record<string, WebGLUniformLocation | null>;
   meshVao: WebGLVertexArrayObject;
   wireVao: WebGLVertexArrayObject;
@@ -331,18 +376,81 @@ interface GLState {
   wireCount: number;
 }
 
+type RotStep = 0 | 1 | 2 | 3;
+const ROT_LABELS: Record<RotStep, string> = {
+  0: "افقی (پیش‌فرض تراش)",
+  1: "ایستاده (+۹۰°)",
+  2: "افقی معکوس (۱۸۰°)",
+  3: "عمودی معکوس (۲۷۰°)",
+};
+
+interface ViewOpts {
+  wire: boolean;
+  stock: boolean;
+  cut: boolean;
+  grid: boolean;
+  axis: boolean;
+}
+
+const DEFAULT_OPTS: ViewOpts = { wire: false, stock: false, cut: false, grid: true, axis: false };
+
+/* کش فوق‌سبک فقط برای زاویه دوربین و دکمه‌های نوار ابزار (بدون نگهداری مش یا WebGL در حافظه هنگام بسته‌بودن پنل) */
+const SAVED_VIEW_STATE = new Map<
+  string,
+  { cam: Cam; opts: ViewOpts; rot: RotStep; blankD: number; blankL: number }
+>();
+
+function useLazyRef<T>(init: () => T): React.MutableRefObject<T> {
+  const ref = useRef<T | null>(null);
+  if (ref.current === null) ref.current = init();
+  return ref as React.MutableRefObject<T>;
+}
+
 /* ================================================================== */
-export default function Lathe3DView({ sketch, blankD, blankL, split }: Props) {
+function Lathe3DViewInner({ projectId = "default", sketch, blankD, blankL, split, themeColors = DEFAULT_THEME_COLORS }: Props) {
+  const savedInit = SAVED_VIEW_STATE.get(projectId);
+  const sameBlank = savedInit != null && savedInit.blankD === blankD && savedInit.blankL === blankL;
+  const initRot: RotStep = savedInit?.rot ?? 0;
+  const themeRef = useRef(themeColors);
+  themeRef.current = themeColors;
+
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const glRef = useRef<GLState | null>(null);
-  const camRef = useRef<Cam>(fitCam(blankD, blankL));
-  const sceneRef = useRef<Scene>(buildScene(blankD, blankL));
-  const optsRef = useRef({ wire: false, stock: true, cut: false, grid: true });
+  const camRef = useLazyRef<Cam>(() => (sameBlank && savedInit ? { ...savedInit.cam } : fitCam(blankD, blankL)));
+  const sceneRef = useLazyRef<Scene>(() => buildScene(blankD, blankL));
+  const prevBlankRef = useRef({ d: blankD, l: blankL });
+  const optsRef = useRef<ViewOpts>(savedInit ? { ...savedInit.opts } : { ...DEFAULT_OPTS });
+  const rotRef = useRef<RotStep>(initRot);
+  const thetaRef = useRef(initRot * (Math.PI / 2));
+  const cutAlphaRef = useRef(initRot === 1 || initRot === 2 ? Math.PI / 2 : 0);
+  const animRef = useRef<{ fromTheta: number; toTheta: number; fromCut: number; toCut: number; t0: number } | null>(null);
+  const blankDRef = useRef(blankD);
+  const blankLRef = useRef(blankL);
+  blankDRef.current = blankD;
+  blankLRef.current = blankL;
   const rafRef = useRef<number | null>(null);
-  const [opts, setOpts] = useState(optsRef.current);
+  const [opts, setOpts] = useState<ViewOpts>(optsRef.current);
+  const [rot, setRot] = useState<RotStep>(initRot);
   const [error, setError] = useState<string | null>(null);
   optsRef.current = opts;
+
+  /* ذخیرهٔ زاویه دوربین و تنظیمات سبک هنگام بسته‌شدن پنل تا با بازگشایی مجدد حفظ شوند */
+  useEffect(() => {
+    return () => {
+      if (SAVED_VIEW_STATE.size >= 32 && !SAVED_VIEW_STATE.has(projectId)) {
+        const oldest = SAVED_VIEW_STATE.keys().next().value;
+        if (oldest !== undefined) SAVED_VIEW_STATE.delete(oldest);
+      }
+      SAVED_VIEW_STATE.set(projectId, {
+        cam: { ...camRef.current },
+        opts: { ...optsRef.current },
+        rot: rotRef.current,
+        blankD: blankDRef.current,
+        blankL: blankLRef.current,
+      });
+    };
+  }, [projectId, camRef]);
 
   const prof = useMemo(() => buildProfile(sketch, blankD / 2, blankL), [sketch, blankD, blankL]);
   const mesh = useMemo(() => buildMesh(prof, blankL / 2, !split), [prof, blankL, split]);
@@ -369,6 +477,31 @@ export default function Lathe3DView({ sketch, blankD, blankL, split }: Props) {
     const w = canvas.width;
     const h = canvas.height;
     if (!w || !h) return;
+
+    let animating = false;
+    const anim = animRef.current;
+    if (anim) {
+      const t = Math.min(1, Math.max(0, (performance.now() - anim.t0) / 220));
+      const k = 1 - Math.pow(1 - t, 3);
+      thetaRef.current = anim.fromTheta + (anim.toTheta - anim.fromTheta) * k;
+      cutAlphaRef.current = anim.fromCut + (anim.toCut - anim.fromCut) * k;
+      if (t >= 1) {
+        thetaRef.current = rotRef.current * (Math.PI / 2);
+        cutAlphaRef.current = rotRef.current === 1 || rotRef.current === 2 ? Math.PI / 2 : 0;
+        animRef.current = null;
+      } else {
+        animating = true;
+      }
+    }
+
+    const theta = thetaRef.current;
+    const cutAlpha = cutAlphaRef.current;
+    const partModel = matRotZ(theta);
+    const halfL = blankLRef.current / 2;
+    const radStock = blankDRef.current / 2;
+    const floorY = -1.08 * (halfL * Math.abs(Math.sin(theta)) + radStock * Math.abs(Math.cos(theta)));
+    const gridModel = matTranslate(0, floorY, 0);
+
     const cam = camRef.current;
     const o = optsRef.current;
     const ce = Math.cos(cam.el);
@@ -381,15 +514,28 @@ export default function Lathe3DView({ sketch, blankD, blankL, split }: Props) {
     const proj = perspective(FOV, w / h, Math.max(0.05, cam.dist * 0.02), cam.dist * 12 + 1000);
     const vp = mul(proj, view.m);
 
+    const tc = themeRef.current;
+    const [bgR, bgG, bgB] = hexToRgb01(tc.view3dBg);
+    const [partR, partG, partB] = hexToRgb01(tc.view3dPart);
+    const [rimR, rimG, rimB] = hexToRgb01(tc.view3dRim);
+    const [wireR, wireG, wireB] = hexToRgb01(tc.view3dWire);
+    const [axisR, axisG, axisB] = hexToRgb01(tc.view3dAxis);
+    const [stockR, stockG, stockB] = hexToRgb01(tc.view3dStock);
+    const [gridR, gridG, gridB] = hexToRgb01(tc.view3dGrid);
+
     gl.viewport(0, 0, w, h);
-    gl.clearColor(0.078, 0.063, 0.043, 1);
+    gl.clearColor(bgR, bgG, bgB, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
     gl.useProgram(st.prog);
     gl.uniformMatrix4fv(u.uVP, false, vp);
+    gl.uniformMatrix4fv(u.uModel, false, partModel);
     gl.uniform3f(u.uEye, eye[0], eye[1], eye[2]);
     gl.uniform1f(u.uCut, o.cut ? 1 : 0);
+    gl.uniform2f(u.uCutCS, Math.cos(cutAlpha), Math.sin(cutAlpha));
+    gl.uniform3f(u.uBaseColor, partR, partG, partB);
+    gl.uniform3f(u.uRimColor, rimR, rimG, rimB);
 
     /* قطعه */
     gl.uniform1i(u.uMode, 0);
@@ -403,100 +549,141 @@ export default function Lathe3DView({ sketch, blankD, blankL, split }: Props) {
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.uniform1i(u.uMode, 1);
     if (o.wire && st.wireCount) {
-      gl.uniform4f(u.uColor, 0.95, 0.78, 0.42, 0.55);
+      gl.uniform4f(u.uColor, wireR, wireG, wireB, 0.55);
       gl.bindVertexArray(st.wireVao);
       gl.drawElements(gl.LINES, st.wireCount, gl.UNSIGNED_INT, 0);
     }
     /* صحنهٔ کمکی */
     const sc = sceneRef.current;
     gl.bindVertexArray(st.sceneVao);
-    if (o.grid) {
-      gl.uniform4f(u.uColor, 0.55, 0.47, 0.34, 0.22);
-      gl.drawArrays(gl.LINES, sc.grid[0], sc.grid[1]);
+    if (o.axis) {
+      gl.uniform4f(u.uColor, axisR, axisG, axisB, 0.78);
+      gl.drawArrays(gl.LINES, sc.axis[0], sc.axis[1]);
     }
-    gl.uniform4f(u.uColor, 0.89, 0.66, 0.31, 0.75);
-    gl.drawArrays(gl.LINES, sc.axis[0], sc.axis[1]);
     if (o.stock) {
-      gl.uniform4f(u.uColor, 0.27, 0.70, 0.58, 0.42);
+      gl.uniform4f(u.uColor, stockR, stockG, stockB, 0.45);
       gl.drawArrays(gl.LINES, sc.stock[0], sc.stock[1]);
+    }
+    if (o.grid) {
+      gl.uniformMatrix4fv(u.uModel, false, gridModel);
+      gl.uniform4f(u.uColor, gridR, gridG, gridB, 0.28);
+      gl.drawArrays(gl.LINES, sc.grid[0], sc.grid[1]);
     }
     gl.disable(gl.BLEND);
     gl.bindVertexArray(null);
+
+    if (animating && rafRef.current == null) {
+      rafRef.current = requestAnimationFrame(draw);
+    }
   }, []);
 
   const requestRender = useCallback(() => {
     if (rafRef.current == null) rafRef.current = requestAnimationFrame(draw);
   }, [draw]);
 
+  const [glEpoch, setGlEpoch] = useState(0);
+
   /* ---- راه‌اندازی WebGL ---- */
   useEffect(() => {
-    const canvas = canvasRef.current!;
-    const gl = canvas.getContext("webgl2", { antialias: true, alpha: false, powerPreference: "high-performance" });
-    if (!gl) {
-      setError("WebGL2 در این مرورگر یا کارت گرافیک فعال نیست.");
-      return;
-    }
-    try {
-      const prog = gl.createProgram()!;
-      gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VS));
-      gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, FS));
-      gl.linkProgram(prog);
-      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || "link error");
-      const u: Record<string, WebGLUniformLocation | null> = {};
-      for (const n of ["uVP", "uEye", "uCut", "uMode", "uColor"]) u[n] = gl.getUniformLocation(prog, n);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const initGl = () => {
+      const gl = canvas.getContext("webgl2", { antialias: true, alpha: false, preserveDrawingBuffer: true });
+      if (!gl || gl.isContextLost()) {
+        setError("WebGL2 در این مرورگر یا کارت گرافیک فعال نیست.");
+        return;
+      }
+      try {
+        const vs = compile(gl, gl.VERTEX_SHADER, VS);
+        const fs = compile(gl, gl.FRAGMENT_SHADER, FS);
+        const prog = gl.createProgram();
+        if (!prog) throw new Error("program allocation failed");
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || "link error");
+        const u: Record<string, WebGLUniformLocation | null> = {};
+        for (const n of ["uVP", "uModel", "uEye", "uCut", "uCutCS", "uMode", "uColor", "uBaseColor", "uRimColor"]) {
+          u[n] = gl.getUniformLocation(prog, n);
+        }
 
-      const vbo = gl.createBuffer()!;
-      const ibo = gl.createBuffer()!;
-      const wibo = gl.createBuffer()!;
-      const sbo = gl.createBuffer()!;
-      const mk = (index: WebGLBuffer) => {
-        const vao = gl.createVertexArray()!;
-        gl.bindVertexArray(vao);
-        gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+        const vbo = gl.createBuffer();
+        const ibo = gl.createBuffer();
+        const wibo = gl.createBuffer();
+        const sbo = gl.createBuffer();
+        if (!vbo || !ibo || !wibo || !sbo) throw new Error("buffer allocation failed");
+        const mk = (index: WebGLBuffer) => {
+          const vao = gl.createVertexArray();
+          if (!vao) throw new Error("vao allocation failed");
+          gl.bindVertexArray(vao);
+          gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+          gl.enableVertexAttribArray(0);
+          gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+          gl.enableVertexAttribArray(1);
+          gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index);
+          return vao;
+        };
+        const meshVao = mk(ibo);
+        const wireVao = mk(wibo);
+        const sceneVao = gl.createVertexArray();
+        if (!sceneVao) throw new Error("scene vao allocation failed");
+        gl.bindVertexArray(sceneVao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, sbo);
         gl.enableVertexAttribArray(0);
-        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
-        gl.enableVertexAttribArray(1);
-        gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index);
-        return vao;
-      };
-      const meshVao = mk(ibo);
-      const wireVao = mk(wibo);
-      const sceneVao = gl.createVertexArray()!;
-      gl.bindVertexArray(sceneVao);
-      gl.bindBuffer(gl.ARRAY_BUFFER, sbo);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
-      gl.vertexAttrib3f(1, 0, 1, 0);
-      gl.bindVertexArray(null);
-      gl.bindBuffer(gl.ARRAY_BUFFER, sbo);
-      gl.bufferData(gl.ARRAY_BUFFER, sceneRef.current.data, gl.STATIC_DRAW);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+        gl.vertexAttrib3f(1, 0, 1, 0);
+        gl.bindVertexArray(null);
+        gl.bindBuffer(gl.ARRAY_BUFFER, sbo);
+        if (sceneRef.current) {
+          gl.bufferData(gl.ARRAY_BUFFER, sceneRef.current.data, gl.STATIC_DRAW);
+        }
 
-      glRef.current = { gl, prog, u, meshVao, wireVao, sceneVao, vbo, ibo, wibo, sbo, triCount: 0, wireCount: 0 };
-      setError(null);
-      requestRender();
-    } catch (e) {
-      setError("خطا در راه‌اندازی نمای سه‌بعدی: " + (e as Error).message);
-    }
+        glRef.current = { gl, prog, vs, fs, u, meshVao, wireVao, sceneVao, vbo, ibo, wibo, sbo, triCount: 0, wireCount: 0 };
+        setError(null);
+        setGlEpoch((v) => v + 1);
+        requestRender();
+      } catch (e) {
+        setError("خطا در راه‌اندازی نمای سه‌بعدی: " + (e as Error).message);
+      }
+    };
+    initGl();
     const lost = (e: Event) => {
       e.preventDefault();
       glRef.current = null;
-      setError("ارتباط با کارت گرافیک قطع شد. پنل را ببندید و دوباره باز کنید.");
+      setError("ارتباط با کارت گرافیک موقتاً قطع شد؛ در حال بازیابی خودکار...");
+    };
+    const restored = () => {
+      initGl();
     };
     canvas.addEventListener("webglcontextlost", lost);
+    canvas.addEventListener("webglcontextrestored", restored);
     return () => {
       canvas.removeEventListener("webglcontextlost", lost);
+      canvas.removeEventListener("webglcontextrestored", restored);
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
+      animRef.current = null;
       const st = glRef.current;
+      glRef.current = null;
       if (st) {
+        st.gl.deleteVertexArray(st.meshVao);
+        st.gl.deleteVertexArray(st.wireVao);
+        st.gl.deleteVertexArray(st.sceneVao);
         st.gl.deleteBuffer(st.vbo);
         st.gl.deleteBuffer(st.ibo);
         st.gl.deleteBuffer(st.wibo);
         st.gl.deleteBuffer(st.sbo);
         st.gl.deleteProgram(st.prog);
+        st.gl.deleteShader(st.vs);
+        st.gl.deleteShader(st.fs);
+        /* هنگام بسته‌شدن واقعی پنجره نمای سه‌بعدی (جداشدن بوم از DOM)، کانتکست WebGL و حافظه کارت گرافیک فوراً آزاد می‌شوند */
+        if (!canvas.isConnected) {
+          canvas.width = 0;
+          canvas.height = 0;
+          st.gl.getExtension("WEBGL_lose_context")?.loseContext();
+        }
       }
-      glRef.current = null;
     };
   }, [requestRender]);
 
@@ -514,10 +701,12 @@ export default function Lathe3DView({ sketch, blankD, blankL, split }: Props) {
     st.triCount = mesh.triCount;
     st.wireCount = mesh.wire.length;
     requestRender();
-  }, [mesh, requestRender, error]);
+  }, [mesh, requestRender, error, glEpoch]);
 
   /* ---- ابعاد خام عوض شد: صحنه و دوربین بازنشانی ---- */
   useEffect(() => {
+    if (prevBlankRef.current.d === blankD && prevBlankRef.current.l === blankL) return;
+    prevBlankRef.current = { d: blankD, l: blankL };
     sceneRef.current = buildScene(blankD, blankL);
     camRef.current = fitCam(blankD, blankL);
     const st = glRef.current;
@@ -543,6 +732,14 @@ export default function Lathe3DView({ sketch, blankD, blankL, split }: Props) {
       if (canvas.width !== w || canvas.height !== h) {
         canvas.width = w;
         canvas.height = h;
+        /* تغییر width/height بوم WebGL بافر رسم را در همان لحظه پاک می‌کند؛
+           رسم هم‌زمان پیش از Paint مرورگر از هرگونه چشمک‌زدن جلوگیری می‌کند. */
+        if (rafRef.current != null) {
+          cancelAnimationFrame(rafRef.current);
+          rafRef.current = null;
+        }
+        draw();
+        return;
       }
       requestRender();
     };
@@ -550,7 +747,7 @@ export default function Lathe3DView({ sketch, blankD, blankL, split }: Props) {
     const ro = new ResizeObserver(fit);
     ro.observe(wrap);
     return () => ro.disconnect();
-  }, [requestRender]);
+  }, [draw, requestRender]);
 
   /* ---- تعامل: چرخش / جابه‌جایی / زوم ---- */
   useEffect(() => {
@@ -639,22 +836,85 @@ export default function Lathe3DView({ sketch, blankD, blankL, split }: Props) {
       canvas.removeEventListener("contextmenu", ctx);
     };
   }, [requestRender]);
-  const blankDRef = useRef(blankD);
-  const blankLRef = useRef(blankL);
-  blankDRef.current = blankD;
-  blankLRef.current = blankL;
+
+  const applyRot = useCallback(
+    (next: RotStep) => {
+      rotRef.current = next;
+      setRot(next);
+      const targetTheta = next * (Math.PI / 2);
+      const targetCut = next === 1 || next === 2 ? Math.PI / 2 : 0;
+      const reduced = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      if (reduced) {
+        animRef.current = null;
+        thetaRef.current = targetTheta;
+        cutAlphaRef.current = targetCut;
+      } else {
+        const curT = thetaRef.current;
+        const dT = Math.atan2(Math.sin(targetTheta - curT), Math.cos(targetTheta - curT));
+        const curC = cutAlphaRef.current;
+        const dC = Math.atan2(Math.sin(targetCut - curC), Math.cos(targetCut - curC));
+        animRef.current = {
+          fromTheta: curT,
+          toTheta: curT + dT,
+          fromCut: curC,
+          toCut: curC + dC,
+          t0: performance.now(),
+        };
+      }
+      requestRender();
+    },
+    [requestRender]
+  );
+
+  const toggleUpright = () => applyRot(rot === 1 ? 0 : 1);
+  const rotateStep = () => applyRot(((rot + 1) % 4) as RotStep);
 
   const setView = (name: keyof typeof VIEWS) => {
-    camRef.current = fitCam(blankD, blankL, VIEWS[name]);
+    let view = VIEWS[name];
+    if (name === "end") {
+      const r = rotRef.current;
+      view =
+        r === 0
+          ? { az: Math.PI / 2, el: 0 }
+          : r === 1
+            ? { az: 0, el: 1.55 }
+            : r === 2
+              ? { az: -Math.PI / 2, el: 0 }
+              : { az: 0, el: -1.55 };
+    }
+    camRef.current = fitCam(blankD, blankL, view);
     requestRender();
   };
   const toggle = (k: keyof typeof opts) => setOpts((o) => ({ ...o, [k]: !o[k] }));
+
+  /* بازرندر لحظه‌ای هنگام تغییر رنگ‌های بخش سه‌بعدی در تنظیمات تم */
+  useEffect(() => {
+    requestRender();
+  }, [
+    themeColors.view3dBg,
+    themeColors.view3dPart,
+    themeColors.view3dRim,
+    themeColors.view3dWire,
+    themeColors.view3dStock,
+    themeColors.view3dGrid,
+    themeColors.view3dAxis,
+    requestRender,
+  ]);
 
   return (
     <div
       ref={wrapRef}
       dir="rtl"
-      style={{ position: "relative", width: "100%", height: "100%", minHeight: 220, overflow: "hidden", borderRadius: 8, border: "1px solid #3b2f20", background: "#14100b" }}
+      style={{
+        position: "relative",
+        width: "100%",
+        height: "100%",
+        minHeight: 220,
+        overflow: "hidden",
+        borderRadius: 8,
+        border: "1px solid var(--color-edge)",
+        background: themeColors.view3dBg,
+      }}
     >
       <canvas ref={canvasRef} style={{ display: "block", width: "100%", height: "100%", touchAction: "none", cursor: "grab" }} />
 
@@ -666,10 +926,27 @@ export default function Lathe3DView({ sketch, blankD, blankL, split }: Props) {
           <Btn onClick={() => setView("end")} title="نمای از سر قطعه">سر قطعه</Btn>
         </Group>
         <Group>
+          <Btn
+            on={rot === 1}
+            onClick={toggleUpright}
+            title="ایستاده کردن قطعه با یک کلیک (کف پایین، دهانه رو به بالا) / بازگشت به افقی"
+          >
+            ایستاده
+          </Btn>
+          <Btn
+            on={rot > 1}
+            onClick={rotateStep}
+            title={`چرخش ۹۰ درجه آبجکت — فعلی: ${ROT_LABELS[rot]}`}
+          >
+            {rot === 2 ? "↻ ۱۸۰°" : rot === 3 ? "↻ ۲۷۰°" : "↻ ۹۰°"}
+          </Btn>
+        </Group>
+        <Group>
           <Btn on={opts.wire} onClick={() => toggle("wire")} title="نمایش مش سیمی">سیمی</Btn>
           <Btn on={opts.cut} onClick={() => toggle("cut")} title="برش ربع‌مقطع برای دیدن داخل قطعه">برش</Btn>
           <Btn on={opts.stock} onClick={() => toggle("stock")} title="قطعهٔ خام اولیه">خام</Btn>
           <Btn on={opts.grid} onClick={() => toggle("grid")} title="شبکهٔ کف">شبکه</Btn>
+          <Btn on={opts.axis} onClick={() => toggle("axis")} title="خط‌چین محور مرکزی قطعه">محور</Btn>
         </Group>
       </div>
 
@@ -678,17 +955,17 @@ export default function Lathe3DView({ sketch, blankD, blankL, split }: Props) {
           Ø {dims.d.toFixed(2)} × L {dims.l.toFixed(2)} mm
         </div>
       )}
-      <div style={{ ...chip, position: "absolute", bottom: 8, right: 8, color: "#6f6047" }}>
+      <div style={{ ...chip, position: "absolute", bottom: 8, right: 8, color: "var(--color-dim)" }}>
         چپ: چرخش • راست: جابه‌جایی • چرخ: زوم • دابل‌کلیک: بازنشانی
       </div>
 
       {!error && !dims && (
-        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "#a8946f", fontSize: 12.5, pointerEvents: "none" }}>
+        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "var(--color-mute)", fontSize: 12.5, pointerEvents: "none" }}>
           پروفایلی برای نمایش سه‌بعدی وجود ندارد — در پنجرهٔ طراحی پروفایل رسم کنید.
         </div>
       )}
       {error && (
-        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", padding: 16, textAlign: "center", color: "#d95848", fontSize: 12.5, background: "#14100b" }}>
+        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", padding: 16, textAlign: "center", color: "var(--color-danger)", fontSize: 12.5, background: themeColors.view3dBg }}>
           {error}
         </div>
       )}
@@ -696,19 +973,22 @@ export default function Lathe3DView({ sketch, blankD, blankL, split }: Props) {
   );
 }
 
+const Lathe3DView = memo(Lathe3DViewInner);
+export default Lathe3DView;
+
 /* ---------- اجزای رابط ---------- */
 const chip: CSSProperties = {
   padding: "3px 8px",
   borderRadius: 6,
-  background: "rgba(29,23,16,.78)",
-  border: "1px solid #3b2f20",
+  background: "rgba(var(--rgb-panel), .82)",
+  border: "1px solid var(--color-edge)",
   fontSize: 10.5,
-  color: "#a8946f",
+  color: "var(--color-mute)",
   pointerEvents: "none",
 };
 function Group({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", gap: 2, padding: 2, borderRadius: 8, background: "rgba(29,23,16,.82)", border: "1px solid #3b2f20", pointerEvents: "auto", backdropFilter: "blur(4px)" }}>
+    <div style={{ display: "flex", gap: 2, padding: 2, borderRadius: 8, background: "rgba(var(--rgb-panel), .85)", border: "1px solid var(--color-edge)", pointerEvents: "auto", backdropFilter: "blur(4px)" }}>
       {children}
     </div>
   );
@@ -727,8 +1007,8 @@ function Btn({ children, onClick, title, on }: { children: React.ReactNode; onCl
         fontSize: 11,
         fontWeight: 700,
         fontFamily: "inherit",
-        background: on ? "#e3a94e" : "transparent",
-        color: on ? "#241a0c" : "#a8946f",
+        background: on ? "var(--color-brass)" : "transparent",
+        color: on ? "var(--color-brass-ink)" : "var(--color-mute)",
       }}
     >
       {children}

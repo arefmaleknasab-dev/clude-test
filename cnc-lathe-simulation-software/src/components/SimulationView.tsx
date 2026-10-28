@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { GenResult, Params, ToolProfile } from "../lib/lathe";
+import type { GenResult, Params, SegKind, ToolProfile } from "../lib/lathe";
 import { RAPID_RATE, rotationalEnvelope, toolProfile } from "../lib/lathe";
+import { DEFAULT_THEME_COLORS, rgbaCss, segColorFromTheme, shadeHex, type ThemeColors } from "../lib/theme";
 import { cn } from "../utils/cn";
 import { IconPause, IconPlay, IconReset } from "./icons";
 
@@ -8,6 +9,7 @@ interface Props {
   gen: GenResult;
   params: Params;
   onActiveLine: (line: number) => void;
+  themeColors?: ThemeColors;
 }
 
 const GRID = 480;
@@ -26,8 +28,6 @@ interface Chip {
   c: string;
   w: number;
 }
-
-const CHIP_COLORS = ["#d8a86c", "#c9955a", "#a9743d", "#8a5a2e"];
 
 /* شعاع اولیهٔ مدل مواد: برای مقاطع غیر دایره‌ای از شعاع محیطی (پوشش دورانی)    */
 /* شروع می‌شود تا عملیات «گرد کردن» قسمت اضافی گوشه‌ها را بردارد؛ برای دایره    */
@@ -48,26 +48,15 @@ const KIND_FA: Record<string, string> = {
   borefin: "پرداخت داخل (H2)",
   bottom: "کف‌تراشی (H2)",
 };
-const KIND_CLS: Record<string, string> = {
-  rapid: "text-steel border-steel/40",
-  round: "text-[#b48ee0] border-[#b48ee0]/50",
-  rough: "text-teal border-teal/40",
-  roughz: "text-[#6ab0d8] border-[#6ab0d8]/40",
-  copy: "text-[#a3c15c] border-[#a3c15c]/40",
-  face: "text-brass border-brass/40",
-  finish: "text-copper border-copper/50",
-  offset: "text-[#f59a80] border-[#f59a80]/50",
-  bore: "text-[#4cc9f0] border-[#4cc9f0]/50",
-  boreoff: "text-[#c77dff] border-[#c77dff]/50",
-  borefin: "text-[#f72585] border-[#f72585]/50",
-  bottom: "text-[#ffd166] border-[#ffd166]/50",
-};
 
-function SimulationView({ gen, params, onActiveLine }: Props) {
+function SimulationView({ gen, params, onActiveLine, themeColors = DEFAULT_THEME_COLORS }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const themeRef = useRef<ThemeColors>(themeColors);
+  themeRef.current = themeColors;
 
-  const [size, setSize] = useState({ w: 0, h: 0 });
+  const sizeRef = useRef({ w: 0, h: 0 });
+  const drawNowRef = useRef<(() => void) | null>(null);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(2);
   const [panning, setPanning] = useState(false);
@@ -172,16 +161,30 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => {
+    const syncSize = () => {
       const r = el.getBoundingClientRect();
-      setSize({ w: r.width, h: r.height });
+      if (r.width <= 0 || r.height <= 0) return;
+      sizeRef.current = { w: r.width, h: r.height };
       const pad = 64;
       /* دوربین طوری تنظیم می‌شود که پوشش دورانی (دورترین گوشه) نیز جا شود */
       const envD = rotationalEnvelope(params.blankD, params.blankShape).maxRotD;
       const s = Math.min((r.width - pad * 2) / params.blankL, (r.height - pad * 2) / envD);
       fitScaleRef.current = Math.max(0.0001, s);
       camRef.current = { s, ox: (r.width - params.blankL * s) / 2, oy: r.height / 2 };
-    });
+      const cv = canvasRef.current;
+      if (cv) {
+        const dpr = window.devicePixelRatio || 1;
+        const bw = Math.max(1, Math.round(r.width * dpr));
+        const bh = Math.max(1, Math.round(r.height * dpr));
+        if (cv.width !== bw || cv.height !== bh) {
+          cv.width = bw;
+          cv.height = bh;
+        }
+        drawNowRef.current?.();
+      }
+    };
+    syncSize();
+    const ro = new ResizeObserver(syncSize);
     ro.observe(el);
     return () => ro.disconnect();
   }, [params.blankL, params.blankD, params.blankShape]);
@@ -211,14 +214,6 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
-
-  useEffect(() => {
-    const cv = canvasRef.current;
-    if (!cv || size.w === 0) return;
-    const dpr = window.devicePixelRatio || 1;
-    cv.width = size.w * dpr;
-    cv.height = size.h * dpr;
-  }, [size]);
 
   const setPlay = (v: boolean) => {
     if (v && progRef.current >= totalRef.current - 1e-6) {
@@ -375,11 +370,12 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
         mmElRef.current.textContent = `${progRef.current.toFixed(0)} / ${totalRef.current.toFixed(0)} mm`;
       if (modeElRef.current) {
         const done = progRef.current >= totalRef.current - 1e-6 && totalRef.current > 0;
+        const tc = themeRef.current;
+        const opColor = done ? tc.uiOk : segColorFromTheme(tc, (tool.kind as SegKind) || "rapid");
         modeElRef.current.textContent = done ? "پایان — M30" : KIND_FA[tool.kind] ?? "";
-        modeElRef.current.className = cn(
-          "rounded border px-1.5 py-0.5 text-[10px] font-bold",
-          done ? "border-ok/50 text-ok" : KIND_CLS[tool.kind] ?? ""
-        );
+        modeElRef.current.className = "rounded border px-1.5 py-0.5 text-[10px] font-bold";
+        modeElRef.current.style.color = opColor;
+        modeElRef.current.style.borderColor = rgbaCss(opColor, 0.45);
       }
       if (totalRef.current > 0 && !scrubbingRef.current) {
         const pct = (progRef.current / totalRef.current) * 100;
@@ -398,29 +394,31 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
       const ctx = cv.getContext("2d");
       if (!ctx) return;
       const dpr = window.devicePixelRatio || 1;
-      const w = size.w;
-      const h = size.h;
+      const w = sizeRef.current.w;
+      const h = sizeRef.current.h;
+      if (w <= 0 || h <= 0) return;
       const { s, ox, oy } = camRef.current;
       const p = paramsRef.current;
       const g = genRef.current;
       const X = (z: number) => ox + z * s;
       const Y = (r: number) => oy - r * s;
 
+      const tc = themeRef.current;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = "#120e09";
+      ctx.fillStyle = tc.simBg;
       ctx.fillRect(0, 0, w, h);
 
       /* شبکه */
       ctx.lineWidth = 1;
       for (let z = 0; z <= p.blankL + 0.01; z += 25) {
-        ctx.strokeStyle = z % 50 === 0 ? "rgba(209,183,134,0.13)" : "rgba(209,183,134,0.05)";
+        ctx.strokeStyle = z % 50 === 0 ? rgbaCss(tc.editorGrid, 0.22) : rgbaCss(tc.editorGrid, 0.09);
         ctx.beginPath();
         ctx.moveTo(X(z), Y(p.blankD / 2));
         ctx.lineTo(X(z), Y(-p.blankD / 2));
         ctx.stroke();
         if (z % 50 === 0) {
-          ctx.fillStyle = "#77684c";
+          ctx.fillStyle = tc.editorGrid;
           ctx.font = "10px 'JetBrains Mono', monospace";
           ctx.textAlign = "center";
           ctx.fillText(String(z), X(z), Y(-p.blankD / 2) + 16);
@@ -428,7 +426,7 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
       }
 
       /* خط محور */
-      ctx.strokeStyle = "rgba(227,169,78,0.3)";
+      ctx.strokeStyle = rgbaCss(tc.simTargetOutline, 0.34);
       ctx.setLineDash([10, 4, 2, 4]);
       ctx.beginPath();
       ctx.moveTo(0, oy);
@@ -437,7 +435,7 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
       ctx.setLineDash([]);
 
       /* محدوده خام */
-      ctx.strokeStyle = "rgba(227,169,78,0.4)";
+      ctx.strokeStyle = rgbaCss(tc.simTargetOutline, 0.42);
       ctx.setLineDash([7, 5]);
       ctx.strokeRect(X(0), Y(p.blankD / 2), p.blankL * s, p.blankD * s);
       ctx.setLineDash([]);
@@ -445,7 +443,7 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
       /* پوشش دورانی — فضای اشغال‌شده هنگام چرخش (دورترین گوشه از محور) */
       const env = rotationalEnvelope(p.blankD, p.blankShape);
       if (env.hasCorners) {
-        ctx.strokeStyle = "rgba(69,179,148,0.45)";
+        ctx.strokeStyle = rgbaCss(tc.editorRotEnv, 0.48);
         ctx.setLineDash([2, 5]);
         ctx.lineWidth = 1.2;
         ctx.beginPath();
@@ -456,7 +454,7 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
         ctx.stroke();
         ctx.setLineDash([]);
         ctx.lineWidth = 1;
-        ctx.fillStyle = "rgba(69,179,148,0.6)";
+        ctx.fillStyle = rgbaCss(tc.editorRotEnv, 0.68);
         ctx.font = "9px 'JetBrains Mono', monospace";
         ctx.textAlign = "left";
         ctx.fillText(`⌀${env.maxRotD.toFixed(1)}`, X(0) + 2, Y(env.outR) - 4);
@@ -464,7 +462,7 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
 
       /* silhouette هدف */
       if (g.samples.length > 1) {
-        ctx.strokeStyle = "rgba(227,169,78,0.5)";
+        ctx.strokeStyle = rgbaCss(tc.simTargetOutline, 0.55);
         ctx.setLineDash([5, 4]);
         ctx.lineWidth = 1.2;
         ctx.beginPath();
@@ -476,16 +474,46 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
         ctx.setLineDash([]);
       }
 
+      /* اسپیندل و سه‌نظام (سمت چپ مبدأ X=0) */
+      {
+        const chuckR = Math.max(p.blankD * 0.58 * s, 26);
+        const jawInner = Math.max(6, (radiiRef.current[0] || p.blankD / 2) * s);
+        const chuckW = Math.min(26, Math.max(14, p.blankD * 0.18 * s));
+        const cx0 = X(0) - chuckW;
+        const cg = ctx.createLinearGradient(0, oy - chuckR, 0, oy + chuckR);
+        cg.addColorStop(0, shadeHex(tc.simChuck, -0.42));
+        cg.addColorStop(0.35, shadeHex(tc.simChuck, 0.14));
+        cg.addColorStop(0.5, shadeHex(tc.simChuck, 0.26));
+        cg.addColorStop(0.7, tc.simChuck);
+        cg.addColorStop(1, shadeHex(tc.simChuck, -0.48));
+        ctx.fillStyle = cg;
+        ctx.strokeStyle = shadeHex(tc.simChuck, -0.6);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.rect(cx0, oy - chuckR, chuckW * 0.68, chuckR * 2);
+        ctx.fill();
+        ctx.stroke();
+        /* فک‌های بالا و پایین سه‌نظام */
+        const jawW = chuckW * 0.42;
+        const jawH = Math.max(5, Math.min(chuckR * 0.34, Math.abs(chuckR - jawInner) + 6));
+        ctx.fillStyle = shadeHex(tc.simChuck, 0.12);
+        ctx.beginPath();
+        ctx.rect(X(0) - jawW, oy - jawInner - jawH + 1.5, jawW, jawH);
+        ctx.rect(X(0) - jawW, oy + jawInner - 1.5, jawW, jawH);
+        ctx.fill();
+        ctx.stroke();
+      }
+
       /* قطعه در حال تراش */
       const rad = radiiRef.current;
       const grad = ctx.createLinearGradient(0, Y(p.blankD / 2), 0, Y(-p.blankD / 2));
-      grad.addColorStop(0, "#55361b");
-      grad.addColorStop(0.18, "#8a5a2e");
-      grad.addColorStop(0.38, "#c9955a");
-      grad.addColorStop(0.5, "#d8a86c");
-      grad.addColorStop(0.62, "#c08a4e");
-      grad.addColorStop(0.85, "#7a4c24");
-      grad.addColorStop(1, "#4a2e16");
+      grad.addColorStop(0, shadeHex(tc.simWorkpiece, -0.56));
+      grad.addColorStop(0.18, shadeHex(tc.simWorkpiece, -0.32));
+      grad.addColorStop(0.38, tc.simWorkpiece);
+      grad.addColorStop(0.5, shadeHex(tc.simWorkpiece, 0.18));
+      grad.addColorStop(0.62, shadeHex(tc.simWorkpiece, -0.06));
+      grad.addColorStop(0.85, shadeHex(tc.simWorkpiece, -0.38));
+      grad.addColorStop(1, shadeHex(tc.simWorkpiece, -0.62));
       ctx.beginPath();
       ctx.moveTo(X(0), Y(rad[0]));
       for (let i = 1; i <= GRID; i++) ctx.lineTo(X((i / GRID) * p.blankL), Y(rad[i]));
@@ -521,7 +549,7 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
           ctx.rect(x0,innerBot,Math.max(1,x1-x0+.5),Math.max(.5,yBot-innerBot));
         }
       }
-      if(hasCav){ctx.fillStyle="#120e09";ctx.fill();}
+      if(hasCav){ctx.fillStyle=tc.simBg;ctx.fill();}
 
       /* خط‌چین صورتی قبلی innerSamples مسیر G-code نبود و روی پروفایل‌های
          برگشتی به شکل خطوط متقاطع دیده می‌شد؛ حذف شد تا فقط حرکت واقعی ابزار
@@ -533,6 +561,12 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
 
       /* تراشه‌ها */
       const chips = chipsRef.current;
+      const chipPalette = [
+        shadeHex(tc.simChips, 0.14),
+        tc.simChips,
+        shadeHex(tc.simChips, -0.18),
+        shadeHex(tc.simChips, -0.36),
+      ];
       const cutting = playingRef.current && tool.kind !== "rapid";
       if (cutting && chips.length < 150) {
         for (let k = 0; k < 2; k++) {
@@ -545,7 +579,7 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
             vr: (Math.random() - 0.5) * 12,
             life: 0.5 + Math.random() * 0.45,
             max: 0.95,
-            c: CHIP_COLORS[(Math.random() * CHIP_COLORS.length) | 0],
+            c: chipPalette[(Math.random() * chipPalette.length) | 0],
             w: 1.6 + Math.random() * 2.6,
           });
         }
@@ -572,7 +606,7 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
       ctx.globalAlpha = 1;
 
       /* خطوط راهنمای ابزار */
-      ctx.strokeStyle = "rgba(227,169,78,0.28)";
+      ctx.strokeStyle = rgbaCss(tc.simTargetOutline, 0.28);
       ctx.setLineDash([3, 4]);
       ctx.beginPath();
       ctx.moveTo(X(0) - 6, ty);
@@ -585,8 +619,8 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
       /* هاله برش */
       if (cutting) {
         const glow = ctx.createRadialGradient(tx, ty, 0, tx, ty, 16);
-        glow.addColorStop(0, "rgba(255,190,90,0.55)");
-        glow.addColorStop(1, "rgba(255,190,90,0)");
+        glow.addColorStop(0, rgbaCss(tc.simToolTip, 0.58));
+        glow.addColorStop(1, rgbaCss(tc.simToolTip, 0));
         ctx.fillStyle = glow;
         ctx.beginPath();
         ctx.arc(tx, ty, 16, 0, Math.PI * 2);
@@ -598,15 +632,15 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
         const barL = Math.max(30, p.tool.shank * 1.6 * s);
         const barH = Math.max(7, p.tool.shank * 0.55 * s);
         ctx.save();
-        ctx.fillStyle = "#333c45";
-        ctx.strokeStyle = "#1d2329";
+        ctx.fillStyle = tc.simToolBody;
+        ctx.strokeStyle = shadeHex(tc.simToolBody, -0.45);
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.rect(tx, ty - barH / 2, barL, barH);
         ctx.fill();
         ctx.stroke();
         /* نوک برنده */
-        ctx.fillStyle = cutting ? "#ffd489" : "#4cc9f0";
+        ctx.fillStyle = cutting ? shadeHex(tc.simToolTip, 0.2) : tc.simHolder2Tip;
         ctx.beginPath();
         ctx.moveTo(tx, ty - barH / 2);
         ctx.lineTo(tx - 7, ty);
@@ -632,8 +666,8 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
       const yTop = Math.min(yTopL, yTopR);
       ctx.save();
       /* دنباله */
-      ctx.fillStyle = "#333c45";
-      ctx.strokeStyle = "#1d2329";
+      ctx.fillStyle = tc.simToolBody;
+      ctx.strokeStyle = shadeHex(tc.simToolBody, -0.45);
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.rect(shMid - shankW / 2, yTop - shankL, shankW, shankL + 3);
@@ -641,9 +675,9 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
       ctx.stroke();
       /* اینسرت */
       const ig = ctx.createLinearGradient(0, yTop, 0, ty + 6);
-      ig.addColorStop(0, "#9aa7b4");
-      ig.addColorStop(0.55, "#78858f");
-      ig.addColorStop(1, "#525e68");
+      ig.addColorStop(0, shadeHex(tc.simToolInsert, 0.16));
+      ig.addColorStop(0.55, tc.simToolInsert);
+      ig.addColorStop(1, shadeHex(tc.simToolInsert, -0.32));
       ctx.beginPath();
       ctx.moveTo(bot[0][0], bot[0][1]);
       for (const [bx, by] of bot) ctx.lineTo(bx, by);
@@ -666,11 +700,11 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
       ctx.beginPath();
       ctx.moveTo(bot[0][0], bot[0][1]);
       for (const [bx, by] of bot) ctx.lineTo(bx, by);
-      ctx.strokeStyle = cutting ? "#ffd489" : "#f3c26b";
+      ctx.strokeStyle = cutting ? shadeHex(tc.simToolTip, 0.22) : tc.simToolTip;
       ctx.lineWidth = 2;
       ctx.stroke();
       /* نوک */
-      ctx.fillStyle = "#f3c26b";
+      ctx.fillStyle = tc.simToolTip;
       ctx.beginPath();
       ctx.arc(tx, ty, 2, 0, Math.PI * 2);
       ctx.fill();
@@ -700,9 +734,22 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
       raf = requestAnimationFrame(step);
     };
 
+    drawNowRef.current = () => {
+      const tNow = progRef.current;
+      if (tNow + 1e-9 < appliedTRef.current) replayTo(tNow);
+      else if (tNow > appliedTRef.current + 1e-9) advanceTo(tNow);
+      const toolNow = toolAt(progRef.current);
+      draw(0, toolNow);
+      syncDom(toolNow);
+    };
+    drawNowRef.current();
+
     raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [size]);
+    return () => {
+      drawNowRef.current = null;
+      cancelAnimationFrame(raf);
+    };
+  }, []);
 
   /* --- تعامل اسکرابر --- */
   const seekToRatio = (ratio: number) => {
@@ -773,8 +820,12 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
     seekToRatio(next);
   };
 
+  useEffect(() => {
+    drawNowRef.current?.();
+  }, [themeColors]);
+
   return (
-    <div className="relative h-full w-full overflow-hidden rounded-lg border border-edge bg-[#120e09]">
+    <div className="relative h-full w-full overflow-hidden rounded-lg border border-edge" style={{ backgroundColor: themeColors.simBg }}>
       <div
         ref={wrapRef}
         className={cn("absolute inset-0 touch-none", panning ? "cursor-grabbing" : "cursor-grab")}
@@ -784,7 +835,7 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
         onPointerCancel={finishCanvasPan}
         onContextMenu={(e) => e.preventDefault()}
       >
-        <canvas ref={canvasRef} style={{ width: size.w, height: size.h }} className="pointer-events-none block" />
+        <canvas ref={canvasRef} className="pointer-events-none block h-full w-full" />
       </div>
 
       {/* DRO */}
@@ -792,13 +843,13 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
         <div className="flex items-center gap-5">
           <div>
             <div className="text-[9.5px] font-bold tracking-widest text-mute">X LEN</div>
-            <div className="font-mono text-[22px] font-bold leading-6 text-brass2" style={{ textShadow: "0 0 12px rgba(243,194,107,.45)" }}>
+            <div className="font-mono text-[22px] font-bold leading-6 text-brass2" style={{ textShadow: "0 0 12px rgba(var(--rgb-brass), .45)" }}>
               <span ref={xElRef}>0.00</span>
             </div>
           </div>
           <div>
             <div className="text-[9.5px] font-bold tracking-widest text-mute">Y DIA</div>
-            <div className="font-mono text-[22px] font-bold leading-6 text-brass2" style={{ textShadow: "0 0 12px rgba(243,194,107,.45)" }}>
+            <div className="font-mono text-[22px] font-bold leading-6 text-brass2" style={{ textShadow: "0 0 12px rgba(var(--rgb-brass), .45)" }}>
               <span ref={zElRef}>0.00</span>
             </div>
           </div>
@@ -880,7 +931,7 @@ function SimulationView({ gen, params, onActiveLine }: Props) {
               }}
               className={cn(
                 "px-2 py-1.5 font-mono text-[11px] font-bold transition-colors",
-                speed === v ? "bg-brass text-[#241a0c]" : "bg-panel2 text-mute hover:text-ink"
+                speed === v ? "bg-brass text-[var(--color-brass-ink)]" : "bg-panel2 text-mute hover:text-ink"
               )}
             >
               {v}×
