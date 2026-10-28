@@ -232,38 +232,6 @@ function CategoryIcon({ kind }: { kind: ThemeCategoryIcon }) {
   }
 }
 
-async function copyTextToClipboard(text: string, refocusEl?: HTMLInputElement | null): Promise<boolean> {
-  try {
-    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    /* fallback below for offline/file:// environments */
-  }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.top = "-9999px";
-    ta.style.left = "-9999px";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.focus({ preventScroll: true });
-    ta.select();
-    const ok = document.execCommand("copy");
-    ta.remove();
-    if (refocusEl) {
-      refocusEl.focus({ preventScroll: true });
-      refocusEl.select();
-    }
-    return ok;
-  } catch {
-    return false;
-  }
-}
-
 function ThemeColorRow({
   label,
   color,
@@ -276,23 +244,6 @@ function ThemeColorRow({
   const hexCode = color.toUpperCase();
   const [draft, setDraft] = useState<string | null>(null);
   const [focused, setFocused] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const copyTimerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (copyTimerRef.current != null) window.clearTimeout(copyTimerRef.current);
-    };
-  }, []);
-
-  const flashCopied = () => {
-    setCopied(true);
-    if (copyTimerRef.current != null) window.clearTimeout(copyTimerRef.current);
-    copyTimerRef.current = window.setTimeout(() => {
-      setCopied(false);
-      copyTimerRef.current = null;
-    }, 1150);
-  };
 
   const commitDraft = (raw: string | null) => {
     if (raw !== null) {
@@ -323,61 +274,46 @@ function ThemeColorRow({
             className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
           />
         </label>
-        <div className="relative">
-          {copied && (
-            <span className="pointer-events-none absolute -top-6 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded border border-ok/60 bg-panel px-1.5 py-0.5 text-[9.5px] font-bold text-ok shadow-md">
-              کپی شد ✓
-            </span>
-          )}
-          <input
-            type="text"
-            dir="ltr"
-            value={draft ?? hexCode}
-            title={`کلیک برای کپی خودکار ${hexCode} (یا تایپ کد رنگی جدید)`}
-            onFocus={() => setFocused(true)}
-            onClick={(e) => {
-              const el = e.currentTarget;
-              if (draft === null || draft.toUpperCase() === hexCode) {
-                el.select();
-                void copyTextToClipboard(hexCode, el);
-                flashCopied();
-              }
-            }}
-            onChange={(e) => {
-              const next = e.target.value;
-              setCopied(false);
-              setDraft(next);
-              const live = normalizeLiveHexInput(next);
-              if (live) onChange(live);
-            }}
-            onKeyDown={(e) => {
-              e.stopPropagation();
-              if (e.key === "Enter") {
-                e.preventDefault();
-                commitDraft(draft);
-                e.currentTarget.blur();
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                setDraft(null);
-                e.currentTarget.blur();
-              }
-            }}
-            onBlur={() => {
-              setFocused(false);
+        <input
+          type="text"
+          dir="ltr"
+          value={draft ?? hexCode}
+          title={`کد رنگی (${hexCode})`}
+          onFocus={(e) => {
+            setFocused(true);
+            e.currentTarget.select();
+          }}
+          onChange={(e) => {
+            const next = e.target.value;
+            setDraft(next);
+            const live = normalizeLiveHexInput(next);
+            if (live) onChange(live);
+          }}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") {
+              e.preventDefault();
               commitDraft(draft);
-            }}
-            className={cn(
-              "h-7 w-[82px] cursor-pointer rounded-md border px-1.5 text-center font-mono text-[10.5px] font-bold tracking-tight outline-none transition-colors",
-              copied
-                ? "border-ok/80 bg-ok/15 text-ok"
-                : draft !== null && draft.toUpperCase() !== hexCode
-                  ? "border-brass/75 bg-bg text-brass2"
-                  : focused
-                    ? "border-brass/70 bg-bg text-ink"
-                    : "border-edge2 bg-bg/85 text-ink hover:border-brass/45"
-            )}
-          />
-        </div>
+              e.currentTarget.blur();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              setDraft(null);
+              e.currentTarget.blur();
+            }
+          }}
+          onBlur={() => {
+            setFocused(false);
+            commitDraft(draft);
+          }}
+          className={cn(
+            "h-7 w-[82px] rounded-md border px-1.5 text-center font-mono text-[10.5px] font-bold tracking-tight outline-none transition-colors",
+            draft !== null && draft.toUpperCase() !== hexCode
+              ? "border-brass/75 bg-bg text-brass2"
+              : focused
+                ? "border-brass/70 bg-bg text-ink"
+                : "border-edge2 bg-bg/85 text-ink hover:border-brass/45"
+          )}
+        />
       </div>
     </div>
   );
