@@ -232,6 +232,38 @@ function CategoryIcon({ kind }: { kind: ThemeCategoryIcon }) {
   }
 }
 
+async function copyTextToClipboard(text: string, refocusEl?: HTMLInputElement | null): Promise<boolean> {
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fallback below for offline/file:// environments */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-9999px";
+    ta.style.left = "-9999px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus({ preventScroll: true });
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    if (refocusEl) {
+      refocusEl.focus({ preventScroll: true });
+      refocusEl.select();
+    }
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 function ThemeColorRow({
   label,
   color,
@@ -241,13 +273,33 @@ function ThemeColorRow({
   color: string;
   onChange: (hex: string) => void;
 }) {
-  const [draft, setDraft] = useState("");
+  const hexCode = color.toUpperCase();
+  const [draft, setDraft] = useState<string | null>(null);
   const [focused, setFocused] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
 
-  const commitDraft = (raw: string) => {
-    const parsed = normalizeHexColor(raw);
-    if (parsed) onChange(parsed);
-    setDraft("");
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current != null) window.clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
+  const flashCopied = () => {
+    setCopied(true);
+    if (copyTimerRef.current != null) window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = window.setTimeout(() => {
+      setCopied(false);
+      copyTimerRef.current = null;
+    }, 1150);
+  };
+
+  const commitDraft = (raw: string | null) => {
+    if (raw !== null) {
+      const parsed = normalizeHexColor(raw);
+      if (parsed) onChange(parsed);
+    }
+    setDraft(null);
   };
 
   return (
@@ -259,7 +311,7 @@ function ThemeColorRow({
         <label
           className="relative h-7 w-7 shrink-0 cursor-pointer overflow-hidden rounded-md border border-white/15 shadow-inner transition-transform hover:scale-105"
           style={{ backgroundColor: color }}
-          title={`انتخاب رنگ (${color.toUpperCase()})`}
+          title={`انتخاب رنگ (${hexCode})`}
         >
           <input
             type="color"
@@ -271,54 +323,61 @@ function ThemeColorRow({
             className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
           />
         </label>
-        <input
-          type="text"
-          dir="ltr"
-          value={draft}
-          placeholder="کد رنگی"
-          title={`کد فعلی: ${color.toUpperCase()} — کد هگز مثل ${color.toUpperCase()} را وارد کنید (دوبار کلیک برای نمایش کد فعلی)`}
-          onFocus={() => setFocused(true)}
-          onDoubleClick={(e) => {
-            setDraft(color.toUpperCase());
-            const el = e.currentTarget;
-            requestAnimationFrame(() => el.select());
-          }}
-          onChange={(e) => {
-            const next = e.target.value;
-            setDraft(next);
-            const live = normalizeLiveHexInput(next);
-            if (live) onChange(live);
-          }}
-          onKeyDown={(e) => {
-            e.stopPropagation();
-            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c" && !draft) {
-              navigator.clipboard?.writeText(color.toUpperCase()).catch(() => {});
-              return;
-            }
-            if (e.key === "Enter") {
-              e.preventDefault();
-              commitDraft(draft);
-              e.currentTarget.blur();
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              setDraft("");
-              e.currentTarget.blur();
-            }
-          }}
-          onBlur={() => {
-            setFocused(false);
-            if (draft.trim()) commitDraft(draft);
-            else setDraft("");
-          }}
-          className={cn(
-            "h-7 w-[82px] rounded-md border px-1.5 text-center text-[10.5px] font-semibold outline-none transition-colors",
-            draft
-              ? "border-brass/70 bg-bg font-mono text-brass2"
-              : focused
-                ? "border-brass/70 bg-bg text-ink placeholder:text-brass/80"
-                : "border-edge2 bg-bg/85 text-ink placeholder:text-dim hover:border-brass/45"
+        <div className="relative">
+          {copied && (
+            <span className="pointer-events-none absolute -top-6 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded border border-ok/60 bg-panel px-1.5 py-0.5 text-[9.5px] font-bold text-ok shadow-md">
+              کپی شد ✓
+            </span>
           )}
-        />
+          <input
+            type="text"
+            dir="ltr"
+            value={draft ?? hexCode}
+            title={`کلیک برای کپی خودکار ${hexCode} (یا تایپ کد رنگی جدید)`}
+            onFocus={() => setFocused(true)}
+            onClick={(e) => {
+              const el = e.currentTarget;
+              if (draft === null || draft.toUpperCase() === hexCode) {
+                el.select();
+                void copyTextToClipboard(hexCode, el);
+                flashCopied();
+              }
+            }}
+            onChange={(e) => {
+              const next = e.target.value;
+              setCopied(false);
+              setDraft(next);
+              const live = normalizeLiveHexInput(next);
+              if (live) onChange(live);
+            }}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitDraft(draft);
+                e.currentTarget.blur();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setDraft(null);
+                e.currentTarget.blur();
+              }
+            }}
+            onBlur={() => {
+              setFocused(false);
+              commitDraft(draft);
+            }}
+            className={cn(
+              "h-7 w-[82px] cursor-pointer rounded-md border px-1.5 text-center font-mono text-[10.5px] font-bold tracking-tight outline-none transition-colors",
+              copied
+                ? "border-ok/80 bg-ok/15 text-ok"
+                : draft !== null && draft.toUpperCase() !== hexCode
+                  ? "border-brass/75 bg-bg text-brass2"
+                  : focused
+                    ? "border-brass/70 bg-bg text-ink"
+                    : "border-edge2 bg-bg/85 text-ink hover:border-brass/45"
+            )}
+          />
+        </div>
       </div>
     </div>
   );
@@ -354,7 +413,9 @@ export default function PreferencesDialog({
   const themeFileInputRef = useRef<HTMLInputElement>(null);
   const [addingTheme, setAddingTheme] = useState(false);
   const [newThemeName, setNewThemeName] = useState("");
-  const [collapsedCats, setCollapsedCats] = useState<Record<string, boolean>>({});
+  const [collapsedCats, setCollapsedCats] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(THEME_CATEGORIES.map((c) => [c.id, true]))
+  );
   const [themeFeedback, setThemeFeedback] = useState<{ text: string; error?: boolean } | null>(null);
 
   useEffect(() => {
@@ -838,14 +899,17 @@ export default function PreferencesDialog({
                       type="button"
                       onClick={handleOpenAddTheme}
                       title="افزودن تم فعلی به فهرست تم‌های آماده"
+                      aria-label="افزودن تم"
                       className={cn(
-                        "grid h-9 w-9 place-items-center rounded-lg border text-[18px] leading-none font-bold transition-colors",
+                        "flex h-9 w-9 items-center justify-center rounded-lg border p-0 transition-colors",
                         addingTheme
                           ? "border-brass bg-brass/20 text-brass2"
                           : "border-edge2 bg-panel2/85 text-ink hover:border-brass/65 hover:bg-panel3 hover:text-brass2"
                       )}
                     >
-                      +
+                      <svg viewBox="0 0 16 16" className="block h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round">
+                        <path d="M8 3.5v9M3.5 8h9" />
+                      </svg>
                     </button>
 
                     {/* دکمه − حذف تم سفارشی کاربر (غیرفعال برای تم‌های پیش‌فرض) */}
@@ -858,9 +922,12 @@ export default function PreferencesDialog({
                           ? `حذف تم سفارشی «${currentPreset.name}»`
                           : "تم‌های پیش‌فرض نرم‌افزار قابل حذف نیستند"
                       }
-                      className="grid h-9 w-9 place-items-center rounded-lg border border-edge2 bg-panel2/85 text-[18px] leading-none font-bold text-mute transition-colors hover:border-danger/65 hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-35"
+                      aria-label="حذف تم"
+                      className="flex h-9 w-9 items-center justify-center rounded-lg border border-edge2 bg-panel2/85 p-0 text-mute transition-colors hover:border-danger/65 hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-35"
                     >
-                      −
+                      <svg viewBox="0 0 16 16" className="block h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round">
+                        <path d="M3.5 8h9" />
+                      </svg>
                     </button>
                   </div>
 

@@ -9,7 +9,7 @@ interface Props {
   onLineClick?: (line: number) => void;
 }
 
-const TOKEN_RE = /(%|\(.*?\)|[NO]\d+|G\d+(?:\.\d+)?|M\d+|[XYZ]-?\d+(?:\.\d+)?|[FSP]\d+(?:\.\d+)?)/g;
+const TOKEN_RE = /(%|\(.*?\)|[NO]\d+|G\d+(?:\.\d+)?|[MT]\d+|[XYZ]-?\d+(?:\.\d+)?|[FSP]\d+(?:\.\d+)?)/g;
 
 function tokenize(line: string) {
   const parts: { text: string; cls: string }[] = [];
@@ -23,8 +23,8 @@ function tokenize(line: string) {
     else if (tok.startsWith("(")) cls = "gc-tok-c";
     else if (tok.startsWith("N")) cls = "gc-tok-n";
     else if (tok.startsWith("G")) cls = "gc-tok-g";
-    else if (tok.startsWith("M")) cls = "gc-tok-m";
-    else if (tok.startsWith("X") || tok.startsWith("Z")) cls = "gc-tok-ax";
+    else if (tok.startsWith("M") || tok.startsWith("T") || tok.startsWith("S")) cls = "gc-tok-m";
+    else if (tok.startsWith("X") || tok.startsWith("Y") || tok.startsWith("Z")) cls = "gc-tok-ax";
     else cls = "gc-tok-f";
     parts.push({ text: tok, cls });
     last = i + tok.length;
@@ -42,7 +42,7 @@ interface RowProps { ln: number; parts: { text: string; cls: string }[]; active:
 const GCodeLine = memo(function GCodeLine({ ln, parts, active, top, onClick }: RowProps) {
   return (
     <div data-ln={ln} onClick={() => onClick?.(ln)} className={cn("gc-line", onClick && "cursor-pointer", active && "gc-line-active")} style={{ textAlign: "left", position: "absolute", top, left: 0, right: 0, height: ROW_H, overflow: "hidden" }}>
-      <span className="mr-2 inline-block w-7 select-none text-right text-[10px] text-dim">{ln + 1}</span>
+      <span className="gc-tok-n mr-2 inline-block w-7 select-none text-right text-[10px]">{ln + 1}</span>
       {parts.map((t, j) => (
         <span key={j} className={t.cls}>
           {t.text}
