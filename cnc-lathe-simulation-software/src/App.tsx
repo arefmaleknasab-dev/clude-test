@@ -199,6 +199,68 @@ function saveRecentProjectsSafe(tabs: ProjectTab[]) {
   }
 }
 
+interface EditEntrySnapshot {
+  sketch: SketchSeg[];
+  params: Params;
+  gcodeOvr: GcodeOvrMap;
+  activePreset: string | null;
+  baseline: string;
+}
+
+function cloneParams(p: Params): Params {
+  return JSON.parse(JSON.stringify(p)) as Params;
+}
+
+function cloneGcodeOvr(o: GcodeOvrMap): GcodeOvrMap {
+  return JSON.parse(JSON.stringify(o)) as GcodeOvrMap;
+}
+
+function computeProfileBranches(
+  targetSketch: SketchSeg[],
+  targetSplit: SplitState,
+  blankD: number,
+  blankL: number
+): {
+  points: PPoint[];
+  innerPoints: PPoint[];
+  outerFinishPoints: PPoint[];
+  splitInfo: { outerDir: 1 | -1; innerDir: 1 | -1; at: { z: number; r: number } } | null;
+} {
+  const blankR = blankD / 2;
+  if (targetSplit.enabled) {
+    const poly = chainPolyline(orderChain(targetSketch));
+    if (poly.length >= 3) {
+      const sp = splitChainAt(poly, { z: targetSplit.z, r: targetSplit.r });
+      /* حفظ جهت توپولوژیک نسبت به Split در حالت swapped: شاخهٔ خارجی از سر آزاد به Split و شاخهٔ داخلی از Split به سر آزاد */
+      const outerBranch = targetSplit.swapped ? [...sp.inner].reverse() : sp.outer;
+      const innerBranch = targetSplit.swapped ? [...sp.outer].reverse() : sp.inner;
+      const branchDir = (br: { z: number }[]): 1 | -1 =>
+        br.length >= 2 && br[br.length - 1].z < br[0].z ? -1 : 1;
+      return {
+        points: branchPoints(outerBranch, blankR, blankL, "max"),
+        /* پرداخت بیرونی نیز باید ترتیب توپولوژیک و گوشه‌های قائم شاخه را حفظ
+           کند؛ پوشش مرتب‌شدهٔ points فقط برای محاسبات خشن استفاده می‌شود. */
+        outerFinishPoints: branchPathPoints(outerBranch, blankR, blankL),
+        /* ترتیب واقعی شاخه برای Offset/Finish حفظ می‌شود؛ موتور مسیر یک پوشش
+           یکنواخت جداگانه برای پاس‌های خشن می‌سازد. */
+        innerPoints: branchPathPoints(innerBranch, blankR, blankL),
+        splitInfo: {
+          outerDir: branchDir(outerBranch),
+          innerDir: branchDir(innerBranch),
+          at: sp.splitAt,
+        },
+      };
+    }
+  }
+  const orderedProfile = chainPolyline(orderChain(targetSketch));
+  return {
+    points: flattenSketch(targetSketch, blankR, blankL),
+    innerPoints: [] as PPoint[],
+    outerFinishPoints: branchPathPoints(orderedProfile, blankR, blankL),
+    splitInfo: null,
+  };
+}
+
 interface HistEntry {
   sketch: SketchSeg[];
   gcodeOvr: GcodeOvrMap;
@@ -208,6 +270,8 @@ interface HistEntry {
   /** همه پارامترهای مولد، به‌ویژه لیست عملیات استراتژی، باید همراه بافر
       ویرایش بازیابی شوند؛ وگرنه بافر قدیمی روی عملیات جدید تأیید می‌شود. */
   params: Params;
+  /** وضعیت تأییدشده پیش از ورود به ویرایش مسیر برای بازگشت در صورت خروج بدون تأیید. */
+  editEntry?: EditEntrySnapshot | null;
 }
 
 /* بازخوانی ایمنِ اوررایدها از حافظهٔ محلی (سنجش نوع پس از پارس) */
@@ -484,8 +548,18 @@ export default function App() {
   const [pendingCloseProject, setPendingCloseProject] = useState<string|null>(null);
   const [newProjectDraft,setNewProjectDraft]=useState<{name:string;diameter:string;length:string}|null>(null);
   const [pendingEditExit, setPendingEditExit] = useState(false);
+  const pendingExitActionRef = useRef<(() => void) | null>(null);
   const [saveThenCloseProject, setSaveThenCloseProject] = useState<string|null>(null);
   const [editBuf, setEditBuf] = useState<EditBuf | null>(null);
+  /* بافر همگام‌شده با نرخ فریم برای پیش‌نمایش زندهٔ G-code هنگام کشیدن پیوسته بدون افت فریم */
+  const [liveEditBuf, setLiveEditBuf] = useState<EditBuf | null>(null);
+  const liveEditFrameRef = useRef<number | null>(null);
+  const pendingLiveEditBufRef = useRef<EditBuf | null>(null);
+  /* وضعیت تأییدشده پیش از ورود به ویرایش مسیر تا در صورت خروج بدون تأیید بازیابی شود */
+  const [editEntry, setEditEntry] = useState<EditEntrySnapshot | null>(null);
+  const editEntryRef = useRef<EditEntrySnapshot | null>(editEntry);
+  editEntryRef.current = editEntry;
+  const keptDraftRef = useRef<{ editBuf: EditBuf; draftParams: Params; baseline: string } | null>(null);
   /* باز/بسته‌بودن UI از وجود پیش‌نویس جداست تا خروج تصادفی، تغییرات تأییدنشده را پاک نکند. */
   const [editOpen, setEditOpen] = useState(false);
   const editOpenRef = useRef(editOpen);
@@ -504,23 +578,41 @@ export default function App() {
     gcodeOvr: GcodeOvrMap;
   } | null>(null);
 
+  const flushLiveEditBuf = useCallback((next: EditBuf | null) => {
+    if (liveEditFrameRef.current != null) {
+      cancelAnimationFrame(liveEditFrameRef.current);
+      liveEditFrameRef.current = null;
+    }
+    pendingLiveEditBufRef.current = null;
+    setLiveEditBuf(next);
+  }, []);
+
+  useEffect(() => () => {
+    if (liveEditFrameRef.current != null) cancelAnimationFrame(liveEditFrameRef.current);
+  }, []);
+
   const past = useRef<HistEntry[]>([]);
   const future = useRef<HistEntry[]>([]);
   const toastTimer = useRef<number | null>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const projectHandlesRef = useRef(new Map<string, { name?: string; createWritable: () => Promise<{ write: (data: string) => Promise<void>; close: () => Promise<void> }> }>());
-  const stateRef = useRef({ sketch, gcodeOvr, editBuf, editOpen, params });
-  stateRef.current = { sketch, gcodeOvr, editBuf, editOpen, params };
+  const stateRef = useRef({ sketch, gcodeOvr, editBuf, editOpen, params, editEntry });
+  stateRef.current = { sketch, gcodeOvr, editBuf, editOpen, params, editEntry };
+  const committedSketch = editOpen && editEntry ? editEntry.sketch : sketch;
+  const committedParams = editOpen && editEntry ? editEntry.params : params;
+  const committedGcodeOvr = editOpen && editEntry ? editEntry.gcodeOvr : gcodeOvr;
+  const committedActivePreset = editOpen && editEntry ? editEntry.activePreset : activePreset;
   useEffect(() => {
-    setProjectTabs(tabs => tabs.map(tab => tab.id===activeProjectId ? { ...tab, sketch, params, gcodeOvr, referenceImages, activePreset } : tab));
-  }, [activeProjectId, sketch, params, gcodeOvr, referenceImages, activePreset]);
+    setProjectTabs(tabs => tabs.map(tab => tab.id===activeProjectId ? { ...tab, sketch: committedSketch, params: committedParams, gcodeOvr: committedGcodeOvr, referenceImages, activePreset: committedActivePreset } : tab));
+  }, [activeProjectId, committedSketch, committedParams, committedGcodeOvr, referenceImages, committedActivePreset]);
   const switchProject = (id: string) => {
     if(id===activeProjectId)return;const tab=projectTabs.find(t=>t.id===id);if(!tab)return;
     /* تاریخچه تب مبدأ پیش از سوییچ ذخیره و تاریخچه مستقل مقصد بازیابی می‌شود. */
     setProjectTabs(tabs=>tabs.map(t=>t.id===activeProjectId?{...t,past:[...past.current],future:[...future.current]}:t));
     setActiveProjectId(id);setSketch(tab.sketch);setGenerationSketch(tab.sketch);setParams(tab.params);setGcodeOvr(tab.gcodeOvr);setReferenceImages(normalizeReferenceImages(tab.referenceImages));setActivePreset(tab.activePreset);
     const limit=Math.min(200,Math.max(1,Math.round(preferences.historyLimit)));
-    setSelectedIds([]);setEditBuf(null);setEditOpen(false);past.current=(tab.past??[]).slice(-limit);future.current=(tab.future??[]).slice(-limit);setHistVer(v=>v+1);
+    keptDraftRef.current=null;pendingExitActionRef.current=null;setPendingEditExit(false);setEditEntry(null);
+    setSelectedIds([]);setEditBuf(null);flushLiveEditBuf(null);setEditOpen(false);past.current=(tab.past??[]).slice(-limit);future.current=(tab.future??[]).slice(-limit);setHistVer(v=>v+1);
   };
   const finishCloseProject = (id:string) => {
     const closed = projectTabs.find(t=>t.id===id);
@@ -533,7 +625,8 @@ export default function App() {
     projectHandlesRef.current.delete(id);
     if(remaining.length){setProjectTabs(remaining);if(id===activeProjectId){const next=remaining[Math.max(0,projectTabs.findIndex(t=>t.id===id)-1)]??remaining[0];setActiveProjectId(next.id);setSketch(next.sketch);setGenerationSketch(next.sketch);setParams(next.params);setGcodeOvr(next.gcodeOvr);setReferenceImages(normalizeReferenceImages(next.referenceImages));setActivePreset(next.activePreset);past.current=[...(next.past??[])];future.current=[...(next.future??[])];setHistVer(v=>v+1);}}
     else { setProjectTabs([]); setWelcomeOpen(true); }
-    setPendingCloseProject(null);setSelectedIds([]);setEditBuf(null);setEditOpen(false);
+    keptDraftRef.current=null;pendingExitActionRef.current=null;setPendingEditExit(false);setEditEntry(null);
+    setPendingCloseProject(null);setSelectedIds([]);setEditBuf(null);flushLiveEditBuf(null);setEditOpen(false);
   };
   const requestCloseProject=(id:string)=>{const tab=projectTabs.find(t=>t.id===id);if(!tab)return;const dirty=tab.savedSnapshot!==projectSnapshot(tab.sketch,tab.params,tab.gcodeOvr,tab.referenceImages);if(dirty)setPendingCloseProject(id);else finishCloseProject(id);};
   const openNewProject=()=>{
@@ -567,7 +660,8 @@ export default function App() {
        واقعی نسبت به همین Snapshot نمایش داده می‌شود. */
     const initialSnapshot=projectSnapshot([],nextParams,{},[]);
     setProjectTabs(tabs=>[...tabs.map(tab=>tab.id===activeProjectId?{...tab,past:[...past.current],future:[...future.current]}:tab),{id,name:name||`پروژه جدید ${tabs.length+1}`,sketch:[],params:nextParams,gcodeOvr:{},referenceImages:[],activePreset:null,savedSnapshot:initialSnapshot,past:[],future:[]}]);
-    setActiveProjectId(id);setSketch([]);setGenerationSketch([]);setParams(nextParams);setGcodeOvr({});setReferenceImages([]);setActivePreset(null);setSelectedIds([]);setEditBuf(null);setEditOpen(false);past.current=[];future.current=[];setHistVer(v=>v+1);setNewProjectDraft(null);
+    keptDraftRef.current=null;pendingExitActionRef.current=null;setPendingEditExit(false);setEditEntry(null);
+    setActiveProjectId(id);setSketch([]);setGenerationSketch([]);setParams(nextParams);setGcodeOvr({});setReferenceImages([]);setActivePreset(null);setSelectedIds([]);setEditBuf(null);flushLiveEditBuf(null);setEditOpen(false);past.current=[];future.current=[];setHistVer(v=>v+1);setNewProjectDraft(null);
   };
 
   /* تاریخچهٔ یکپارچه: هر گام = {اسکچ، اورراید جی‌کد، بافر ادیت} — واگرد بعد از تأیید
@@ -582,42 +676,10 @@ export default function App() {
   };
 
   /* پروفایل نقطه‌ای برای موتور تراش — حالت عادی تخت، حالت کاسه دوشاخه (Split) */
-  const { points, innerPoints, outerFinishPoints, splitInfo } = useMemo(() => {
-    const blankR = params.blankD / 2;
-    if (params.split.enabled) {
-      const poly = chainPolyline(orderChain(generationSketch));
-      if (poly.length >= 3) {
-        const sp = splitChainAt(poly, { z: params.split.z, r: params.split.r });
-        /* حفظ جهت توپولوژیک نسبت به Split در حالت swapped: شاخهٔ خارجی از سر آزاد به Split و شاخهٔ داخلی از Split به سر آزاد */
-        const outerBranch = params.split.swapped ? [...sp.inner].reverse() : sp.outer;
-        const innerBranch = params.split.swapped ? [...sp.outer].reverse() : sp.inner;
-        const branchDir = (br: { z: number }[]): 1 | -1 =>
-          br.length >= 2 && br[br.length - 1].z < br[0].z ? -1 : 1;
-        return {
-          points: branchPoints(outerBranch, blankR, params.blankL, "max"),
-          /* پرداخت بیرونی نیز باید ترتیب توپولوژیک و گوشه‌های قائم شاخه را حفظ
-             کند؛ پوشش مرتب‌شدهٔ points فقط برای محاسبات خشن استفاده می‌شود. */
-          outerFinishPoints: branchPathPoints(outerBranch, blankR, params.blankL),
-          /* ترتیب واقعی شاخه برای Offset/Finish حفظ می‌شود؛ موتور مسیر یک پوشش
-             یکنواخت جداگانه برای پاس‌های خشن می‌سازد. */
-          innerPoints: branchPathPoints(innerBranch, blankR, params.blankL),
-          splitInfo: {
-            outerDir: branchDir(outerBranch),
-            innerDir: branchDir(innerBranch),
-            at: sp.splitAt,
-          },
-        };
-      }
-    }
-    const none: { outerDir: 1 | -1; innerDir: 1 | -1; at: { z: number; r: number } } | null = null;
-    const orderedProfile = chainPolyline(orderChain(generationSketch));
-    return {
-      points: flattenSketch(generationSketch, blankR, params.blankL),
-      innerPoints: [] as PPoint[],
-      outerFinishPoints: branchPathPoints(orderedProfile, blankR, params.blankL),
-      splitInfo: none,
-    };
-  }, [generationSketch, params.split, params.blankD, params.blankL]);
+  const { points, innerPoints, outerFinishPoints, splitInfo } = useMemo(
+    () => computeProfileBranches(generationSketch, params.split, params.blankD, params.blankL),
+    [generationSketch, params.split, params.blankD, params.blankL]
+  );
 
   useEffect(() => {
     if (!allProfileLayersHidden && generationSketch !== sketch) setGenerationSketch(sketch);
@@ -628,16 +690,32 @@ export default function App() {
 
   const gen = useMemo(() => applyGcodeOvr(genBase, gcodeOvr, generationParams), [genBase, gcodeOvr, generationParams]);
 
-  /* هنگام Drag هلدر دوم، اختلاف آفست به‌تنهایی برای فعال‌کردن «تأیید» کافی است؛
-     در این مسیر داغ عمداً deriveGcodeOvr (پیمایش کل برنامه) اجرا نمی‌شود تا
-     حرکت حتی روی برنامه‌های چند هزار خطی روان بماند. */
-  const editChanges = useMemo(() => {
-    if (!editOpen || !editBuf) return 0;
-    /* Pan، Zoom، Scroll و انتخاب‌ها جزو هندسه پیش‌نویس نیستند. Dirty فقط از
-       رأس‌ها، خطوط، Sketch، Split و آفست هلدر محاسبه می‌شود و با Seed لحظه ورود سنجیده می‌شود. */
-    const geometry=JSON.stringify({verts:editBuf.verts,lines:editBuf.lines,sketch:editBuf.sketch,holder2:editBuf.holder2,split:editBuf.split});
-    return geometry===editBaselineRef.current?0:1;
-  }, [editOpen, editBuf]);
+  /* پیش‌نمایش زندهٔ جی‌کد در حالت ویرایش مسیر بدون نیاز به فشردن دکمهٔ تأیید */
+  const activeDraftBuf = editOpen ? (liveEditBuf ?? editBuf) : null;
+  const liveGen = useMemo(() => {
+    if (!editOpen || !activeDraftBuf) return null;
+    const draftHolder2 = activeDraftBuf.holder2 ?? params.holder2;
+    const draftSplit = activeDraftBuf.split ?? params.split;
+    const sketchChanged = activeDraftBuf.sketch !== sketch;
+    const holder2Changed =
+      draftHolder2.xOff !== params.holder2.xOff || draftHolder2.yOff !== params.holder2.yOff;
+    const draftGenerationParams: Params = holder2Changed
+      ? { ...generationParams, holder2: draftHolder2 }
+      : generationParams;
+    const draftParams: Params = holder2Changed
+      ? { ...params, holder2: draftHolder2 }
+      : params;
+    const draftBranches = sketchChanged
+      ? computeProfileBranches(activeDraftBuf.sketch, draftSplit, params.blankD, params.blankL)
+      : { points, innerPoints, outerFinishPoints };
+    const draftGenBase = holder2Changed || sketchChanged
+      ? generate(draftBranches.points, draftGenerationParams, draftBranches.innerPoints, draftBranches.outerFinishPoints)
+      : genBase;
+    const draftOvr = deriveGcodeOvr(activeDraftBuf.verts, activeDraftBuf.lines, draftGenBase.segs, gcodeOvr, draftParams);
+    return applyGcodeOvr(draftGenBase, draftOvr, draftGenerationParams);
+  }, [editOpen, activeDraftBuf, params, sketch, generationParams, points, innerPoints, outerFinishPoints, genBase, gcodeOvr]);
+
+  const displayGen = editOpen && liveGen ? liveGen : gen;
 
   /* پارامترهای برداشت مستقیماً توپولوژی مسیر را تغییر می‌دهند. پیش‌نویس فعلی
      ابتدا نسبت به برنامه قبلی به override تبدیل، سپس روی برنامه جدید اعمال
@@ -685,10 +763,11 @@ export default function App() {
       if (wasClean) {
         editBaselineRef.current = JSON.stringify({ verts: nextBuf.verts, lines: nextBuf.lines, sketch: nextBuf.sketch, holder2: nextBuf.holder2, split: nextBuf.split });
       }
+      flushLiveEditBuf(nextBuf);
       return nextBuf;
     });
     setHistVer((v) => v + 1);
-  }, [genBase, params]);
+  }, [genBase, params, flushLiveEditBuf]);
 
   /* پس از اعمال preset، مسیر قدیمی با هندسه/ابعاد جدید مخلوط نمی‌شود؛ بافر
      تازه دقیقاً از خروجی جدید ساخته و انتخاب‌های قبلی پاک می‌شود. */
@@ -697,11 +776,15 @@ export default function App() {
     presetReseedRef.current = false;
     const seed = seedGcodeEdit(gen.segs, params);
     const nextEdit: EditBuf = { verts: seed.verts, lines: seed.lines, sketch, off: {}, holder2: { ...params.holder2 }, split: { ...params.split }, selLines: [], activeLine: null };
-    editBaselineRef.current = JSON.stringify({ verts: nextEdit.verts, lines: nextEdit.lines, sketch: nextEdit.sketch, holder2: nextEdit.holder2, split: nextEdit.split });
+    const baseline = JSON.stringify({ verts: nextEdit.verts, lines: nextEdit.lines, sketch: nextEdit.sketch, holder2: nextEdit.holder2, split: nextEdit.split });
+    editBaselineRef.current = baseline;
+    keptDraftRef.current = null;
+    setEditEntry({ sketch, params: cloneParams(params), gcodeOvr: {}, activePreset, baseline });
     setEditBuf(nextEdit);
+    flushLiveEditBuf(nextEdit);
     commitRef.current = null;
     setHistVer((v) => v + 1);
-  }, [gen, params, sketch]);
+  }, [gen, params, sketch, activePreset, flushLiveEditBuf]);
 
   /* ذخیره محلی (با تأخیر کوتاه تا کشیدن جداکننده پنجره‌ها بدون مکث اجرا شود) */
   const latestPersistPayloadRef = useRef<{
@@ -727,13 +810,13 @@ export default function App() {
     }
   };
   useEffect(() => {
-    const payload = { sketch, params, settings, preferences, activePreset, layout, gcodeOvr, referenceImages, version: SAVE_VERSION };
+    const payload = { sketch: committedSketch, params: committedParams, settings, preferences, activePreset: committedActivePreset, layout, gcodeOvr: committedGcodeOvr, referenceImages, version: SAVE_VERSION };
     latestPersistPayloadRef.current = payload;
     const timer = window.setTimeout(() => {
       persistPayloadToStore(payload);
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [sketch, params, settings, preferences, activePreset, layout, gcodeOvr, referenceImages]);
+  }, [committedSketch, committedParams, settings, preferences, committedActivePreset, layout, committedGcodeOvr, referenceImages]);
 
   useEffect(() => {
     const flushStore = () => {
@@ -760,13 +843,17 @@ export default function App() {
   },[preferences.historyLimit]);
 
   useEffect(() => {
-    if (!preferences.keepEditDraft && !editOpen && editBuf) setEditBuf(null);
-  }, [preferences.keepEditDraft, editOpen, editBuf]);
+    if (!preferences.keepEditDraft) keptDraftRef.current = null;
+    if (!preferences.keepEditDraft && !editOpen && editBuf) {
+      setEditBuf(null);
+      flushLiveEditBuf(null);
+    }
+  }, [preferences.keepEditDraft, editOpen, editBuf, flushLiveEditBuf]);
 
-  /* هنگام تغییر برنامه، هایلایت جی‌کد پاک شود */
+  /* هنگام تغییر برنامه در خارج از ویرایش مسیر، هایلایت جی‌کد پاک شود */
   useEffect(() => {
-    setActiveLine(-1);
-  }, [gen]);
+    if (!editOpen) setActiveLine(-1);
+  }, [gen, editOpen]);
 
   /* در طراحی پروفایل، انتخاب خط نیز نزدیک‌ترین حرکت پرداختیِ متناظر را در جی‌کد
      نشان می‌دهد. در Edit path نگاشت دقیق‌تر بر پایهٔ ovrKey داخل ProfileEditor است. */
@@ -808,11 +895,13 @@ export default function App() {
     if (!editOpen) return;
     setEditBuf((current) => {
       if (!current) return current;
-      const matching=current.lines.find(line=>editLineGCodeIndex(line.id,current.lines,gen)===lineIndex);
-      if(!matching)return current;
-      return { ...current, selLines: [matching.id], activeLine: matching.id };
+      const matching = current.lines.find((line) => editLineGCodeIndex(line.id, current.lines, displayGen) === lineIndex);
+      if (!matching) return current;
+      const next = { ...current, selLines: [matching.id], activeLine: matching.id };
+      flushLiveEditBuf(next);
+      return next;
     });
-  }, [editOpen, gen]);
+  }, [editOpen, displayGen, flushLiveEditBuf]);
 
   /* اگر عملیاتِ ایزوله‌شده حذف شد، از حالت ایزوله خارج شو */
   useEffect(() => {
@@ -830,7 +919,11 @@ export default function App() {
     setGenerationSketch(e.sketch);
     setGcodeOvr(e.gcodeOvr);
     setEditBuf(e.editBuf);
+    flushLiveEditBuf(e.editBuf);
     setParams(e.params);
+    const restoredEntry = e.editOpen ? (e.editEntry ?? editEntryRef.current) : null;
+    if (restoredEntry?.baseline) editBaselineRef.current = restoredEntry.baseline;
+    setEditEntry(restoredEntry);
     /* وجود پیش‌نویس به معنی بازبودن UI نیست. اگر کاربر پیش از تغییر استراتژی
        از ویرایش مسیر خارج شده بود، Undo نیز همان حالت بسته را بازیابی می‌کند. */
     setEditOpen(e.editOpen);
@@ -856,106 +949,177 @@ export default function App() {
   /* ---------- حالت ویرایش مسیر ---------- */
   const openEdit = () => {
     if (editOpenRef.current) return;
-    /* پیش‌نویس قبلی بدون seed مجدد باز می‌شود؛ انتخاب‌ها و هندسه دقیقاً حفظ شده‌اند. */
-    if (editBufRef.current) {
+    pushPast(snap());
+    const seed = seedGcodeEdit(gen.segs, params);
+    const cleanSeed: EditBuf = { verts: seed.verts, lines: seed.lines, sketch, off: {}, holder2: { ...params.holder2 }, split: { ...params.split }, selLines: [], activeLine: null };
+    const cleanBaseline = JSON.stringify({ verts: cleanSeed.verts, lines: cleanSeed.lines, sketch: cleanSeed.sketch, holder2: cleanSeed.holder2, split: cleanSeed.split });
+    const entrySnapshot: EditEntrySnapshot = {
+      sketch,
+      params: cloneParams(params),
+      gcodeOvr: cloneGcodeOvr(gcodeOvr),
+      activePreset,
+      baseline: cleanBaseline,
+    };
+    setEditEntry(entrySnapshot);
+    /* اگر گزینهٔ «حفظ پیش‌نویس ویرایش مسیر» روشن باشد و پیش‌نویس قبلی نگه داشته شده باشد، بازیابی شود */
+    if (preferences.keepEditDraft && keptDraftRef.current) {
+      const kept = keptDraftRef.current;
+      editBaselineRef.current = cleanBaseline;
+      pendingParamRebaseRef.current = null;
+      setParams(cloneParams(kept.draftParams));
+      setEditBuf(kept.editBuf);
+      flushLiveEditBuf(kept.editBuf);
       setEditOpen(true);
+      setHistVer((v) => v + 1);
       showToast("پیش‌نویس ویرایش مسیر بازیابی شد");
       return;
     }
-    pushPast(snap());
-    const seed = seedGcodeEdit(gen.segs, params);
-    const nextEdit: EditBuf = { verts: seed.verts, lines: seed.lines, sketch, off: {}, holder2: { ...params.holder2 }, split: { ...params.split }, selLines: [], activeLine: null };
-    editBaselineRef.current = JSON.stringify({ verts: nextEdit.verts, lines: nextEdit.lines, sketch: nextEdit.sketch, holder2: nextEdit.holder2, split: nextEdit.split });
-    setEditBuf(nextEdit);
+    editBaselineRef.current = cleanBaseline;
+    setEditBuf(cleanSeed);
+    flushLiveEditBuf(cleanSeed);
     setEditOpen(true);
     setHistVer((v) => v + 1);
   };
-  const closeEdit = () => {
-    if (!editOpenRef.current) return;
-    commitRef.current = null;
-    if (preferences.keepEditDraft) {
-      setEditOpen(false);
-      showToast("ویرایش مسیر بسته شد — پیش‌نویس تغییرات برای بازگشت بعدی حفظ شد", "warn");
+  const requestExitEdit = (afterExit?: () => void) => {
+    if (!editOpenRef.current) {
+      afterExit?.();
       return;
     }
-    if (editChanges > 0) {
+    commitRef.current = null;
+    const eb = editBufRef.current;
+    const entry = editEntryRef.current;
+    const geomDirty = !!eb &&
+      JSON.stringify({ verts: eb.verts, lines: eb.lines, sketch: eb.sketch, holder2: eb.holder2, split: eb.split }) !== editBaselineRef.current;
+    const paramsDirty = !!entry && JSON.stringify(stateRef.current.params) !== JSON.stringify(entry.params);
+    if (geomDirty || paramsDirty) {
+      pendingExitActionRef.current = afterExit ?? null;
       setPendingEditExit(true);
       return;
     }
+    keptDraftRef.current = null;
+    setEditEntry(null);
     setEditBuf(null);
+    flushLiveEditBuf(null);
     setEditOpen(false);
+    afterExit?.();
   };
-  const discardEdit = () => {
-    if (!editBufRef.current) return;
+  const closeEdit = () => {
+    requestExitEdit();
+  };
+  const revertEditAndExit = () => {
     pushPast(snap());
+    if (preferences.keepEditDraft && editBufRef.current) {
+      keptDraftRef.current = {
+        editBuf: editBufRef.current,
+        draftParams: cloneParams(params),
+        baseline: editBaselineRef.current,
+      };
+    } else {
+      keptDraftRef.current = null;
+    }
+    const entry = editEntryRef.current;
     commitRef.current = null;
     pendingParamRebaseRef.current = null;
+    presetReseedRef.current = false;
+    if (entry) {
+      setSketch(entry.sketch);
+      setGenerationSketch(entry.sketch);
+      setParams(cloneParams(entry.params));
+      setGcodeOvr(cloneGcodeOvr(entry.gcodeOvr));
+      setActivePreset(entry.activePreset);
+    }
+    setEditEntry(null);
     setEditBuf(null);
+    flushLiveEditBuf(null);
     setEditOpen(false);
+    setPendingEditExit(false);
+    const after = pendingExitActionRef.current;
+    pendingExitActionRef.current = null;
+    after?.();
     setHistVer((v) => v + 1);
-    showToast("پیش‌نویس ویرایش مسیر حذف شد", "warn");
+    showToast(
+      preferences.keepEditDraft
+        ? "تغییرات تأیید نشد — تنظیمات قبلی نمایش داده شد (پیش‌نویس حفظ شد)"
+        : "تغییرات تأیید نشد — تنظیمات قبلی بازیابی شد",
+      "warn"
+    );
   };
-  const confirmEdit = () => {
+  const confirmEditAndExit = () => {
     const eb = editBufRef.current;
-    if (!eb) return;
-    const draftHolder2 = eb.holder2 ?? params.holder2;
-    const draftSplit = eb.split ?? params.split;
-    const draftParams: Params = { ...params, holder2: draftHolder2 };
-    const holder2Changed =
-      draftHolder2.xOff !== params.holder2.xOff || draftHolder2.yOff !== params.holder2.yOff;
-    const splitChanged =
-      draftSplit.enabled !== params.split.enabled ||
-      draftSplit.z !== params.split.z ||
-      draftSplit.r !== params.split.r ||
-      draftSplit.swapped !== params.split.swapped;
-    /* آفست H2 روی هندسهٔ ورود امن مولد نیز اثر دارد (گوشهٔ افقی→عمودی).
-       مقایسه با پایهٔ قدیمی آن گوشه را اشتباهاً override می‌کرد؛ پایهٔ پیش‌نویس
-       دقیقاً با آفست زنده ساخته می‌شود تا جابه‌جایی خالص، override نسازد. */
-    const draftGenBase = holder2Changed ? generate(points, { ...draftParams, rpm: preferences.spindleSpeed, format: preferences.gcodeFormat, lineNumbers: preferences.sequenceNumbers, ramp: preferences.continuousPaths, safeBottomInnerLink: preferences.safeBottomInnerLink, innerBoundaryRoutingMode: preferences.innerBoundaryRoutingMode, simpleFeed: preferences.optimizeFeeds, spreadG0: preferences.spreadRapid, feedByKind: { ...preferences.operationFeeds, roughz: preferences.operationFeeds.rough, copy: preferences.operationFeeds.rough } }, innerPoints, outerFinishPoints) : genBase;
-    const next = deriveGcodeOvr(eb.verts, eb.lines, draftGenBase.segs, gcodeOvr, draftParams);
-    const sketchChanged = eb.sketch !== sketch;
-    if (!sketchChanged && !holder2Changed && !splitChanged && JSON.stringify(next) === JSON.stringify(gcodeOvr)) {
-      showToast("تغییری برای ثبت نیست", "warn");
-      return;
+    if (eb) {
+      const draftHolder2 = eb.holder2 ?? params.holder2;
+      const draftSplit = eb.split ?? params.split;
+      const sketchChanged = eb.sketch !== sketch;
+      const holder2Changed =
+        draftHolder2.xOff !== params.holder2.xOff || draftHolder2.yOff !== params.holder2.yOff;
+      const splitChanged =
+        draftSplit.enabled !== params.split.enabled ||
+        draftSplit.z !== params.split.z ||
+        draftSplit.r !== params.split.r ||
+        draftSplit.swapped !== params.split.swapped;
+      const draftParams: Params = holder2Changed ? { ...params, holder2: draftHolder2 } : params;
+      const draftGenerationParams: Params = holder2Changed
+        ? { ...generationParams, holder2: draftHolder2 }
+        : generationParams;
+      const draftBranches = sketchChanged
+        ? computeProfileBranches(eb.sketch, draftSplit, params.blankD, params.blankL)
+        : { points, innerPoints, outerFinishPoints };
+      /* آفست H2 روی هندسهٔ ورود امن مولد نیز اثر دارد (گوشهٔ افقی→عمودی).
+         پایهٔ پیش‌نویس دقیقاً با آفست زنده ساخته می‌شود تا جابه‌جایی خالص، override نسازد. */
+      const draftGenBase = holder2Changed || sketchChanged
+        ? generate(draftBranches.points, draftGenerationParams, draftBranches.innerPoints, draftBranches.outerFinishPoints)
+        : genBase;
+      const nextOvr = deriveGcodeOvr(eb.verts, eb.lines, draftGenBase.segs, gcodeOvr, draftParams);
+      pushPast(snap());
+      setGcodeOvr(nextOvr);
+      if (holder2Changed || splitChanged) {
+        /* عمداً از onParamsCb عبور نمی‌کند: بافر از قبل با همین آفست در فضای
+           ماشین جابه‌جا شده و rebase دوباره باعث دوبرابرشدن حرکت می‌شود. */
+        pendingParamRebaseRef.current = null;
+        setParams((p) => ({
+          ...p,
+          ...(holder2Changed ? { holder2: { ...draftHolder2 } } : {}),
+          ...(splitChanged ? { split: { ...draftSplit } } : {}),
+        }));
+      }
+      if (sketchChanged) {
+        setActivePreset(null);
+        setSketch(eb.sketch);
+        setGenerationSketch(eb.sketch);
+      }
     }
-    pushPast(snap());
-    setGcodeOvr(next);
-    if (holder2Changed || splitChanged) {
-      /* عمداً از onParamsCb عبور نمی‌کند: بافر از قبل با همین آفست در فضای
-         ماشین جابه‌جا شده و rebase دوباره باعث دوبرابرشدن حرکت می‌شود. */
-      pendingParamRebaseRef.current = null;
-      setParams((p) => ({
-        ...p,
-        ...(holder2Changed ? { holder2: { ...draftHolder2 } } : {}),
-        ...(splitChanged ? { split: { ...draftSplit } } : {}),
-      }));
-    }
-    if (sketchChanged) {
-      setActivePreset(null);
-      setSketch(eb.sketch);
-      setGenerationSketch(eb.sketch);
-    }
-    /* تأیید، وضعیت فعلی را به Baseline جدید تبدیل می‌کند. کپی سطحی EditBuf
-       وابستگی useMemo را نیز تغییر می‌دهد تا editChanges همان لحظه صفر شود و
-       خروج بعد از تأیید، هشدار تغییرات تأییدنشده نشان ندهد. */
-    editBaselineRef.current = JSON.stringify({ verts: eb.verts, lines: eb.lines, sketch: eb.sketch, holder2: eb.holder2, split: eb.split });
-    setEditBuf({ ...eb });
+    keptDraftRef.current = null;
+    commitRef.current = null;
+    setEditEntry(null);
+    setEditBuf(null);
+    flushLiveEditBuf(null);
+    setEditOpen(false);
+    setPendingEditExit(false);
+    const after = pendingExitActionRef.current;
+    pendingExitActionRef.current = null;
+    after?.();
     setHistVer((v) => v + 1);
-    showToast(holder2Changed
-      ? "جی‌کد و آفست هلدر دوم به‌روز شد ✓ (ویرایش مسیر باز ماند)"
-      : "جی‌کد به‌روز شد ✓ (ویرایش مسیر باز ماند)");
+    showToast("تغییرات ویرایش مسیر تأیید شد ✓");
   };
-  /* تغییرات بافر (خطوط/پروفایل/افست) — یک‌گام تاریخچه برای هر ژست */
+  /* تغییرات بافر (خطوط/پروفایل/افست) — یک‌گام تاریخچه برای هر ژست + به‌روزرسانی زندهٔ جی‌کد */
   const onEditBuf = (next: EditBuf | null, commit: boolean) => {
     if (!commit) {
       if (!commitRef.current) commitRef.current = snap();
       setEditBuf(next);
+      pendingLiveEditBufRef.current = next;
+      if (liveEditFrameRef.current == null) {
+        liveEditFrameRef.current = requestAnimationFrame(() => {
+          liveEditFrameRef.current = null;
+          setLiveEditBuf(pendingLiveEditBufRef.current);
+        });
+      }
       return;
     }
     const pend = commitRef.current ?? snap();
     commitRef.current = null;
     pushPast(pend);
     setEditBuf(next);
+    flushLiveEditBuf(next);
     setHistVer((v) => v + 1);
   };
 
@@ -982,6 +1146,7 @@ export default function App() {
       pushPast(snap());
       setHistVer((v) => v + 1);
     }
+    if (!editOpenRef.current) keptDraftRef.current = null;
     if (editBufRef.current && !pendingParamRebaseRef.current) {
       pendingParamRebaseRef.current = { genBase, params, gcodeOvr };
     }
@@ -1027,8 +1192,11 @@ export default function App() {
     pushPast(snap());
     commitRef.current = null;
     pendingParamRebaseRef.current = null;
+    keptDraftRef.current = null;
+    setEditEntry(null);
     setGcodeOvr({});
     setEditBuf(null);
+    flushLiveEditBuf(null);
     setEditOpen(false);
     setParams((current) => ({
       ...current,
@@ -1042,7 +1210,7 @@ export default function App() {
     }));
     setHistVer((value) => value + 1);
     showToast(`استراتژی «${name}» فعال شد`);
-  }, [showToast]);
+  }, [showToast, flushLiveEditBuf]);
 
   /* ---------- چیدمان داک (پنجره‌ها) ---------- */
   const dockRowRef = useRef<HTMLDivElement>(null);
@@ -1281,6 +1449,7 @@ export default function App() {
     ) {
       commitRef.current = null;
     }
+    keptDraftRef.current = null;
     setSketch(next);
     if (splitPatch) {
       if (editBufRef.current && !pendingParamRebaseRef.current) {
@@ -1353,6 +1522,14 @@ export default function App() {
   preferencesRef.current = preferences;
   const onPreferencesChange = useCallback((next: AppPreferences) => {
     const prev = preferencesRef.current;
+    const topologyPrefChanged =
+      next.continuousPaths !== prev.continuousPaths ||
+      next.safeBottomInnerLink !== prev.safeBottomInnerLink ||
+      next.innerBoundaryRoutingMode !== prev.innerBoundaryRoutingMode ||
+      next.spreadRapid !== prev.spreadRapid;
+    if (topologyPrefChanged && editBufRef.current && !pendingParamRebaseRef.current) {
+      pendingParamRebaseRef.current = { genBase, params: stateRef.current.params, gcodeOvr: stateRef.current.gcodeOvr };
+    }
     setPreferences(next);
     const patch: Partial<Params> = {};
     if (next.defaultGcodeShiftX !== prev.defaultGcodeShiftX && stateRef.current.params.gcodeShiftX === prev.defaultGcodeShiftX) {
@@ -1372,6 +1549,7 @@ export default function App() {
       patch.innerEndTravel = nextInnerEnd;
     }
     if (Object.keys(patch).length > 0) {
+      setEditEntry((prevEntry) => prevEntry ? { ...prevEntry, params: { ...prevEntry.params, ...patch } } : prevEntry);
       onParamsCb(patch);
     }
     const nextH2X = Math.max(MIN_HOLDER2_OFFSET, next.defaultHolder2XOff);
@@ -1380,12 +1558,14 @@ export default function App() {
     const syncH2X = next.defaultHolder2XOff !== prev.defaultHolder2XOff && curH2.xOff === Math.max(MIN_HOLDER2_OFFSET, prev.defaultHolder2XOff);
     const syncH2Y = next.defaultHolder2YOff !== prev.defaultHolder2YOff && curH2.yOff === Math.max(MIN_HOLDER2_OFFSET, prev.defaultHolder2YOff);
     if (syncH2X || syncH2Y) {
-      onHolder2SettingsCb({
+      const syncedH2 = {
         xOff: syncH2X ? nextH2X : curH2.xOff,
         yOff: syncH2Y ? nextH2Y : curH2.yOff,
-      });
+      };
+      setEditEntry((prevEntry) => prevEntry ? { ...prevEntry, params: { ...prevEntry.params, holder2: syncedH2 } } : prevEntry);
+      onHolder2SettingsCb(syncedH2);
     }
-  }, [onParamsCb, onHolder2SettingsCb]);
+  }, [genBase, onParamsCb, onHolder2SettingsCb]);
 
   const applyPreset = useCallback((p: Preset) => {
     setWelcomeOpen(false);
@@ -1488,7 +1668,7 @@ export default function App() {
   }, [sketch, showToast, onParamsCb]);
 
   /* متن جی‌کد با پایان‌خط CRLF (سازگار با CIMCO/ویندوز و کنترلرها) */
-  const gcodeText = () => gen.lines.join("\r\n");
+  const gcodeText = () => displayGen.lines.join("\r\n");
 
   const copyGCode = async () => {
     const text = gcodeText();
@@ -1535,7 +1715,7 @@ export default function App() {
   };
 
   const downloadDxf = () => {
-    const { text, vertexCount, opCount } = buildDxf(gen.segs, params.ops, params.blankL, params.blankD / 2);
+    const { text, vertexCount, opCount } = buildDxf(displayGen.segs, params.ops, params.blankL, params.blankD / 2);
     const blob = new Blob([text], { type: "application/dxf;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1550,7 +1730,7 @@ export default function App() {
     format: "KharraatCode Project", version: SAVE_VERSION, savedAt: new Date().toISOString(),
     /* فایل اشتراکی فقط داده‌های مهندسی پروژه را حمل می‌کند؛ تنظیمات شخصی رابط
        کاربر (تم، رنگ، میانبر، حساسیت اسنپ، لایه‌ها و چیدمان) محلی می‌مانند. */
-    project: { sketch, params, gcodeOvr, referenceImages },
+    project: { sketch: committedSketch, params: committedParams, gcodeOvr: committedGcodeOvr, referenceImages },
     output: { postProcessor: preferences.postProcessor, gcodeUnits: preferences.gcodeUnits, sequenceNumbers: preferences.sequenceNumbers, gcodeFormat: preferences.gcodeFormat, continuousPaths: preferences.continuousPaths, optimizeFeeds: preferences.optimizeFeeds, spreadRapid: preferences.spreadRapid, spindleSpeed: preferences.spindleSpeed, operationFeeds: preferences.operationFeeds },
   }, null, 2);
   const downloadProject = (name = "project.kharraat") => {
@@ -1560,7 +1740,7 @@ export default function App() {
   const askProjectName=()=>new Promise<string|null>(resolve=>{saveAsResolver.current=resolve;setSaveAsName(projectTabs.find(t=>t.id===activeProjectId)?.name||"project");});
   const saveProjectAs = async (): Promise<boolean> => {
     try {
-      if(!preferences.useWindowsSaveDialog){const entered=await askProjectName();if(!entered)return false;const clean=entered.trim().replace(/[\\/:*?"<>|]+/g,"-").replace(/\.kharraat$/i,"")||"project";downloadProject(`${clean}.kharraat`);setProjectTabs(tabs=>tabs.map(t=>t.id===activeProjectId?{...t,name:clean,savedSnapshot:projectSnapshot(sketch,params,gcodeOvr,referenceImages)}:t));showToast("پروژه ذخیره شد");return true;}
+      if(!preferences.useWindowsSaveDialog){const entered=await askProjectName();if(!entered)return false;const clean=entered.trim().replace(/[\\/:*?"<>|]+/g,"-").replace(/\.kharraat$/i,"")||"project";downloadProject(`${clean}.kharraat`);setProjectTabs(tabs=>tabs.map(t=>t.id===activeProjectId?{...t,name:clean,savedSnapshot:projectSnapshot(committedSketch,committedParams,committedGcodeOvr,referenceImages)}:t));showToast("پروژه ذخیره شد");return true;}
       const picker = (window as unknown as { showSaveFilePicker?: (options: unknown) => Promise<{ name?: string; createWritable: () => Promise<{ write: (data: string) => Promise<void>; close: () => Promise<void> }> }> }).showSaveFilePicker;
       if (picker) {
         const handle = await picker({ suggestedName: "project.kharraat", types: [{ description: "KharraatCode Project", accept: { "application/json": [".kharraat"] } }] });
@@ -1568,14 +1748,14 @@ export default function App() {
         const writable = await handle.createWritable(); await writable.write(projectData()); await writable.close();
         if(handle.name)setProjectTabs(tabs=>tabs.map(t=>t.id===activeProjectId?{...t,name:handle.name!.replace(/\.kharraat$/i,"")}:t));
       } else {const entered=await askProjectName();if(!entered)return false;downloadProject(`${entered.trim().replace(/[\\/:*?"<>|]+/g,"-").replace(/\.kharraat$/i,"")||"project"}.kharraat`);}
-      setProjectTabs(tabs=>tabs.map(t=>t.id===activeProjectId?{...t,savedSnapshot:projectSnapshot(sketch,params,gcodeOvr,referenceImages)}:t));
+      setProjectTabs(tabs=>tabs.map(t=>t.id===activeProjectId?{...t,savedSnapshot:projectSnapshot(committedSketch,committedParams,committedGcodeOvr,referenceImages)}:t));
       showToast("پروژه ذخیره شد"); return true;
     } catch (error) { if ((error as {name?:string}).name !== "AbortError") showToast("ذخیره پروژه ممکن نشد", "warn"); return false; }
   };
   const saveProject = async (): Promise<boolean> => {
     const handle = projectHandlesRef.current.get(activeProjectId);
     if (!handle) return saveProjectAs();
-    try { const writable = await handle.createWritable(); await writable.write(projectData()); await writable.close(); setProjectTabs(tabs=>tabs.map(t=>t.id===activeProjectId?{...t,savedSnapshot:projectSnapshot(sketch,params,gcodeOvr,referenceImages)}:t)); showToast("پروژه ذخیره شد"); return true; }
+    try { const writable = await handle.createWritable(); await writable.write(projectData()); await writable.close(); setProjectTabs(tabs=>tabs.map(t=>t.id===activeProjectId?{...t,savedSnapshot:projectSnapshot(committedSketch,committedParams,committedGcodeOvr,referenceImages)}:t)); showToast("پروژه ذخیره شد"); return true; }
     catch { showToast("ذخیره مستقیم ممکن نشد؛ از Save As استفاده کنید", "warn"); return false; }
   };
   useEffect(() => {
@@ -1599,8 +1779,9 @@ export default function App() {
       setProjectTabs(tabs=>[...tabs.map(t=>t.id===activeProjectId?{...t,past:[...past.current],future:[...future.current]}:t),{id:newProjectId,name:file.name.replace(/\.kharraat$/i,""),sketch:nextSketch,params:nextParams,gcodeOvr:nextOvr,referenceImages:nextImages,activePreset:null,savedSnapshot:projectSnapshot(nextSketch,nextParams,nextOvr,nextImages),past:[],future:[]}]);setActiveProjectId(newProjectId);
       setSketch(nextSketch); setGenerationSketch(nextSketch); setParams(nextParams);
       /* settings/preferences/layout عمداً بارگذاری نمی‌شوند تا محیط شخصی گیرنده تغییر نکند. */
+      keptDraftRef.current=null; pendingExitActionRef.current=null; setPendingEditExit(false); setEditEntry(null);
       setActivePreset(null); setGcodeOvr(nextOvr); setReferenceImages(nextImages);
-      setSelectedIds([]); setEditBuf(null); setEditOpen(false); setMode("design");
+      setSelectedIds([]); setEditBuf(null); flushLiveEditBuf(null); setEditOpen(false); setMode("design");
       past.current=[]; future.current=[]; setHistVer(v=>v+1);
       const outputDiffers = !!raw.output && (raw.output.postProcessor !== preferences.postProcessor || raw.output.gcodeUnits !== preferences.gcodeUnits || raw.output.sequenceNumbers !== preferences.sequenceNumbers);
       showToast(outputDiffers ? `پروژه باز شد؛ تنظیمات خروجی پروژه با Preferences شما متفاوت است` : `پروژه «${file.name}» باز شد`, outputDiffers ? "warn" : "ok");
@@ -1612,6 +1793,10 @@ export default function App() {
     length = Math.round(length * 1e6) / 1e6;
     diameter = Math.round(diameter * 1e6) / 1e6;
     pushPast(snap());
+    keptDraftRef.current = null;
+    pendingExitActionRef.current = null;
+    setPendingEditExit(false);
+    setEditEntry(null);
     setSketch(segments);
     setGenerationSketch(segments);
     setParams((current) => normalizeParams({ ...current, blankL: Math.max(1, length), blankD: Math.max(1, diameter) }, false));
@@ -1619,6 +1804,8 @@ export default function App() {
     setActivePreset(null);
     setGcodeOvr({});
     setEditBuf(null);
+    flushLiveEditBuf(null);
+    setEditOpen(false);
     setShowAiImport(false);
     setMode("design");
     showToast(`فایل AI با ابعاد ${length.toFixed(1)} × ${diameter.toFixed(1)} میلی‌متر وارد شد`);
@@ -1715,8 +1902,13 @@ export default function App() {
     setGcodeOvr(t.gcodeOvr);
     setReferenceImages(normalizeReferenceImages(t.referenceImages));
     setActivePreset(t.activePreset);
+    keptDraftRef.current = null;
+    pendingExitActionRef.current = null;
+    setPendingEditExit(false);
+    setEditEntry(null);
     setSelectedIds([]);
     setEditBuf(null);
+    flushLiveEditBuf(null);
     setEditOpen(false);
     past.current = [];
     future.current = [];
@@ -1754,7 +1946,7 @@ export default function App() {
       {showPreferences && <PreferencesDialog value={preferences} snapTolerance={settings.snapTolerancePx} onChange={onPreferencesChange} onSnapTolerance={(snapTolerancePx) => setSettings((s) => ({ ...s, snapTolerancePx }))} onClose={() => setShowPreferences(false)} />}
       {(welcomeOpen||projectTabs.length===0)&&<div className="fixed inset-0 z-[95] grid place-items-center overflow-hidden bg-bg p-8" dir="rtl"><div className="pointer-events-none absolute inset-0 opacity-80" style={{backgroundImage:"radial-gradient(circle at 18% 20%, rgba(var(--rgb-brass), .18), transparent 28%), radial-gradient(circle at 82% 78%, rgba(var(--rgb-teal), .13), transparent 30%), linear-gradient(rgba(var(--rgb-brass), .045) 1px, transparent 1px), linear-gradient(90deg, rgba(var(--rgb-brass), .045) 1px, transparent 1px)",backgroundSize:"100% 100%, 100% 100%, 42px 42px, 42px 42px"}}/><div className="pointer-events-none absolute left-1/2 top-1/2 h-[min(72vw,760px)] w-[min(72vw,760px)] -translate-x-1/2 -translate-y-1/2 rounded-full border border-brass/10 shadow-[0_0_0_34px_rgba(var(--rgb-brass),.025),0_0_0_70px_rgba(var(--rgb-teal),.025),0_0_100px_rgba(0,0,0,.8)]"/><div className="pointer-events-none absolute inset-0 opacity-20" style={{backgroundImage:"repeating-conic-gradient(from 12deg at 50% 50%, rgba(var(--rgb-brass), .08) 0deg, transparent 8deg, rgba(var(--rgb-teal), .05) 16deg, transparent 26deg)"}}/><div className="relative z-10 w-full max-w-5xl"><h1 className="text-2xl font-bold text-brass2">خراط‌کد</h1><p className="mt-1 text-sm text-dim">مدیریت پروژه‌ها</p><div className="mt-8 grid gap-5 md:grid-cols-3"><section className="rounded-xl border border-edge2 bg-panel p-5"><div className="flex items-center justify-between gap-2"><h2 className="font-bold text-ink">پروژه‌های اخیر</h2>{recentProjects.length>0&&<button className="rounded-md bg-teal/15 px-2.5 py-1.5 text-[10px] font-bold text-teal hover:bg-teal/25" onClick={()=>activateRecentTabs(recentProjects)}>باز کردن همه پروژه‌ها</button>}</div>{recentProjects.length?<><div className="mt-3 grid max-h-64 grid-cols-2 gap-2 overflow-y-auto pl-1">{recentProjects.map(p=><button key={p.id} className={`rounded-md border px-3 py-2 text-right transition-colors ${p.savedSnapshot!==projectSnapshot(p.sketch,p.params,p.gcodeOvr,p.referenceImages)?"border-orange-400/80 bg-orange-500/15 hover:bg-orange-500/25":"border-edge bg-panel2 hover:border-brass/60 hover:bg-brass/10"}`} onClick={()=>{const found=recentProjects.find(x=>x.id===p.id);if(found)activateRecentTabs([found],found.id);}}><span className="block truncate text-[11px] font-bold text-ink">{p.name}</span><small className="mt-1 block font-mono text-[8px] text-dim">D{p.params.blankD} × L{p.params.blankL} mm</small></button>)}</div><button className="mt-2 w-full rounded-md border border-edge bg-panel2 px-3 py-2 text-xs font-bold text-mute hover:border-danger/60 hover:text-danger" onClick={clearRecentProjects}>تمیز کردن لیست</button></>:<p className="mt-3 text-xs leading-6 text-dim">پروژه اخیری وجود ندارد.</p>}<button className="mt-3 w-full rounded-md border border-edge px-3 py-2 text-xs text-mute" onClick={()=>{setWelcomeOpen(false);projectInputRef.current?.click()}}>باز کردن فایل پروژه</button></section><section className="rounded-xl border border-brass/60 bg-brass/10 p-5"><h2 className="font-bold text-brass2">ایجاد پروژه جدید</h2><p className="mt-3 text-xs leading-6 text-mute">یک پروژه خالی برای طراحی پروفایل بسازید.</p><button className="mt-5 w-full rounded-md bg-brass px-3 py-2 text-xs font-bold text-[var(--color-brass-ink)]" onClick={openNewProject}>طراحی پروفایل جدید</button></section><section className="rounded-xl border border-edge2 bg-panel p-5"><h2 className="font-bold text-ink">پیش‌تنظیم‌های طراحی</h2><div className="mt-3 grid max-h-64 grid-cols-2 gap-2 overflow-y-auto">{PRESETS.map(p=><button key={p.id} className="rounded-md border border-edge bg-panel2 px-3 py-2 text-right transition-colors hover:border-brass/60 hover:bg-brass/10" onClick={()=>applyPreset(p)}><span className="block text-[11px] font-bold text-ink">{p.name}</span><small className="mt-1 block font-mono text-[8px] text-dim">D{p.blankD} × L{p.blankL} mm</small></button>)}</div></section></div></div></div>}{confirmClearRecent&&<div className="fixed inset-0 z-[160] grid place-items-center bg-black/55 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-orange-400/60 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-orange-300">پروژه ذخیره‌نشده</h3><p className="mt-3 text-[12px] leading-6 text-mute">یک یا چند پروژه با هایلایت نارنجی ذخیره نشده‌اند. آیا می‌خواهید کل فهرست پروژه‌های اخیر پاک شود؟</p><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={()=>setConfirmClearRecent(false)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">انصراف</button><button type="button" onClick={()=>{setConfirmClearRecent(false);setRecentProjects([]);try{localStorage.removeItem("kharraat-recent-projects");}catch{}}} className="rounded-md bg-danger px-4 py-1.5 text-xs font-bold text-white">پاک کردن فهرست</button></div></div></div>}{newProjectDraft&&<div className="fixed inset-0 z-[140] grid place-items-center bg-black/50 p-4" dir="rtl"><form onSubmit={e=>{e.preventDefault();createNewProject();}} className="w-full max-w-md overflow-hidden rounded-xl border border-edge2 bg-panel shadow-2xl"><div className="border-b border-edge bg-panel2 px-5 py-4"><h3 className="text-sm font-bold text-brass2">ایجاد پروژه جدید</h3><label className="mt-3 block text-[10.5px] text-mute">نام پروژه<input autoFocus value={newProjectDraft.name} onChange={e=>setNewProjectDraft({...newProjectDraft,name:e.target.value})} onFocus={e=>e.currentTarget.select()} className="field-input mt-1.5 w-full"/></label></div><div className="p-5"><div className="grid grid-cols-2 gap-3"><label className="text-[10.5px] text-mute">قطر قطعه (mm)<input type="number" min="0.01" max="10000" step="0.01" value={newProjectDraft.diameter} onChange={e=>setNewProjectDraft({...newProjectDraft,diameter:e.target.value})} className="field-input mt-1.5 w-full"/></label><label className="text-[10.5px] text-mute">طول قطعه (mm)<input type="number" min="0.01" max="10000" step="0.01" value={newProjectDraft.length} onChange={e=>setNewProjectDraft({...newProjectDraft,length:e.target.value})} className="field-input mt-1.5 w-full"/></label></div><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={()=>setNewProjectDraft(null)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute hover:text-ink">لغو</button><button type="submit" className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[var(--color-brass-ink)]">ایجاد پروژه</button></div></div></form></div>}
       {saveAsName!==null&&<div className="fixed inset-0 z-[130] grid place-items-center bg-black/45 p-4" dir="rtl"><form onSubmit={e=>{e.preventDefault();const value=saveAsName;setSaveAsName(null);saveAsResolver.current?.(value);saveAsResolver.current=null;}} className="w-full max-w-sm rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">ذخیره پروژه با نام</h3><label className="mt-4 block text-[11px] text-mute">نام پروژه<input autoFocus value={saveAsName} onChange={e=>setSaveAsName(e.target.value)} onFocus={e=>e.currentTarget.select()} className="field-input mt-2 w-full"/></label><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={()=>{setSaveAsName(null);saveAsResolver.current?.(null);saveAsResolver.current=null;}} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button type="submit" className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[var(--color-brass-ink)]">ذخیره</button></div></form></div>}
-      {pendingEditExit && <div className="fixed inset-0 z-[120] grid place-items-center bg-black/45 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">تغییرات تأییدنشده ویرایش مسیر</h3><p className="mt-3 text-[12px] leading-6 text-mute">تغییراتی در مسیر انجام شده که هنوز تأیید نشده‌اند. آیا می‌خواهید تغییرات را تأیید و سپس از حالت ویرایش مسیر خارج شوید؟</p><div className="mt-5 flex justify-center gap-2"><button onClick={()=>setPendingEditExit(false)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button onClick={()=>{setPendingEditExit(false);discardEdit();}} className="rounded-md border border-danger/50 bg-danger/10 px-4 py-1.5 text-xs font-bold text-danger">خیر</button><button onClick={()=>{confirmEdit();setEditBuf(null);setEditOpen(false);setPendingEditExit(false);}} className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[var(--color-brass-ink)]">بله</button></div></div></div>}
+      {pendingEditExit && <div className="fixed inset-0 z-[120] grid place-items-center bg-black/45 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">تغییرات تأییدنشده ویرایش مسیر</h3><p className="mt-3 text-[12px] leading-6 text-mute">تغییراتی در مسیر یا تنظیمات انجام شده که هنوز تأیید نشده‌اند. آیا می‌خواهید تغییرات را تأیید و سپس از حالت ویرایش مسیر خارج شوید؟</p><div className="mt-5 flex justify-center gap-2"><button onClick={()=>{pendingExitActionRef.current=null;setPendingEditExit(false);}} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button onClick={revertEditAndExit} className="rounded-md border border-danger/50 bg-danger/10 px-4 py-1.5 text-xs font-bold text-danger">خیر</button><button onClick={confirmEditAndExit} className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[var(--color-brass-ink)]">بله</button></div></div></div>}
       {pendingCloseProject && <div className="fixed inset-0 z-[120] grid place-items-center bg-black/45 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">تغییرات ذخیره‌نشده</h3><p className="mt-3 text-[12px] leading-6 text-mute">تغییرات پروژه «{projectTabs.find(t=>t.id===pendingCloseProject)?.name}» ذخیره نشده است. آیا می‌خواهید پیش از بستن پروژه آن را ذخیره کنید؟</p><div className="mt-5 flex justify-center gap-2"><button onClick={()=>setPendingCloseProject(null)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button onClick={()=>finishCloseProject(pendingCloseProject)} className="rounded-md border border-danger/50 bg-danger/10 px-4 py-1.5 text-xs font-bold text-danger">خیر</button><button onClick={()=>{const id=pendingCloseProject;setSaveThenCloseProject(id);if(id!==activeProjectId)switchProject(id);}} className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[var(--color-brass-ink)]">بله</button></div></div></div>}
       <DesktopMenuBar
         headerBg={preferences.themeColors.uiHeaderBg}
@@ -1762,7 +1954,7 @@ export default function App() {
         activeProjectId={activeProjectId}
         onSwitchProject={switchProject}
         onCloseProject={requestCloseProject}
-        onCloseAllProjects={() => { setProjectTabs([]); setWelcomeOpen(true); setPendingCloseProject(null); setEditBuf(null); setEditOpen(false); }}
+        onCloseAllProjects={() => { keptDraftRef.current = null; pendingExitActionRef.current = null; setPendingEditExit(false); setEditEntry(null); setProjectTabs([]); setWelcomeOpen(true); setPendingCloseProject(null); setEditBuf(null); flushLiveEditBuf(null); setEditOpen(false); }}
         onNewProject={openNewProject}
         onOpenProject={() => projectInputRef.current?.click()}
         onSaveProject={() => void saveProject()}
@@ -1795,7 +1987,7 @@ export default function App() {
         {/* تب‌ها */}
         <nav className="mx-auto flex rounded-lg border border-edge bg-panel2 p-0.5">
           <TabBtn on={mode === "design"} onClick={() => setMode("design")} icon={<IconPen className="h-3.5 w-3.5" />} label="طراحی پروفایل" />
-          <TabBtn on={mode === "sim"} onClick={() => setMode("sim")} icon={<IconSim className="h-3.5 w-3.5" />} label="شبیه‌سازی تراش" />
+          <TabBtn on={mode === "sim"} onClick={() => (editOpen ? requestExitEdit(() => setMode("sim")) : setMode("sim"))} icon={<IconSim className="h-3.5 w-3.5" />} label="شبیه‌سازی تراش" />
         </nav>
 
         <div className="flex items-center gap-1.5">
@@ -1935,13 +2127,9 @@ export default function App() {
                   segs={editOpen && editBuf ? editBuf.sketch : sketch}
                   onSegs={onSketchChange}
                   edit={editOpen ? editBuf : null}
-                  editChanges={editChanges}
                   onEditToggle={(open) => (open ? openEdit() : closeEdit())}
                   onEditBuf={onEditBuf}
-                  onEditConfirm={confirmEdit}
                   onEditCancel={closeEdit}
-                  onEditDiscard={discardEdit}
-                  keepEditDraft={preferences.keepEditDraft}
                   showCanvasPaintTool={preferences.showCanvasPaintTool}
                   rightClickToolToggle={preferences.rightClickToolToggle}
                   deferMarqueeControlPoints={preferences.deferMarqueeControlPoints}
@@ -1952,7 +2140,7 @@ export default function App() {
                   selected={selectedIds}
                   onSelected={setSelectedIds}
                   params={generationParams}
-                  gen={gen}
+                  gen={displayGen}
                   split={params.split}
                   onSplit={onSplitChange}
                   settings={settings}
@@ -2009,7 +2197,7 @@ export default function App() {
           >
             {!layout.gcode.collapsed && (
               <PanelErrorBoundary panelTitle="جی‌کد">
-                <GCodePanel gen={gen} activeLine={activeLine} onLineClick={selectFromGCode} />
+                <GCodePanel gen={displayGen} activeLine={activeLine} onLineClick={selectFromGCode} />
               </PanelErrorBoundary>
             )}
           </DockPanel>

@@ -170,13 +170,9 @@ interface Props {
   canRedo: boolean;
   /* حالت ویرایش مسیر */
   edit: EditBuf | null;
-  editChanges: number;
   onEditToggle: (open: boolean) => void;
   onEditBuf: (next: EditBuf | null, commit: boolean) => void;
-  onEditConfirm: () => void;
   onEditCancel: () => void;
-  onEditDiscard: () => void;
-  keepEditDraft: boolean;
   showCanvasPaintTool: boolean;
   rightClickToolToggle: boolean;
   deferMarqueeControlPoints: boolean;
@@ -970,13 +966,9 @@ export default function ProfileEditor({
   canUndo,
   canRedo,
   edit,
-  editChanges,
   onEditToggle,
   onEditBuf,
-  onEditConfirm,
   onEditCancel,
-  onEditDiscard,
-  keepEditDraft,
   showCanvasPaintTool,
   rightClickToolToggle,
   deferMarqueeControlPoints,
@@ -6963,7 +6955,7 @@ export default function ProfileEditor({
         <LayerMenu settings={settings} onSettings={onSettings} themeColors={themeColors} />
         <button
           onClick={() => onEditToggle(!editOpen)}
-          title="ویرایشِ مسیرِ جی‌کد به‌صورت یک خطِ یکپارچه (مثل سیمکو) — فایل فقط با «تأیید» به‌روز می‌شود"
+          title="ویرایش زندهٔ مسیر جی‌کد — تغییرات فوراً در پنجره جی‌کد دیده می‌شوند و در صورت خروج بدون تأیید به وضعیت قبل بازمی‌گردند"
           className={cn(
             "chip-toggle backdrop-blur-sm transition-all",
             editOpen
@@ -7019,49 +7011,6 @@ export default function ProfileEditor({
           </button>
         )}
       </div>
-
-      {/* ---------- نوارِ حالت ادیت: شمارش تغییرات + تأیید/انصراف ---------- */}
-      {editOpen && (
-        <div className="anim-in absolute bottom-2.5 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-full border border-brass/45 bg-[#1d1710ee] py-1.5 pr-3.5 pl-1.5 text-[11.5px] font-bold shadow-lg shadow-black/40 backdrop-blur-sm">
-          <span className="h-2 w-2 rounded-full bg-brass" />
-          ویرایش مسیر
-          <span className="font-mono text-[10px] font-normal text-mute">
-            {editChanges ? `${editChanges.toLocaleString("fa-IR")} تغییر · ` : "بدون تغییر · "}
-            {lines.length.toLocaleString("fa-IR")} خط · {verts.length.toLocaleString("fa-IR")} نقطه
-            {activeLine != null && ` · فعال: ${activeLine.toLocaleString("fa-IR")}`}
-          </span>
-          <span className="hidden text-[9px] font-normal text-dim xl:inline">Shift+Hover بازه · Shift+Click انتخاب · ←/→ پیمایش</span>
-          <button
-            onClick={onEditConfirm}
-            disabled={!editChanges}
-            className={cn(
-              "flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-bold transition-colors",
-              editChanges
-                ? "border-teal/60 bg-teal/15 text-teal hover:bg-teal/25"
-                : "border-edge bg-panel/60 text-dim"
-            )}
-            title="اعمالِ ویرایش‌ها روی فایلِ جی‌کد (شبیه‌سازی و دانلود هم به‌روز می‌شوند)"
-          >
-            <IconCheck className="h-3 w-3" />
-            تأیید
-          </button>
-          {keepEditDraft && <button
-            onClick={onEditDiscard}
-            className="flex items-center gap-1 rounded-full border border-red-500/45 bg-red-500/10 px-2.5 py-1 text-[11px] font-bold text-red-300 transition-colors hover:bg-red-500/20 hover:text-red-200"
-            title="حذف کامل پیش‌نویس و خروج از ویرایش مسیر؛ با Undo قابل بازیابی است"
-          >
-            <IconTrash className="h-3 w-3" />
-            حذف پیش‌نویس
-          </button>}
-          <button
-            onClick={onEditCancel}
-            className="rounded-full border border-edge bg-panel/70 px-2.5 py-1 text-[11px] font-bold text-mute transition-colors hover:text-ink"
-            title={keepEditDraft ? "خروج از ویرایش مسیر؛ پیش‌نویس تغییرات برای ورود بعدی حفظ می‌شود" : "خروج از ویرایش مسیر؛ برای تغییرات تأییدنشده تصمیم‌گیری می‌شود"}
-          >
-            خروج
-          </button>
-        </div>
-      )}
 
       {hitPicker && editOpen && (
         <div
