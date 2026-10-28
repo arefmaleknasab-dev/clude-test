@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BlankShape, Holder2State, HolderMachinePoint, Op, OpType, Params, PPoint, Preset, Sample, ToolHand, ToolSpec, ToolType } from "../lib/lathe";
-import { ALL_OP_TYPES, BLANK_SHAPES, HAND_INFO, HOLDER2_ROT, INNER_OPS, INSERT_ANGLE, MIN_HOLDER2_OFFSET, NOSE_RADII, OP_INFO, OUTER_OPS, PRESETS, ROUGH_MODES, STRATEGIES, findZones, holder2OffsetFromCoordinates, makeOps, normalOffset, outerFirstOps, outerFirstTypes, rotationalEnvelope, sampleOrderedProfile, sampleProfile, thumbPath, toolProfile } from "../lib/lathe";
+import { ALL_OP_TYPES, BLANK_SHAPES, HAND_INFO, HOLDER2_ROT, INNER_OPS, INSERT_ANGLE, MIN_HOLDER2_OFFSET, NOSE_RADII, OP_INFO, OUTER_OPS, PRESETS, ROUGH_MODES, STRATEGIES, findZones, holder2OffsetFromCoordinates, makeOps, normalOffset, outerFirstOps, outerFirstTypes, rotationalEnvelope, sampleOrderedProfile, thumbPath, toolProfile } from "../lib/lathe";
 import { cn } from "../utils/cn";
 import { IconBowl, IconCheck, IconCurve, IconEye, IconEyeOff, IconLayers, IconPlus, IconSpindle, IconTool, IconTrash } from "./icons";
 
@@ -143,10 +143,11 @@ function ControlsPanel({
   /* نمونه‌های پروفایل و تقسیم خودکار نواحی (نقطهٔ شروع برای مرزسازی دستی) */
   const { autoZones } = useMemo(() => {
     const blankR = params.blankD / 2;
-    const samples = sampleProfile(points, blankR);
+    const srcPts = outerDisplayPoints && outerDisplayPoints.length >= 2 ? outerDisplayPoints : points;
+    const samples = sampleOrderedProfile(srcPts, blankR);
     const off: Sample[] = normalOffset(samples, params.offsetDist, true).map((s) => ({ z: s.z, r: Math.min(blankR, s.r) }));
     return { zoneSamples: off, autoZones: findZones(off) };
-  }, [points, params.blankD, params.offsetDist]);
+  }, [outerDisplayPoints, points, params.blankD, params.offsetDist]);
   /* برای تصویر تنظیم نواحی باید ترتیب واقعی Segmentها حفظ شود. sampleProfile
      پوشش خشن را برحسب Z مرتب می‌کند و روی پروفایل‌های برگشتی شکل را می‌شکند. */
   const innerZoneSamples = useMemo(() => {

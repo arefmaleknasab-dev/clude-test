@@ -401,34 +401,26 @@ export function distToSeg(s: SketchSeg, p: SPoint): number {
 let ppUid = 90000;
 
 /**
- * تخت‌سازی اسکچ به نقاط پروفایل: همهٔ المان‌ها نمونه‌برداری، بر اساس z مرتب و
- * در z های یکسان بیشترین شعاع (پوشش بیرونی) انتخاب می‌شود تا پروفایل تراش
- * همیشه معتبر و بدون زیربرش باشد.
+ * تخت‌سازی اسکچ به نقاط پروفایل با حفظ ترتیب زنجیره و خطوط قائم (+۹۰° و −۹۰°)
+ * تا شیارهای Uشکل، پله‌های عمودی و گوشه‌های تیز در عملیات خشن شعاعی و افست حذف نشوند.
  */
 export function flattenSketch(segs: SketchSeg[], blankR: number, blankL: number): PPoint[] {
+  if (segs.length === 0) return [];
+  const ordered = chainPolyline(orderChain(segs));
+  if (ordered.length >= 2) {
+    return branchPathPoints(ordered, blankR, blankL);
+  }
   const raw: SPoint[] = [];
   for (const s of segs) {
     const pts = s.kind === "line" ? [s.a, s.b] : segPoints(s);
     for (const p of pts) {
       if (!Number.isFinite(p.z) || !Number.isFinite(p.r)) continue;
-      /* نقطهٔ واقعی روی محور باید R=0 بماند؛ کف ۰٫۲mm ابتدای مسیر پرداخت خارج
-         را از پروفایل اصلی جدا می‌کرد و یک زاویهٔ مصنوعی می‌ساخت. */
       raw.push({ z: Math.min(blankL, Math.max(0, p.z)), r: Math.min(blankR, Math.max(0, p.r)) });
     }
   }
   if (raw.length < 2) return [];
   raw.sort((x, y) => x.z - y.z);
-  const merged: SPoint[] = [];
-  for (const p of raw) {
-    const last = merged[merged.length - 1];
-    if (last && Math.abs(last.z - p.z) < 0.06) {
-      if (p.r > last.r) last.r = p.r;
-    } else {
-      merged.push({ ...p });
-    }
-  }
-  if (merged.length < 2) return [];
-  return merged.map((p) => ({ id: ++ppUid, z: p.z, r: p.r, smooth: false }));
+  return raw.map((p) => ({ id: ++ppUid, z: p.z, r: p.r, smooth: false }));
 }
 
 /**
@@ -719,9 +711,15 @@ export function orderChain(segs: SketchSeg[]): ChainItem[] {
 
   if (chains.length > 1) {
     chains.sort((cA, cB) => {
-      if (cB.length !== cA.length) return cB.length - cA.length;
       const pA = chainPolyline(cA);
       const pB = chainPolyline(cB);
+      let minZA = Infinity, maxZA = -Infinity;
+      for (const q of pA) { if (q.z < minZA) minZA = q.z; if (q.z > maxZA) maxZA = q.z; }
+      let minZB = Infinity, maxZB = -Infinity;
+      for (const q of pB) { if (q.z < minZB) minZB = q.z; if (q.z > maxZB) maxZB = q.z; }
+      const disjointZ = maxZA <= minZB + 1e-3 || maxZB <= minZA + 1e-3;
+      if (disjointZ) return minZA - minZB;
+      if (cB.length !== cA.length) return cB.length - cA.length;
       return (pA[0]?.z ?? 0) - (pB[0]?.z ?? 0);
     });
   }
@@ -844,25 +842,19 @@ export function branchPathPoints(branch: SPoint[], blankR: number, blankL: numbe
     .map((p) => ({ id: ++branchUid, z: Math.min(blankL, Math.max(0, p.z)), r: Math.min(blankR, Math.max(0, p.r)), smooth: false }));
 }
 
-export function branchPoints(branch: SPoint[], blankR: number, blankL: number, keep: "max" | "min"): PPoint[] {
+export function branchPoints(branch: SPoint[], blankR: number, blankL: number, _keep: "max" | "min"): PPoint[] {
   const raw: SPoint[] = [];
   for (const p of branch) {
     if (!Number.isFinite(p.z) || !Number.isFinite(p.r)) continue;
-    raw.push({ z: Math.min(blankL, Math.max(0, p.z)), r: Math.min(blankR, Math.max(0, p.r)) });
-  }
-  if (raw.length < 2) return [];
-  raw.sort((x, y) => x.z - y.z);
-  const merged: SPoint[] = [];
-  for (const p of raw) {
-    const last = merged[merged.length - 1];
-    if (last && Math.abs(last.z - p.z) < 0.06) {
-      if (keep === "max" ? p.r > last.r : p.r < last.r) last.r = p.r;
-    } else {
-      merged.push({ ...p });
+    const clamped = { z: Math.min(blankL, Math.max(0, p.z)), r: Math.min(blankR, Math.max(0, p.r)) };
+    const last = raw[raw.length - 1];
+    if (!last || Math.hypot(clamped.z - last.z, clamped.r - last.r) > 1e-6) {
+      raw.push(clamped);
     }
   }
-  if (merged.length < 2) return [];
-  return merged.map((p) => ({ id: ++branchUid, z: p.z, r: p.r, smooth: false }));
+  if (raw.length < 2) return [];
+  if (raw[raw.length - 1].z < raw[0].z - 1e-6) raw.reverse();
+  return raw.map((p) => ({ id: ++branchUid, z: p.z, r: p.r, smooth: false }));
 }
 
 /** اعتبارسنجی داده‌های ذخیره‌شده */
