@@ -12,7 +12,7 @@ import Lathe3DView from "./components/Lathe3DView";
 import PreferencesDialog, { DEFAULT_PREFERENCES, type AppPreferences } from "./components/PreferencesDialog";
 import { IconArrowLeft, IconArrowRight, IconCheck, IconCode, IconCube, IconDownload, IconLayers, IconPen, IconSim, IconSettings, IconSpindle, IconWarn } from "./components/icons";
 import { buildDxf } from "./lib/dxf";
-import { MIN_HOLDER2_OFFSET, PRESETS, STRATEGIES, applyGcodeOvr, deriveGcodeOvr, generate, makeOps, normalizeParams, presetPoints, seedGcodeEdit, translateHolder2Edit } from "./lib/lathe";
+import { MAX_INNER_DISTANCE, MIN_HOLDER2_OFFSET, MIN_INNER_DISTANCE, PRESETS, STRATEGIES, applyGcodeOvr, deriveGcodeOvr, generate, makeOps, normalizeParams, presetPoints, seedGcodeEdit, translateHolder2Edit } from "./lib/lathe";
 import type { EditBuf, ELine, GcodeOvrMap, GenResult, Holder2State, OpType, Params, PPoint, Preset, SplitState } from "./lib/lathe";
 import type { SketchSeg } from "./lib/sketch";
 import { autoSplitPoint, branchPathPoints, branchPoints, chainPolyline, flattenSketch, normalizeSketch, orderChain, segMid, sketchFromPoints, sketchFromWall, splitChainAt } from "./lib/sketch";
@@ -313,6 +313,12 @@ export default function App() {
       defaultGcodeShiftY: typeof saved?.defaultGcodeShiftY === "number" && Number.isFinite(saved.defaultGcodeShiftY)
         ? saved.defaultGcodeShiftY
         : DEFAULT_PREFERENCES.defaultGcodeShiftY,
+      defaultInnerStartClearance: typeof saved?.defaultInnerStartClearance === "number" && Number.isFinite(saved.defaultInnerStartClearance)
+        ? Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, saved.defaultInnerStartClearance))
+        : DEFAULT_PREFERENCES.defaultInnerStartClearance,
+      defaultInnerEndTravel: typeof saved?.defaultInnerEndTravel === "number" && Number.isFinite(saved.defaultInnerEndTravel)
+        ? Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, saved.defaultInnerEndTravel))
+        : DEFAULT_PREFERENCES.defaultInnerEndTravel,
       defaultHolder2XOff: typeof saved?.defaultHolder2XOff === "number" && Number.isFinite(saved.defaultHolder2XOff)
         ? Math.max(MIN_HOLDER2_OFFSET, saved.defaultHolder2XOff)
         : DEFAULT_PREFERENCES.defaultHolder2XOff,
@@ -336,11 +342,13 @@ export default function App() {
   const pendingGenerationSketchRef = useRef<SketchSeg[] | null>(null);
   const [params, setParams] = useState<Params>(() => {
     const base = normalizeParams(SAVED?.params, IS_LEGACY);
-    /* در هر بار باز شدن نرم‌افزار، مقادیر پیش‌فرض جابجایی جی‌کد و افست هلدر دوم از Preferences اعمال می‌شوند. */
+    /* در هر بار باز شدن نرم‌افزار، مقادیر پیش‌فرض جابجایی جی‌کد، فاصله‌های داخل‌تراشی و افست هلدر دوم از Preferences اعمال می‌شوند. */
     return {
       ...base,
       gcodeShiftX: preferences.defaultGcodeShiftX,
       gcodeShiftY: preferences.defaultGcodeShiftY,
+      innerStartClearance: Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, preferences.defaultInnerStartClearance)),
+      innerEndTravel: Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, preferences.defaultInnerEndTravel)),
       holder2: {
         xOff: Math.max(MIN_HOLDER2_OFFSET, preferences.defaultHolder2XOff),
         yOff: Math.max(MIN_HOLDER2_OFFSET, preferences.defaultHolder2YOff),
@@ -545,6 +553,8 @@ export default function App() {
       blankL:length,
       gcodeShiftX:preferences.defaultGcodeShiftX,
       gcodeShiftY:preferences.defaultGcodeShiftY,
+      innerStartClearance:Math.min(MAX_INNER_DISTANCE,Math.max(MIN_INNER_DISTANCE,preferences.defaultInnerStartClearance)),
+      innerEndTravel:Math.min(MAX_INNER_DISTANCE,Math.max(MIN_INNER_DISTANCE,preferences.defaultInnerEndTravel)),
       holder2:{
         xOff:Math.max(MIN_HOLDER2_OFFSET,preferences.defaultHolder2XOff),
         yOff:Math.max(MIN_HOLDER2_OFFSET,preferences.defaultHolder2YOff),
@@ -1351,6 +1361,16 @@ export default function App() {
     if (next.defaultGcodeShiftY !== prev.defaultGcodeShiftY && stateRef.current.params.gcodeShiftY === prev.defaultGcodeShiftY) {
       patch.gcodeShiftY = next.defaultGcodeShiftY;
     }
+    const prevInnerStart = Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, prev.defaultInnerStartClearance));
+    const nextInnerStart = Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, next.defaultInnerStartClearance));
+    if (nextInnerStart !== prevInnerStart && stateRef.current.params.innerStartClearance === prevInnerStart) {
+      patch.innerStartClearance = nextInnerStart;
+    }
+    const prevInnerEnd = Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, prev.defaultInnerEndTravel));
+    const nextInnerEnd = Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, next.defaultInnerEndTravel));
+    if (nextInnerEnd !== prevInnerEnd && stateRef.current.params.innerEndTravel === prevInnerEnd) {
+      patch.innerEndTravel = nextInnerEnd;
+    }
     if (Object.keys(patch).length > 0) {
       onParamsCb(patch);
     }
@@ -1421,8 +1441,16 @@ export default function App() {
         }
       }
       /* پروژه‌های ذخیره‌شده می‌توانند تنظیمات ماشین‌کاری خود را نیز همراه
-         پیش‌تنظیم نگه دارند؛ ابعاد و Split صریح پریست در پایان قطعی می‌شوند. */
+         پیش‌تنظیم نگه دارند؛ ابعاد، Split و مقادیر پیش‌فرض استارتاپ در پایان قطعی می‌شوند. */
       if (p.params) Object.assign(next, p.params);
+      next.gcodeShiftX = preferences.defaultGcodeShiftX;
+      next.gcodeShiftY = preferences.defaultGcodeShiftY;
+      next.innerStartClearance = Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, preferences.defaultInnerStartClearance));
+      next.innerEndTravel = Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, preferences.defaultInnerEndTravel));
+      next.holder2 = {
+        xOff: Math.max(MIN_HOLDER2_OFFSET, preferences.defaultHolder2XOff),
+        yOff: Math.max(MIN_HOLDER2_OFFSET, preferences.defaultHolder2YOff),
+      };
       next.blankD = p.blankD;
       next.blankL = p.blankL;
       next.blankShape = p.shape;
@@ -1432,7 +1460,7 @@ export default function App() {
       // پریست در لحظهٔ ایجاد «تمیز» است؛ بنابراین بستن آن بدون ویرایش نباید
       // هشدار تغییرات ذخیره‌نشده نشان دهد.
       setProjectTabs(tabs => tabs.map(tab => tab.id === newProjectId
-        ? { ...tab, savedSnapshot: projectSnapshot(nextSketch, next, {}, []) }
+        ? { ...tab, params: next, savedSnapshot: projectSnapshot(nextSketch, next, {}, []) }
         : tab));
       return next;
     });

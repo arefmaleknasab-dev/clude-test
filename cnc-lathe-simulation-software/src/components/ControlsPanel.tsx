@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BlankShape, Holder2State, HolderMachinePoint, Op, OpType, Params, PPoint, Preset, Sample, ToolHand, ToolSpec, ToolType } from "../lib/lathe";
-import { ALL_OP_TYPES, BLANK_SHAPES, HAND_INFO, HOLDER2_ROT, INNER_OPS, INSERT_ANGLE, MIN_HOLDER2_OFFSET, NOSE_RADII, OP_INFO, OUTER_OPS, PRESETS, ROUGH_MODES, STRATEGIES, findZones, holder2OffsetFromCoordinates, makeOps, normalOffset, outerFirstOps, outerFirstTypes, rotationalEnvelope, sampleOrderedProfile, thumbPath, toolProfile } from "../lib/lathe";
+import { ALL_OP_TYPES, BLANK_SHAPES, HAND_INFO, HOLDER2_ROT, INNER_OPS, INSERT_ANGLE, MAX_INNER_DISTANCE, MIN_HOLDER2_OFFSET, MIN_INNER_DISTANCE, NOSE_RADII, OP_INFO, OUTER_OPS, PRESETS, ROUGH_MODES, STRATEGIES, findZones, holder2OffsetFromCoordinates, makeOps, normalOffset, outerFirstOps, outerFirstTypes, rotationalEnvelope, sampleOrderedProfile, thumbPath, toolProfile } from "../lib/lathe";
 import { DEFAULT_THEME_COLORS, opColorFromTheme, rgbaCss, shadeHex, type ThemeColors } from "../lib/theme";
 import { cn } from "../utils/cn";
 import { IconBowl, IconCheck, IconCurve, IconEye, IconEyeOff, IconLayers, IconPlus, IconSpindle, IconTool, IconTrash } from "./icons";
@@ -624,8 +624,8 @@ function ControlsPanel({
           <Num label="عمق بار داخل‌تراشی" unit="mm" value={params.innerDoc} min={0.5} max={10} step={0.5} onChange={(v) => onParams({ innerDoc: Math.min(10, Math.max(0.5, v)) })} />
           <Num label="فاصله آفست" unit="mm" value={params.offsetDist} min={0} max={3} step={0.1} onChange={(v) => onParams({ offsetDist: v })} />
           <Num label="فاصله آفست داخل تراش" unit="mm" value={params.innerOffsetDist} min={0} max={3} step={0.1} onChange={(v) => onParams({ innerOffsetDist: v })} />
-          <Num label="فاصله شروع داخل تراشی" unit="mm" value={params.innerStartClearance} min={0} max={20} step={0.5} onChange={(v) => onParams({ innerStartClearance: Math.min(20, Math.max(0, v)) })} />
-          <Num label="فاصله پایان داخل تراشی" unit="mm" value={params.innerEndTravel} min={300} max={500} step={10} onChange={(v) => onParams({ innerEndTravel: Math.min(500, Math.max(300, v)) })} />
+          <Num label="فاصله شروع داخل تراشی" unit="mm" value={params.innerStartClearance} min={MIN_INNER_DISTANCE} max={MAX_INNER_DISTANCE} step={1} onChange={(v) => onParams({ innerStartClearance: Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, v)) })} />
+          <Num label="فاصله پایان داخل تراشی" unit="mm" value={params.innerEndTravel} min={MIN_INNER_DISTANCE} max={MAX_INNER_DISTANCE} step={1} onChange={(v) => onParams({ innerEndTravel: Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, v)) })} />
           <Num label="همپوشانی خشن بیرون و کف تراشی" unit="mm" value={params.bottomRoughOverlap} min={0} max={50} step={0.5} onChange={(v) => onParams({ bottomRoughOverlap: Math.min(50, Math.max(0, v)) })} />
           <Num label="فاصله کف تراشی از افست داخل" unit="mm" value={params.bottomOffsetClearance} min={0} max={100} step={0.5} onChange={(v) => onParams({ bottomOffsetClearance: Math.min(100, Math.max(0, v)) })} />
           <Num label="برداشت اضافه از هر طرف" unit="mm" value={params.extraCutEachSide} min={0} max={10} step={0.5} onChange={(v) => onParams({ extraCutEachSide: Math.min(10, Math.max(0, v)) })} />

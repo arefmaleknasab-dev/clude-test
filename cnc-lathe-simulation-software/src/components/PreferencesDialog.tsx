@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { DEFAULT_HOLDER2, MIN_HOLDER2_OFFSET, type SegKind } from "../lib/lathe";
+import { DEFAULT_HOLDER2, MAX_INNER_DISTANCE, MIN_HOLDER2_OFFSET, MIN_INNER_DISTANCE, type SegKind } from "../lib/lathe";
 import {
   BUILTIN_THEMES,
   DEFAULT_THEME_COLORS,
@@ -74,6 +74,8 @@ export interface AppPreferences {
   spindleSpeed: number;
   defaultGcodeShiftX: number;
   defaultGcodeShiftY: number;
+  defaultInnerStartClearance: number;
+  defaultInnerEndTravel: number;
   defaultHolder2XOff: number;
   defaultHolder2YOff: number;
   operationFeeds: Record<string, number>;
@@ -128,6 +130,8 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   spindleSpeed: 1500,
   defaultGcodeShiftX: 0,
   defaultGcodeShiftY: 0,
+  defaultInnerStartClearance: 2,
+  defaultInnerEndTravel: 300,
   defaultHolder2XOff: DEFAULT_HOLDER2.xOff,
   defaultHolder2YOff: DEFAULT_HOLDER2.yOff,
   operationFeeds: {
@@ -611,7 +615,7 @@ export default function PreferencesDialog({
                 ["appearance", "خطوط و مقیاس بوم", "ظاهر ضخامت نوار ابزار دکمه اندازه نقطه glow"],
                 ["snap", "اسنپ و دقت", "حساسیت پیکسل نقاط تقاطع محور"],
                 ["shortcuts", "کلیدهای میانبر", "کیبورد ابزار انتخاب حرکت چرخش مقیاس کپی"],
-                ["post", "تنظیمات جی‌کد", "سرعت فید عملیات فانوک لینوکس واحد میلیمتر اینچ شماره خط شیفت جابجایی افست هلدر دوم"],
+                ["post", "تنظیمات جی‌کد", "سرعت فید عملیات فانوک لینوکس واحد میلیمتر اینچ شماره خط شیفت جابجایی افست هلدر دوم فاصله شروع پایان داخل تراشی"],
               ] as const
             )
               .filter(([, label, keywords]) => !q || `${label} ${keywords}`.toLowerCase().includes(q.toLowerCase()))
@@ -1172,6 +1176,8 @@ export default function PreferencesDialog({
                       spindleSpeed: DEFAULT_PREFERENCES.spindleSpeed,
                       defaultGcodeShiftX: DEFAULT_PREFERENCES.defaultGcodeShiftX,
                       defaultGcodeShiftY: DEFAULT_PREFERENCES.defaultGcodeShiftY,
+                      defaultInnerStartClearance: DEFAULT_PREFERENCES.defaultInnerStartClearance,
+                      defaultInnerEndTravel: DEFAULT_PREFERENCES.defaultInnerEndTravel,
                       defaultHolder2XOff: DEFAULT_PREFERENCES.defaultHolder2XOff,
                       defaultHolder2YOff: DEFAULT_PREFERENCES.defaultHolder2YOff,
                       operationFeeds: { ...DEFAULT_PREFERENCES.operationFeeds },
@@ -1186,6 +1192,32 @@ export default function PreferencesDialog({
                   <div className="mt-2 grid grid-cols-2 gap-2.5">
                     <PrefNumInput label="جابجایی محور X" unit="mm" value={value.defaultGcodeShiftX} step={0.5} onChange={(v) => patch({ defaultGcodeShiftX: v })} />
                     <PrefNumInput label="جابجایی محور Y" unit="mm" value={value.defaultGcodeShiftY} step={0.5} onChange={(v) => patch({ defaultGcodeShiftY: v })} />
+                  </div>
+                </div>
+                <div className="mt-3 rounded-lg border border-edge bg-panel2 p-3">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-ink">فاصله پیش‌فرض شروع و پایان داخل‌تراشی</span>
+                    <span className="text-[9px] text-dim">هنگام باز شدن نرم‌افزار · ۱ تا ۹۹۹ میلی‌متر</span>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2.5">
+                    <PrefNumInput
+                      label="فاصله شروع داخل‌تراشی"
+                      unit="mm"
+                      value={value.defaultInnerStartClearance}
+                      min={MIN_INNER_DISTANCE}
+                      max={MAX_INNER_DISTANCE}
+                      step={1}
+                      onChange={(v) => patch({ defaultInnerStartClearance: Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, v)) })}
+                    />
+                    <PrefNumInput
+                      label="فاصله پایان داخل‌تراشی"
+                      unit="mm"
+                      value={value.defaultInnerEndTravel}
+                      min={MIN_INNER_DISTANCE}
+                      max={MAX_INNER_DISTANCE}
+                      step={1}
+                      onChange={(v) => patch({ defaultInnerEndTravel: Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, v)) })}
+                    />
                   </div>
                 </div>
                 <div

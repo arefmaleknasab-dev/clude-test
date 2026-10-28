@@ -80,6 +80,9 @@ export interface SplitState {
  * موقعیت مکانی آن ثابت نیست؛ اپراتور با دو آفست آن را تنظیم می‌کند:
  * xOff = فاصله در جهت ‎+X‎ محلی ، yOff = فاصله در جهت ‎−Y‎ محلی.
  */
+export const MIN_INNER_DISTANCE = 1;
+export const MAX_INNER_DISTANCE = 999;
+
 export interface Holder2State {
   xOff: number;
   yOff: number;
@@ -420,8 +423,8 @@ export function normalizeParams(
     base.innerDoc = raw.doc;
   }
   base.innerDoc = Math.min(10, Math.max(0.5, base.innerDoc));
-  base.innerStartClearance = Math.min(20, Math.max(0, base.innerStartClearance));
-  base.innerEndTravel = Math.min(500, Math.max(300, base.innerEndTravel));
+  base.innerStartClearance = Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, base.innerStartClearance));
+  base.innerEndTravel = Math.min(MAX_INNER_DISTANCE, Math.max(MIN_INNER_DISTANCE, base.innerEndTravel));
   base.bottomRoughOverlap = Math.min(50, Math.max(0, base.bottomRoughOverlap));
   base.bottomOffsetClearance = Math.min(100, Math.max(0, base.bottomOffsetClearance));
   base.extraCutEachSide = Math.min(10, Math.max(0, base.extraCutEachSide));
