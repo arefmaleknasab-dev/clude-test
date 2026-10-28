@@ -24,7 +24,9 @@ function tokenize(line: string) {
     else if (tok.startsWith("N")) cls = "gc-tok-n";
     else if (tok.startsWith("G")) cls = "gc-tok-g";
     else if (tok.startsWith("M") || tok.startsWith("T") || tok.startsWith("S")) cls = "gc-tok-m";
-    else if (tok.startsWith("X") || tok.startsWith("Y") || tok.startsWith("Z")) cls = "gc-tok-ax";
+    else if (tok.startsWith("X")) cls = "gc-tok-ax-x";
+    else if (tok.startsWith("Y")) cls = "gc-tok-ax-y";
+    else if (tok.startsWith("Z")) cls = "gc-tok-ax-z";
     else cls = "gc-tok-f";
     parts.push({ text: tok, cls });
     last = i + tok.length;

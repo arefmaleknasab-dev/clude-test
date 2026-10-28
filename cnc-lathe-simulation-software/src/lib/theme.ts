@@ -92,7 +92,9 @@ export interface ThemeColors {
   gcodeActiveLine: string;
   gcodeTokG: string;
   gcodeTokM: string;
-  gcodeTokAxis: string;
+  gcodeTokAxisX: string;
+  gcodeTokAxisY: string;
+  gcodeTokAxisZ: string;
   gcodeTokFeed: string;
   gcodeTokComment: string;
   gcodeTokLineNum: string;
@@ -247,9 +249,11 @@ export const THEME_CATEGORIES: ThemeCategoryDef[] = [
       { key: "gcodeBg", label: "پس‌زمینه پنل کدهای جی‌کد" },
       { key: "gcodeActiveLine", label: "هایلایت خط فعال در حال اجرا" },
       { key: "gcodeTokG", label: "دستورات حرکتی (کدهای G)" },
-      { key: "gcodeTokM", label: "دستورات کنترلی ماشین (کدهای M)" },
-      { key: "gcodeTokAxis", label: "مختصات محورها (X / Y / Z)" },
-      { key: "gcodeTokFeed", label: "سرعت پیشروی و دور (F / S)" },
+      { key: "gcodeTokM", label: "دستورات ماشین و ابزار (M / T / S)" },
+      { key: "gcodeTokAxisX", label: "مختصات محور X در جی‌کد" },
+      { key: "gcodeTokAxisY", label: "مختصات محور Y در جی‌کد (حالت Modal)" },
+      { key: "gcodeTokAxisZ", label: "مختصات محور Z در جی‌کد (حالت Fanuc)" },
+      { key: "gcodeTokFeed", label: "سرعت پیشروی و توقف (F / P)" },
       { key: "gcodeTokComment", label: "توضیحات و کامنت‌ها" },
       { key: "gcodeTokLineNum", label: "شماره خطوط و برنامه (N / O / %)" },
     ],
@@ -348,7 +352,9 @@ export const DEFAULT_THEME_COLORS: ThemeColors = {
   gcodeActiveLine: "#e3a94e",
   gcodeTokG: "#e3a94e",
   gcodeTokM: "#e0703c",
-  gcodeTokAxis: "#63c8ac",
+  gcodeTokAxisX: "#63c8ac",
+  gcodeTokAxisY: "#74bff2",
+  gcodeTokAxisZ: "#b995f0",
   gcodeTokFeed: "#c9b78d",
   gcodeTokComment: "#77684c",
   gcodeTokLineNum: "#6f6047",
@@ -423,7 +429,9 @@ export const BUILTIN_THEMES: ThemePresetDefinition[] = [
       gcodeActiveLine: "#4ea8de",
       gcodeTokG: "#62b8f0",
       gcodeTokM: "#f48c58",
-      gcodeTokAxis: "#46d6b0",
+      gcodeTokAxisX: "#46d6b0",
+      gcodeTokAxisY: "#ffd166",
+      gcodeTokAxisZ: "#c792ea",
       gcodeTokFeed: "#b9cde3",
       gcodeTokComment: "#5d738b",
       gcodeTokLineNum: "#51667d",
@@ -471,7 +479,9 @@ export const BUILTIN_THEMES: ThemePresetDefinition[] = [
       gcodeBg: "#181a1f",
       gcodeActiveLine: "#d8a85b",
       gcodeTokG: "#e0b368",
-      gcodeTokAxis: "#5ed1b3",
+      gcodeTokAxisX: "#5ed1b3",
+      gcodeTokAxisY: "#6ab8f7",
+      gcodeTokAxisZ: "#c792ea",
       gcodeTokFeed: "#c6ccd6",
       gcodeTokComment: "#707887",
       gcodeTokLineNum: "#616875",
@@ -529,7 +539,9 @@ export const BUILTIN_THEMES: ThemePresetDefinition[] = [
       gcodeActiveLine: "#34c79b",
       gcodeTokG: "#42d6aa",
       gcodeTokM: "#f08c5b",
-      gcodeTokAxis: "#f2c46d",
+      gcodeTokAxisX: "#f2c46d",
+      gcodeTokAxisY: "#66ccff",
+      gcodeTokAxisZ: "#d49bf5",
       gcodeTokFeed: "#b3d6c8",
       gcodeTokComment: "#587c6f",
       gcodeTokLineNum: "#4b6c60",
@@ -625,7 +637,9 @@ export const BUILTIN_THEMES: ThemePresetDefinition[] = [
       gcodeActiveLine: "#b7791f",
       gcodeTokG: "#b45309",
       gcodeTokM: "#c2410c",
-      gcodeTokAxis: "#0f766e",
+      gcodeTokAxisX: "#0f766e",
+      gcodeTokAxisY: "#0284c7",
+      gcodeTokAxisZ: "#7c3aed",
       gcodeTokFeed: "#334155",
       gcodeTokComment: "#64748b",
       gcodeTokLineNum: "#94a3b8",
@@ -721,8 +735,10 @@ export const BUILTIN_THEMES: ThemePresetDefinition[] = [
       gcodeActiveLine: "#4772b3",
       gcodeTokG: "#ff8f40",
       gcodeTokM: "#c678dd",
-      gcodeTokAxis: "#8bdc00",
-      gcodeTokFeed: "#66b8ff",
+      gcodeTokAxisX: "#ff5c77",
+      gcodeTokAxisY: "#8bdc00",
+      gcodeTokAxisZ: "#4db8ff",
+      gcodeTokFeed: "#e6c07b",
       gcodeTokComment: "#7a7a7a",
       gcodeTokLineNum: "#6e6e6e",
     },
@@ -930,7 +946,9 @@ export function applyThemeToDocument(colors: ThemeColors, themeId: string): void
   root.style.setProperty("--theme-gcode-active", colors.gcodeActiveLine);
   root.style.setProperty("--theme-gcode-tok-g", colors.gcodeTokG);
   root.style.setProperty("--theme-gcode-tok-m", colors.gcodeTokM);
-  root.style.setProperty("--theme-gcode-tok-ax", colors.gcodeTokAxis);
+  root.style.setProperty("--theme-gcode-tok-x", colors.gcodeTokAxisX);
+  root.style.setProperty("--theme-gcode-tok-y", colors.gcodeTokAxisY);
+  root.style.setProperty("--theme-gcode-tok-z", colors.gcodeTokAxisZ);
   root.style.setProperty("--theme-gcode-tok-f", colors.gcodeTokFeed);
   root.style.setProperty("--theme-gcode-tok-c", colors.gcodeTokComment);
   root.style.setProperty("--theme-gcode-tok-n", colors.gcodeTokLineNum);

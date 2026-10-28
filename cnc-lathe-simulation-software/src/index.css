@@ -55,7 +55,9 @@
   --theme-gcode-active: #e3a94e;
   --theme-gcode-tok-g: #e3a94e;
   --theme-gcode-tok-m: #e0703c;
-  --theme-gcode-tok-ax: #63c8ac;
+  --theme-gcode-tok-x: #63c8ac;
+  --theme-gcode-tok-y: #74bff2;
+  --theme-gcode-tok-z: #b995f0;
   --theme-gcode-tok-f: #c9b78d;
   --theme-gcode-tok-c: #77684c;
   --theme-gcode-tok-n: #6f6047;
@@ -238,7 +240,9 @@ input[type="number"]::-webkit-outer-spin-button {
 
 .gc-tok-g { color: var(--theme-gcode-tok-g); font-weight: 700; }
 .gc-tok-m { color: var(--theme-gcode-tok-m); font-weight: 700; }
-.gc-tok-ax { color: var(--theme-gcode-tok-ax); }
+.gc-tok-ax-x { color: var(--theme-gcode-tok-x); }
+.gc-tok-ax-y { color: var(--theme-gcode-tok-y); }
+.gc-tok-ax-z { color: var(--theme-gcode-tok-z); }
 .gc-tok-f { color: var(--theme-gcode-tok-f); }
 .gc-tok-c { color: var(--theme-gcode-tok-c); font-style: italic; }
 .gc-tok-n { color: var(--theme-gcode-tok-n); }
