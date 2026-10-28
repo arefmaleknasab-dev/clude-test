@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import type { EditBuf, ELine, EVert, GenResult, Holder2State, OffPatch, Op, Params, SegKind, SplitState } from "../lib/lathe";
 import { continuousPathOffset, deleteEditLines, deleteEditVertices, innerOffsetLeftSide, insertEditVertex, normalizeEditBuf, OP_INFO, RAPID_RATE, sampleOrderedProfile } from "../lib/lathe";
+import { DEFAULT_THEME_COLORS, opColorFromTheme, rgbaCss, segColorFromTheme, shadeHex, type ThemeColors } from "../lib/theme";
 import type { SketchKind, SketchSeg, SnapPoint, SPoint } from "../lib/sketch";
 import {
   arcRadius,
@@ -182,9 +183,7 @@ interface Props {
   profileLineWidth: number;
   pointScale: number;
   disableSelectionGlow: boolean;
-  profileColor: string;
-  selectedColor: string;
-  guideLineColor: string;
+  themeColors?: ThemeColors;
 }
 
 interface PaintEdge {
@@ -256,21 +255,6 @@ function editLineGCodeIndex(lineId: number, editLines: ELine[], gen: GenResult):
   return matches[Math.min(Math.max(0, occurrence), matches.length - 1)].line;
 }
 
-const SEG_COLOR: Record<SegKind, string> = {
-  rapid: "#93a1ad",
-  round: "#b48ee0",
-  rough: "#45b394",
-  roughz: "#6ab0d8",
-  copy: "#a3c15c",
-  face: "#e3a94e",
-  finish: "#e0703c",
-  offset: "#f59a80",
-  bore: "#4cc9f0",
-  boreoff: "#c77dff",
-  borefin: "#f72585",
-  bottom: "#ffd166",
-};
-
 type LayerKey =
   | "showRough"
   | "showFinish"
@@ -285,24 +269,35 @@ type LayerKey =
   | "showGhost"
   | "showInnerArea";
 
-const CHIPS: { key: LayerKey; label: string; color: string }[] = [
-  { key: "showRound", label: "گرد کردن", color: "#b48ee0" },
-  { key: "showRough", label: "مسیر خشن", color: "#45b394" },
-  { key: "showInnerRough", label: "خشن داخل (کاسه)", color: "#4cc9f0" },
-  { key: "showOffset", label: "آفست", color: "#f59a80" },
-  { key: "showInnerOffset", label: "آفست داخل‌تراشی", color: "#c77dff" },
-  { key: "showFinish", label: "پرداخت", color: "#e0703c" },
-  { key: "showInnerFinish", label: "پرداخت داخل", color: "#f72585" },
-  { key: "showFace", label: "پیشانی", color: "#e3a94e" },
-  { key: "showBottom", label: "کف‌تراشی", color: "#ffd166" },
-  { key: "showRapids", label: "حرکت سریع", color: "#93a1ad" },
-  { key: "showGhost", label: "سایه طرح", color: "#c9955a" },
-  { key: "showInnerArea", label: "محدوده داخل‌تراشی", color: "#69d7ff" },
-];
+function getLayerChips(tc: ThemeColors): { key: LayerKey; label: string; color: string }[] {
+  return [
+    { key: "showRound", label: "گرد کردن", color: tc.opRound },
+    { key: "showRough", label: "مسیر خشن", color: tc.opRoughD },
+    { key: "showInnerRough", label: "خشن داخل (کاسه)", color: tc.opInnerRough },
+    { key: "showOffset", label: "آفست", color: tc.opOffset },
+    { key: "showInnerOffset", label: "آفست داخل‌تراشی", color: tc.opInnerOffset },
+    { key: "showFinish", label: "پرداخت", color: tc.opFinish },
+    { key: "showInnerFinish", label: "پرداخت داخل", color: tc.opInnerFinish },
+    { key: "showFace", label: "پیشانی", color: tc.opFace },
+    { key: "showBottom", label: "کف‌تراشی", color: tc.opBottom },
+    { key: "showRapids", label: "حرکت سریع", color: tc.opRapid },
+    { key: "showGhost", label: "سایه طرح", color: tc.editorRotEnv },
+    { key: "showInnerArea", label: "محدوده داخل‌تراشی", color: tc.pathEditInnerZone },
+  ];
+}
+const CHIPS = getLayerChips(DEFAULT_THEME_COLORS);
 const TOOLPATH_LAYER_KEYS = CHIPS.filter((chip) => chip.key !== "showGhost" && chip.key !== "showInnerArea").map((chip) => chip.key);
 
 /* منوی کرکره‌ای لایه‌های نمایش — جایگزین نوار چیپ‌های افقی */
-function LayerMenu({ settings, onSettings }: { settings: EdSettings; onSettings: (p: Partial<EdSettings>) => void }) {
+function LayerMenu({
+  settings,
+  onSettings,
+  themeColors = DEFAULT_THEME_COLORS,
+}: {
+  settings: EdSettings;
+  onSettings: (p: Partial<EdSettings>) => void;
+  themeColors?: ThemeColors;
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -320,7 +315,8 @@ function LayerMenu({ settings, onSettings }: { settings: EdSettings; onSettings:
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
-  const activeN = CHIPS.filter((c) => settings[c.key]).length;
+  const chips = getLayerChips(themeColors);
+  const activeN = chips.filter((c) => settings[c.key]).length;
   const allLayersOff = activeN === 0;
   const opacity = Math.min(1, Math.max(0.1, settings.layerOpacity));
   const toggleAllLayers = () => {
@@ -381,7 +377,7 @@ function LayerMenu({ settings, onSettings }: { settings: EdSettings; onSettings:
                 step={5}
                 value={Math.round(opacity * 100)}
                 onChange={(e) => onSettings({ layerOpacity: Number(e.target.value) / 100 })}
-                className="h-1.5 min-w-0 flex-1 cursor-pointer accent-[#e3a94e]"
+                className="h-1.5 min-w-0 flex-1 cursor-pointer accent-brass"
                 aria-label="شدت نمایش لایه‌ها"
               />
               <span className="shrink-0">پررنگ</span>
@@ -392,7 +388,7 @@ function LayerMenu({ settings, onSettings }: { settings: EdSettings; onSettings:
               </p>
             )}
           </div>
-          {CHIPS.map((c) => (
+          {chips.map((c) => (
             <button
               key={c.key}
               onClick={() => onSettings({ [c.key]: !settings[c.key] } as Partial<EdSettings>)}
@@ -987,9 +983,7 @@ export default function ProfileEditor({
   profileLineWidth,
   pointScale,
   disableSelectionGlow,
-  profileColor,
-  selectedColor,
-  guideLineColor,
+  themeColors = DEFAULT_THEME_COLORS,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -1078,7 +1072,7 @@ export default function ProfileEditor({
   const addPaintDraft=(points:SPoint[])=>{
     if(points.length<2)return;
     const stamp=Date.now();
-    commitPaint(prev=>[...prev,...points.slice(1).map((b,i)=>({id:stamp+i,a:points[i],b,color:"#ef4444",text:"",arrowSize:17,dashed:false,textSize:17,alignText:true,hideArrow:false}))]);
+    commitPaint(prev=>[...prev,...points.slice(1).map((b,i)=>({id:stamp+i,a:points[i],b,color:themeColors.paintArrow,text:"",arrowSize:17,dashed:false,textSize:17,alignText:true,hideArrow:false}))]);
   };
   const paintHitsInRect=(rectW:{z0:number;z1:number;r0:number;r1:number},mode:"window"|"crossing")=>{
     const inside=(p:SPoint)=>p.z>=rectW.z0&&p.z<=rectW.z1&&p.r>=rectW.r0&&p.r<=rectW.r1;
@@ -5476,10 +5470,8 @@ export default function ProfileEditor({
       ref={wrapRef}
       onDragOver={e=>{if(e.dataTransfer.types.includes("Files"))e.preventDefault();}}
       onDrop={e=>{if(e.dataTransfer.files.length){e.preventDefault();const rect=wrapRef.current?.getBoundingClientRect(),c=camRef.current,drop=rect&&c?worldPt(c,e.clientX-rect.left,e.clientY-rect.top):undefined;void importReferenceFiles([...e.dataTransfer.files],drop);}}}
-      className={cn(
-        "relative h-full w-full overflow-hidden rounded-lg border border-edge",
-        editOpen ? "bg-[#08111f]" : "bg-[#120e09]"
-      )}
+      style={{ backgroundColor: editOpen ? themeColors.pathEditBg : themeColors.editorBg }}
+      className="relative h-full w-full overflow-hidden rounded-lg border border-edge"
     >
       <input ref={imageInputRef} type="file" accept="image/*,.webp,.avif,.svg,.tif,.tiff" multiple hidden onChange={e=>{void importReferenceFiles([...(e.target.files??[])]);e.currentTarget.value="";}}/>
       <svg
@@ -5528,7 +5520,7 @@ export default function ProfileEditor({
         }}
       >
         <defs>
-          <marker id="paintPreviewArrow" markerWidth="17" markerHeight="17" refX="15" refY="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1L16 8.5L1 16Z" fill="#ef4444" /></marker>
+          <marker id="paintPreviewArrow" markerWidth="17" markerHeight="17" refX="15" refY="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1L16 8.5L1 16Z" fill={themeColors.paintArrow} /></marker>
           {/* userSpaceOnUse مانع صفرشدن محدوده فیلتر برای خطوط کاملاً افقی/عمودی می‌شود. */}
           <filter id="curveGlow" filterUnits="userSpaceOnUse" x="-10000" y="-10000" width="20000" height="20000">
             <feGaussianBlur stdDeviation="3" result="b" />
@@ -5538,8 +5530,8 @@ export default function ProfileEditor({
             </feMerge>
           </filter>
           <pattern id="hatch" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
-            <rect width="7" height="7" fill="rgba(227,169,78,0.05)" />
-            <line x1="0" y1="0" x2="0" y2="7" stroke="rgba(227,169,78,0.10)" strokeWidth="1.4" />
+            <rect width="7" height="7" fill={rgbaCss(themeColors.editorBlankBox, 0.05)} />
+            <line x1="0" y1="0" x2="0" y2="7" stroke={rgbaCss(themeColors.editorBlankBox, 0.1)} strokeWidth="1.4" />
           </pattern>
           {referenceImages.map(img=><filter key={img.id} id={`ref-level-${img.id}`}><feComponentTransfer><feFuncR type="gamma" amplitude="1" exponent={1/img.gamma} offset="0"/><feFuncG type="gamma" amplitude="1" exponent={1/img.gamma} offset="0"/><feFuncB type="gamma" amplitude="1" exponent={1/img.gamma} offset="0"/></feComponentTransfer><feComponentTransfer><feFuncR type="linear" slope={255/Math.max(1,img.white-img.black)} intercept={-img.black/Math.max(1,img.white-img.black)}/><feFuncG type="linear" slope={255/Math.max(1,img.white-img.black)} intercept={-img.black/Math.max(1,img.white-img.black)}/><feFuncB type="linear" slope={255/Math.max(1,img.white-img.black)} intercept={-img.black/Math.max(1,img.white-img.black)}/></feComponentTransfer>{img.grayscale&&<feColorMatrix type="saturate" values="0"/>}</filter>)}
         </defs>
@@ -5572,7 +5564,7 @@ export default function ProfileEditor({
                   y1={editOpen ? 0 : cam.oy - R * cam.s}
                   x2={sx}
                   y2={editOpen ? size.h : cam.oy + R * cam.s}
-                  stroke={tick.major ? "rgba(63,79,101,0.42)" : "rgba(31,45,63,0.42)"}
+                  stroke={rgbaCss(themeColors.editorGrid, tick.major ? 0.34 : 0.16)}
                   strokeWidth={tick.major ? 1 : 0.75}
                 />
               );
@@ -5586,7 +5578,7 @@ export default function ProfileEditor({
                   y1={sy}
                   x2={editOpen ? size.w : cam.ox + L * cam.s}
                   y2={sy}
-                  stroke={tick.major ? "rgba(63,79,101,0.42)" : "rgba(31,45,63,0.42)"}
+                  stroke={rgbaCss(themeColors.editorGrid, tick.major ? 0.34 : 0.16)}
                   strokeWidth={tick.major ? 1 : 0.75}
                 />
               );
@@ -5595,30 +5587,30 @@ export default function ProfileEditor({
             {!editOpen && (
               <>
                 {gridZ.filter((tick) => tick.major).map((tick) => (
-                  <text key={`lz${tick.value}`} x={cam.ox + tick.value * cam.s} y={cam.oy + R * cam.s + 18} textAnchor="middle" fontSize="10" fill="#8b7c5f" fontFamily="JetBrains Mono, monospace">
+                  <text key={`lz${tick.value}`} x={cam.ox + tick.value * cam.s} y={cam.oy + R * cam.s + 18} textAnchor="middle" fontSize="10" fill={themeColors.editorGrid} fontFamily="JetBrains Mono, monospace">
                     {tick.value}
                   </text>
                 ))}
                 {gridR.filter((tick) => tick.value > 0).map((tick) => (
-                  <text key={`lr${tick.value}`} x={cam.ox - 8} y={cam.oy - tick.value * cam.s + 3.5} textAnchor="end" fontSize="10" fill="#8b7c5f" fontFamily="JetBrains Mono, monospace">
+                  <text key={`lr${tick.value}`} x={cam.ox - 8} y={cam.oy - tick.value * cam.s + 3.5} textAnchor="end" fontSize="10" fill={themeColors.editorGrid} fontFamily="JetBrains Mono, monospace">
                     ⌀{Math.round(tick.value * 2)}
                   </text>
                 ))}
-                <text x={cam.ox + L * cam.s + 10} y={cam.oy + 3.5} fontSize="11" fill="#a8946f" fontFamily="JetBrains Mono, monospace" fontWeight={700}>X</text>
-                <text x={cam.ox - 8} y={cam.oy - R * cam.s - 10} textAnchor="end" fontSize="11" fill="#a8946f" fontFamily="JetBrains Mono, monospace" fontWeight={700}>Y ⌀</text>
+                <text x={cam.ox + L * cam.s + 10} y={cam.oy + 3.5} fontSize="11" fill={themeColors.uiMute} fontFamily="JetBrains Mono, monospace" fontWeight={700}>X</text>
+                <text x={cam.ox - 8} y={cam.oy - R * cam.s - 10} textAnchor="end" fontSize="11" fill={themeColors.uiMute} fontFamily="JetBrains Mono, monospace" fontWeight={700}>Y ⌀</text>
               </>
             )}
           </g>
         )}
 
-        {!editOpen && <line x1={0} y1={cam.oy} x2={size.w} y2={cam.oy} stroke="rgba(227,169,78,0.35)" strokeWidth={1} strokeDasharray="10 4 2 4" />}
+        {!editOpen && <line x1={0} y1={cam.oy} x2={size.w} y2={cam.oy} stroke={rgbaCss(themeColors.editorCenterAxis, 0.38)} strokeWidth={1} strokeDasharray="10 4 2 4" />}
         <rect
           x={cam.ox}
           y={cam.oy - R * cam.s}
           width={L * cam.s}
           height={2 * R * cam.s}
           fill={editOpen ? "transparent" : "url(#hatch)"}
-          stroke={editOpen ? "rgba(55,72,94,0.22)" : "rgba(227,169,78,0.55)"}
+          stroke={editOpen ? rgbaCss(themeColors.editorGrid, 0.24) : rgbaCss(themeColors.editorBlankBox, 0.58)}
           strokeWidth={editOpen ? 0.8 : 1.3}
           strokeDasharray={editOpen ? undefined : "7 5"}
         />
@@ -5626,14 +5618,14 @@ export default function ProfileEditor({
         {/* محورهای ساده و نازک مثل مرجع؛ تقاطع آن‌ها خودِ مبدأ است. */}
         {editOpen && (
           <g pointerEvents="none">
-            <line x1={0} y1={cam.oy} x2={size.w} y2={cam.oy} stroke="#754052" strokeOpacity={0.9} strokeWidth={1} />
-            <line x1={cam.ox} y1={0} x2={cam.ox} y2={size.h} stroke="#3b7373" strokeOpacity={0.9} strokeWidth={1} />
+            <line x1={0} y1={cam.oy} x2={size.w} y2={cam.oy} stroke={themeColors.pathEditAxisX} strokeOpacity={0.9} strokeWidth={1} />
+            <line x1={cam.ox} y1={0} x2={cam.ox} y2={size.h} stroke={themeColors.pathEditAxisY} strokeOpacity={0.9} strokeWidth={1} />
           </g>
         )}
 
         {!editOpen && settings.showGhost && ghostPath && (
           <g style={{ opacity: (iso ? 0.15 : 1) * layerOpacity, ...fadeStyle }}>
-            <path d={ghostPath} fill="rgba(227,169,78,0.12)" stroke="rgba(227,169,78,0.4)" strokeWidth={1} />
+            <path d={ghostPath} fill={rgbaCss(themeColors.editorRotEnv, 0.14)} stroke={rgbaCss(themeColors.editorRotEnv, 0.45)} strokeWidth={1} />
           </g>
         )}
         {/* محدوده آبی داخل‌تراشی: انتهای Offset نزدیک Split → +X → محور (−Y)
@@ -5654,7 +5646,7 @@ export default function ProfileEditor({
           const offsetPath=offset.map(point=>{const[x,y]=P(point.z,point.r);return `L${x},${y}`;}).join(" ");
           const d=`M${sx},${sy} L${rx},${ry} L${r0x},${r0y} L${a0x},${a0y} ${offsetPath} Z`;
           return <g pointerEvents="none" style={{opacity:(iso?.18:.34)*layerOpacity,...fadeStyle}}>
-            <path d={d} fill="#69d7ff" fillOpacity={.24} stroke="#8de4ff" strokeOpacity={.42} strokeWidth={1}/>
+            <path d={d} fill={themeColors.pathEditInnerZone} fillOpacity={.24} stroke={shadeHex(themeColors.pathEditInnerZone, 0.25)} strokeOpacity={.45} strokeWidth={1}/>
           </g>;
         })()}
 
@@ -5666,7 +5658,7 @@ export default function ProfileEditor({
             const matchIso = iso && run.opId === isolatedOpId;
             const dim = iso && !matchIso;
             if (dim && isRapid) return null;
-            const color = SEG_COLOR[run.kind];
+            const color = segColorFromTheme(themeColors, run.kind);
             const baseOpacity = isRapid ? 0.28 : run.kind === "offset" || run.kind === "boreoff" ? 0.9 : 0.8;
             return (
               <g key={i} style={{ opacity: (dim ? 0.06 : 1) * layerOpacity, ...fadeStyle }}>
@@ -5690,7 +5682,7 @@ export default function ProfileEditor({
                   key={`br${i}`}
                   d={run.d}
                   fill="none"
-                  stroke={showPathBySpeed ? speedStroke(run.motion, run.feed) : SEG_COLOR[run.kind]}
+                  stroke={showPathBySpeed ? speedStroke(run.motion, run.feed) : segColorFromTheme(themeColors, run.kind)}
                   strokeOpacity={(pickerHover ? (dim ? 0.025 : 0.1) : dim ? 0.06 : isRapid ? 0.4 : 0.9) * layerOpacity}
                   strokeWidth={isRapid ? 1.1 : run.kind === "finish" ? 1.8 : 1.5}
                   strokeDasharray={isRapid ? "4 4" : run.kind === "offset" || run.kind === "boreoff" ? "7 4" : undefined}
@@ -5708,7 +5700,7 @@ export default function ProfileEditor({
                 <path
                   d={lineD(line)}
                   fill="none"
-                  stroke={showPathBySpeed ? speedStroke(line.motion, line.feed) : SEG_COLOR[kind]}
+                  stroke={showPathBySpeed ? speedStroke(line.motion, line.feed) : segColorFromTheme(themeColors, kind)}
                   strokeWidth={5}
                   strokeOpacity={1}
                   strokeLinecap="round"
@@ -5733,13 +5725,15 @@ export default function ProfileEditor({
               const [x, y] = P(pathStart.z, pathStart.x / 2);
               const hot = hoverPathEndpoint === pathStartVid;
               const selected = pathStartVid != null && selV.includes(pathStartVid);
+              const sCol = themeColors.pathEditStart;
+              const sLight = shadeHex(sCol, 0.45);
               return (
                 <g transform={`translate(${x + (pathEndsCoincident ? -13 : 0)} ${y})`} pointerEvents="none" filter="url(#curveGlow)">
-                  {pathEndsCoincident && <line x1={8} y1={0} x2={13} y2={0} stroke="#45d19f" strokeWidth={2} />}
-                  {(hot || selected) && <circle r={13} fill="#45d19f" fillOpacity={hot ? 0.28 : 0.18} stroke={selected ? "#ffd27a" : "#8fffd7"} strokeWidth={2} />}
-                  <circle r={hot || selected ? 9.5 : 8} fill={selected ? "#ffd27a" : hot ? "#17483b" : "#102b24"} stroke={selected ? "#fff3dc" : "#45d19f"} strokeWidth={2.5} />
-                  <text y={3.2} textAnchor="middle" fontSize={9} fontWeight={900} fill="#8fffd7">S</text>
-                  <text x={11} y={-9} fontSize={9} fontWeight={800} fill="#8fffd7">شروع</text>
+                  {pathEndsCoincident && <line x1={8} y1={0} x2={13} y2={0} stroke={sCol} strokeWidth={2} />}
+                  {(hot || selected) && <circle r={13} fill={sCol} fillOpacity={hot ? 0.28 : 0.18} stroke={selected ? themeColors.uiAccent2 : sLight} strokeWidth={2} />}
+                  <circle r={hot || selected ? 9.5 : 8} fill={selected ? themeColors.uiAccent2 : shadeHex(sCol, hot ? -0.55 : -0.72)} stroke={selected ? themeColors.profileHover : sCol} strokeWidth={2.5} />
+                  <text y={3.2} textAnchor="middle" fontSize={9} fontWeight={900} fill={sLight}>S</text>
+                  <text x={11} y={-9} fontSize={9} fontWeight={800} fill={sLight}>شروع</text>
                 </g>
               );
             })()}
@@ -5747,13 +5741,15 @@ export default function ProfileEditor({
               const [x, y] = P(pathEnd.z, pathEnd.x / 2);
               const hot = hoverPathEndpoint === pathEndVid;
               const selected = pathEndVid != null && selV.includes(pathEndVid);
+              const eCol = themeColors.pathEditEnd;
+              const eLight = shadeHex(eCol, 0.45);
               return (
                 <g transform={`translate(${x + (pathEndsCoincident ? 13 : 0)} ${y})`} pointerEvents="none" filter="url(#curveGlow)">
-                  {pathEndsCoincident && <line x1={-8} y1={0} x2={-13} y2={0} stroke="#ff756f" strokeWidth={2} />}
-                  {(hot || selected) && <circle r={16} fill="#ff756f" fillOpacity={hot ? 0.25 : 0.16} stroke={selected ? "#ffd27a" : "#ffc0bc"} strokeWidth={2} />}
-                  <path d={hot || selected ? "M 0 -13 L 13 0 L 0 13 L -13 0 Z" : "M 0 -11 L 11 0 L 0 11 L -11 0 Z"} fill={selected ? "#ffd27a" : hot ? "#592325" : "#35191a"} fillOpacity={0.9} stroke={selected ? "#fff3dc" : "#ff756f"} strokeWidth={2.5} />
-                  <text y={3.2} textAnchor="middle" fontSize={9} fontWeight={900} fill="#ffc0bc">E</text>
-                  <text x={13} y={13} fontSize={9} fontWeight={800} fill="#ffc0bc">پایان</text>
+                  {pathEndsCoincident && <line x1={-8} y1={0} x2={-13} y2={0} stroke={eCol} strokeWidth={2} />}
+                  {(hot || selected) && <circle r={16} fill={eCol} fillOpacity={hot ? 0.25 : 0.16} stroke={selected ? themeColors.uiAccent2 : eLight} strokeWidth={2} />}
+                  <path d={hot || selected ? "M 0 -13 L 13 0 L 0 13 L -13 0 Z" : "M 0 -11 L 11 0 L 0 11 L -11 0 Z"} fill={selected ? themeColors.uiAccent2 : shadeHex(eCol, hot ? -0.55 : -0.72)} fillOpacity={0.9} stroke={selected ? themeColors.profileHover : eCol} strokeWidth={2.5} />
+                  <text y={3.2} textAnchor="middle" fontSize={9} fontWeight={900} fill={eLight}>E</text>
+                  <text x={13} y={13} fontSize={9} fontWeight={800} fill={eLight}>پایان</text>
                 </g>
               );
             })()}
@@ -5766,7 +5762,7 @@ export default function ProfileEditor({
                   key={`of${o.id}`}
                   d={segPath(o, cam)}
                   fill="none"
-                  stroke={sel ? "#ffe9b0" : "#d9b36a"}
+                  stroke={sel ? shadeHex(themeColors.pathEditOffsetCurve, 0.35) : themeColors.pathEditOffsetCurve}
                   strokeOpacity={sel ? 1 : 0.72}
                   strokeWidth={sel ? 2.6 : 1.5}
                   strokeDasharray="6 3"
@@ -5786,28 +5782,28 @@ export default function ProfileEditor({
                 <g key={`oh${o.id}`}>
                   {sel && c1 && (
                     <>
-                      <line x1={ax} y1={ay} x2={c1[0]} y2={c1[1]} stroke="#6ab0d8" strokeWidth={1} strokeDasharray="3 3" />
-                      <circle cx={c1[0]} cy={c1[1]} r={5} fill="#1b2a33" stroke="#6ab0d8" strokeWidth={2} />
+                      <line x1={ax} y1={ay} x2={c1[0]} y2={c1[1]} stroke={themeColors.controlHandle} strokeWidth={1} strokeDasharray="3 3" />
+                      <circle cx={c1[0]} cy={c1[1]} r={5} fill={shadeHex(themeColors.controlHandle, -0.68)} stroke={themeColors.controlHandle} strokeWidth={2} />
                     </>
                   )}
                   {sel && c2 && (
                     <>
-                      <line x1={bx} y1={by} x2={c2[0]} y2={c2[1]} stroke="#6ab0d8" strokeWidth={1} strokeDasharray="3 3" />
-                      <circle cx={c2[0]} cy={c2[1]} r={5} fill="#1b2a33" stroke="#6ab0d8" strokeWidth={2} />
+                      <line x1={bx} y1={by} x2={c2[0]} y2={c2[1]} stroke={themeColors.controlHandle} strokeWidth={1} strokeDasharray="3 3" />
+                      <circle cx={c2[0]} cy={c2[1]} r={5} fill={shadeHex(themeColors.controlHandle, -0.68)} stroke={themeColors.controlHandle} strokeWidth={2} />
                     </>
                   )}
-                  {sel && via && <circle cx={via[0]} cy={via[1]} r={5} fill="#2b1f33" stroke="#b48ee0" strokeWidth={2} />}
-                  <circle cx={ax} cy={ay} r={sel ? 5.2 : 3.6} fill={sel ? "#0f2a22" : "#241c12"} stroke={sel ? "#ffe9b0" : "#d9b36a"} strokeWidth={2} />
-                  <circle cx={bx} cy={by} r={sel ? 5.2 : 3.6} fill={sel ? "#0f2a22" : "#241c12"} stroke={sel ? "#ffe9b0" : "#d9b36a"} strokeWidth={2} />
+                  {sel && via && <circle cx={via[0]} cy={via[1]} r={5} fill={shadeHex(themeColors.arcViaPoint, -0.68)} stroke={themeColors.arcViaPoint} strokeWidth={2} />}
+                  <circle cx={ax} cy={ay} r={sel ? 5.2 : 3.6} fill={sel ? themeColors.pointFill : themeColors.pathEditBg} stroke={sel ? shadeHex(themeColors.pathEditOffsetCurve, 0.35) : themeColors.pathEditOffsetCurve} strokeWidth={2} />
+                  <circle cx={bx} cy={by} r={sel ? 5.2 : 3.6} fill={sel ? themeColors.pointFill : themeColors.pathEditBg} stroke={sel ? shadeHex(themeColors.pathEditOffsetCurve, 0.35) : themeColors.pathEditOffsetCurve} strokeWidth={2} />
                 </g>
               );
             })}
             {hoverBuf != null && lineById.get(hoverBuf) && (
-              <path d={lineD(lineById.get(hoverBuf)!)} fill="none" stroke="#fff3dc" strokeOpacity={pickerHover ? 0.08 : 0.9} strokeWidth={2.4} strokeLinecap="round" pointerEvents="none" />
+              <path d={lineD(lineById.get(hoverBuf)!)} fill="none" stroke={themeColors.profileHover} strokeOpacity={pickerHover ? 0.08 : 0.9} strokeWidth={2.4} strokeLinecap="round" pointerEvents="none" />
             )}
             {bufMarq?.ids.map((id) => {
               const l = lineById.get(id);
-              return l ? <path key={`bm${id}`} d={lineD(l)} fill="none" stroke="#ffffff" strokeOpacity={pickerHover ? 0.08 : 0.8} strokeWidth={2.2} strokeLinecap="round" /> : null;
+              return l ? <path key={`bm${id}`} d={lineD(l)} fill="none" stroke={themeColors.pathEditSelected} strokeOpacity={pickerHover ? 0.08 : 0.8} strokeWidth={2.2} strokeLinecap="round" /> : null;
             })}
             {/* هایلایت انتخاب با pathهای مرکب و glow سبکِ مبتنی بر stroke؛
                 از Gaussian blur پرهزینه برای تک‌تک Segmentها استفاده نمی‌شود. */}
@@ -5816,19 +5812,19 @@ export default function ProfileEditor({
                 {showPathBySpeed ? [...selectedSpeedPaths].map(([key, group]) => (
                   <path key={key} d={group.d} fill="none" stroke={group.color} strokeOpacity={pickerHover ? 0.08 : 1} strokeWidth={iso ? 1.1 : group.width} strokeLinecap="round" filter={disableSelectionGlow?undefined:"url(#curveGlow)"} pointerEvents="none" />
                 )) : [...selectedPathsByWidth].map(([width, d]) => (
-                  <path key={width} d={d} fill="none" stroke={guideLineColor} strokeOpacity={pickerHover ? 0.08 : 1} strokeWidth={iso ? 1.1 : width} strokeLinecap="round" filter={disableSelectionGlow?undefined:"url(#curveGlow)"} pointerEvents="none" />
+                  <path key={width} d={d} fill="none" stroke={themeColors.pathEditSelected} strokeOpacity={pickerHover ? 0.08 : 1} strokeWidth={iso ? 1.1 : width} strokeLinecap="round" filter={disableSelectionGlow?undefined:"url(#curveGlow)"} pointerEvents="none" />
                 ))}
               </>
             )}
-            {/* خط Active فقط با رنگ آبی روشن مشخص می‌شود؛ بدون Glow یا تغییر ضخامت. */}
+            {/* خط Active فقط با رنگ مسیر فعال مشخص می‌شود؛ بدون Glow یا تغییر ضخامت. */}
             {activeLinePath && (
-              <path d={activeLinePath} fill="none" stroke={guideLineColor} strokeOpacity={pickerHover ? 0.08 : 1} strokeWidth={activeLineStrokeWidth} strokeLinecap="round" pointerEvents="none" />
+              <path d={activeLinePath} fill="none" stroke={themeColors.pathEditSelected} strokeOpacity={pickerHover ? 0.08 : 1} strokeWidth={activeLineStrokeWidth} strokeLinecap="round" pointerEvents="none" />
             )}
             {/* پیش‌نمایش موقت انتخاب بازه‌ای؛ تا پیش از Shift+کلیک وارد تاریخچه نمی‌شود. */}
             {rangePreviewPath && (
               <>
-                <path d={rangePreviewPath} fill="none" stroke="#fff3dc" strokeOpacity={0.18} strokeWidth={10} strokeLinecap="round" pointerEvents="none" />
-                <path d={rangePreviewPath} fill="none" stroke="#fff3dc" strokeOpacity={0.82} strokeWidth={5.2} strokeLinecap="round" pointerEvents="none" />
+                <path d={rangePreviewPath} fill="none" stroke={themeColors.profileHover} strokeOpacity={0.18} strokeWidth={10} strokeLinecap="round" pointerEvents="none" />
+                <path d={rangePreviewPath} fill="none" stroke={themeColors.profileHover} strokeOpacity={0.82} strokeWidth={5.2} strokeLinecap="round" pointerEvents="none" />
               </>
             )}
             {/* رأس‌های خطوط انتخابی — ابتدا دایرهٔ پایهٔ همهٔ رأس‌ها و سپس دات داخلیِ رأس‌های فعال رسم می‌شود تا هم‌پوشانی هیچ داتی را نپوشاند */}
@@ -5843,7 +5839,7 @@ export default function ProfileEditor({
                     const shared = (vertexLineCount.get(vid) ?? 0) > 1;
                     return (
                       <g key={`bv${vid}`} opacity={pickerHover ? 0.1 : 1}>
-                        <circle className="pt-hover" cx={x} cy={y} r={5.5} fill={shared ? "#0f2a22" : "#120e09"} stroke="#45b394" strokeWidth={2.4} />
+                        <circle className="pt-hover" cx={x} cy={y} r={5.5} fill={shared ? themeColors.pointFill : themeColors.pathEditBg} stroke={themeColors.pointRing} strokeWidth={2.4} />
                       </g>
                     );
                   })}
@@ -5858,7 +5854,7 @@ export default function ProfileEditor({
                         cx={x}
                         cy={y}
                         r={2.1}
-                        fill="#45b394"
+                        fill={themeColors.pointRing}
                         opacity={pickerHover ? 0.1 : 1}
                         pointerEvents="none"
                       />
@@ -5882,28 +5878,28 @@ export default function ProfileEditor({
               return `${i ? "L" : "M"}${x},${y}`;
             }).join(" ");
             return <>
-              <path d={pathOf(divided.outer, true)} fill="none" stroke={split.swapped ? "#4cc9f0" : "#e3a94e"} strokeOpacity={0.28} strokeWidth={1.6} strokeLinecap="round" />
-              <path d={pathOf(divided.inner, true)} fill="none" stroke={split.swapped ? "#e3a94e" : "#4cc9f0"} strokeOpacity={0.28} strokeWidth={1.6} strokeLinecap="round" />
-              <path d={pathOf(divided.outer)} fill="none" stroke={split.swapped ? "#4cc9f0" : profileColor} strokeWidth={2.4} strokeLinecap="round" />
-              <path d={pathOf(divided.inner)} fill="none" stroke={split.swapped ? profileColor : "#4cc9f0"} strokeWidth={2.4} strokeLinecap="round" />
+              <path d={pathOf(divided.outer, true)} fill="none" stroke={split.swapped ? themeColors.profileInner : themeColors.profileOuter} strokeOpacity={0.28} strokeWidth={1.6} strokeLinecap="round" />
+              <path d={pathOf(divided.inner, true)} fill="none" stroke={split.swapped ? themeColors.profileOuter : themeColors.profileInner} strokeOpacity={0.28} strokeWidth={1.6} strokeLinecap="round" />
+              <path d={pathOf(divided.outer)} fill="none" stroke={split.swapped ? themeColors.profileInner : themeColors.profileOuter} strokeWidth={2.4} strokeLinecap="round" />
+              <path d={pathOf(divided.inner)} fill="none" stroke={split.swapped ? themeColors.profileOuter : themeColors.profileInner} strokeWidth={2.4} strokeLinecap="round" />
             </>;
           })()}
           {/* بدون Split، رنگ معمول هر المان استفاده می‌شود. */}
           {!split.enabled && segs.map((s) => {
             const mirrorDimmed = !!mirrorSession && !mirrorSession.keepCopy && mirrorSession.ids.includes(s.id);
-            return <path key={`m${s.id}`} d={segPath(s, cam, true)} fill="none" stroke={profileColor} strokeOpacity={mirrorDimmed ? 0.07 : 0.28} strokeWidth={1.6} strokeLinecap="round" />;
+            return <path key={`m${s.id}`} d={segPath(s, cam, true)} fill="none" stroke={themeColors.profileOuter} strokeOpacity={mirrorDimmed ? 0.07 : 0.28} strokeWidth={1.6} strokeLinecap="round" />;
           })}
           {segs.map((s) => {
             const sel = selected.includes(s.id);
             const hov = selPoints.length === 0 && hoverId === s.id;
             const mirrorDimmed = !!mirrorSession && !mirrorSession.keepCopy && mirrorSession.ids.includes(s.id);
-            const base = segSide.get(s.id) === "inner" ? "#4cc9f0" : profileColor;
+            const base = segSide.get(s.id) === "inner" ? themeColors.profileInner : themeColors.profileOuter;
             return (
               <path
                 key={s.id}
                 d={segPath(s, cam)}
                 fill="none"
-                stroke={sel ? selectedColor : hov ? "#fff3dc" : split.enabled ? "transparent" : base}
+                stroke={sel ? themeColors.profileSelected : hov ? themeColors.profileHover : split.enabled ? "transparent" : base}
                 strokeWidth={iso ? 2.4 : sel ? 3.2 : hov ? 3 : 2.4}
                 strokeOpacity={mirrorDimmed ? 0.2 : 1}
                 strokeLinecap="round"
@@ -5917,7 +5913,7 @@ export default function ProfileEditor({
             <path
               d={segPath(hoverSeg, cam)}
               fill="none"
-              stroke="#d95848"
+              stroke={themeColors.uiDanger}
               strokeOpacity={0.75}
               strokeWidth={1.2}
               strokeDasharray="4 4"
@@ -5951,21 +5947,21 @@ export default function ProfileEditor({
                     <g key={`h${s.id}`}>
                       {s.c1 && dist(s.c1, s.a) > 1e-8 && showC1 && (
                         <>
-                          <line x1={ax} y1={ay} x2={P(s.c1.z, s.c1.r)[0]} y2={P(s.c1.z, s.c1.r)[1]} stroke="#6ab0d8" strokeWidth={1} strokeDasharray="3 3" />
-                          <circle className="pt-hover" cx={P(s.c1.z, s.c1.r)[0]} cy={P(s.c1.z, s.c1.r)[1]} r={5} fill="#1b2a33" stroke="#6ab0d8" strokeWidth={2} />
+                          <line x1={ax} y1={ay} x2={P(s.c1.z, s.c1.r)[0]} y2={P(s.c1.z, s.c1.r)[1]} stroke={themeColors.controlHandle} strokeWidth={1} strokeDasharray="3 3" />
+                          <circle className="pt-hover" cx={P(s.c1.z, s.c1.r)[0]} cy={P(s.c1.z, s.c1.r)[1]} r={5} fill={shadeHex(themeColors.controlHandle, -0.68)} stroke={themeColors.controlHandle} strokeWidth={2} />
                         </>
                       )}
                       {s.c2 && dist(s.c2, s.b) > 1e-8 && showC2 && (
                         <>
-                          <line x1={bx} y1={by} x2={P(s.c2.z, s.c2.r)[0]} y2={P(s.c2.z, s.c2.r)[1]} stroke="#6ab0d8" strokeWidth={1} strokeDasharray="3 3" />
-                          <circle className="pt-hover" cx={P(s.c2.z, s.c2.r)[0]} cy={P(s.c2.z, s.c2.r)[1]} r={5} fill="#1b2a33" stroke="#6ab0d8" strokeWidth={2} />
+                          <line x1={bx} y1={by} x2={P(s.c2.z, s.c2.r)[0]} y2={P(s.c2.z, s.c2.r)[1]} stroke={themeColors.controlHandle} strokeWidth={1} strokeDasharray="3 3" />
+                          <circle className="pt-hover" cx={P(s.c2.z, s.c2.r)[0]} cy={P(s.c2.z, s.c2.r)[1]} r={5} fill={shadeHex(themeColors.controlHandle, -0.68)} stroke={themeColors.controlHandle} strokeWidth={2} />
                         </>
                       )}
                       {s.via && showVia && (
-                        <circle className="pt-hover" cx={P(s.via.z, s.via.r)[0]} cy={P(s.via.z, s.via.r)[1]} r={5} fill="#2b1f33" stroke="#b48ee0" strokeWidth={2} />
+                        <circle className="pt-hover" cx={P(s.via.z, s.via.r)[0]} cy={P(s.via.z, s.via.r)[1]} r={5} fill={shadeHex(themeColors.arcViaPoint, -0.68)} stroke={themeColors.arcViaPoint} strokeWidth={2} />
                       )}
-                      {showA && <circle className="pt-hover" cx={ax} cy={ay} r={5.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2.4} />}
-                      {showB && <circle className="pt-hover" cx={bx} cy={by} r={5.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2.4} />}
+                      {showA && <circle className="pt-hover" cx={ax} cy={ay} r={5.5} fill={themeColors.pointFill} stroke={themeColors.pointRing} strokeWidth={2.4} />}
+                      {showB && <circle className="pt-hover" cx={bx} cy={by} r={5.5} fill={themeColors.pointFill} stroke={themeColors.pointRing} strokeWidth={2.4} />}
                     </g>
                   );
                 })}
@@ -5974,11 +5970,11 @@ export default function ProfileEditor({
                   const [bx, by] = P(s.b.z, s.b.r);
                   return (
                     <g key={`hd${s.id}`} pointerEvents="none">
-                      {s.c1 && dist(s.c1, s.a) > 1e-8 && pointIsActiveOn(s, "c1") && <circle cx={P(s.c1.z, s.c1.r)[0]} cy={P(s.c1.z, s.c1.r)[1]} r={2.1} fill="#6ab0d8" />}
-                      {s.c2 && dist(s.c2, s.b) > 1e-8 && pointIsActiveOn(s, "c2") && <circle cx={P(s.c2.z, s.c2.r)[0]} cy={P(s.c2.z, s.c2.r)[1]} r={2.1} fill="#6ab0d8" />}
-                      {s.via && pointIsActiveOn(s, "via") && <circle cx={P(s.via.z, s.via.r)[0]} cy={P(s.via.z, s.via.r)[1]} r={2.1} fill="#b48ee0" />}
-                      {endpointIsActiveOn(s, "a") && <circle cx={ax} cy={ay} r={2.1} fill="#45b394" />}
-                      {endpointIsActiveOn(s, "b") && <circle cx={bx} cy={by} r={2.1} fill="#45b394" />}
+                      {s.c1 && dist(s.c1, s.a) > 1e-8 && pointIsActiveOn(s, "c1") && <circle cx={P(s.c1.z, s.c1.r)[0]} cy={P(s.c1.z, s.c1.r)[1]} r={2.1} fill={themeColors.controlHandle} />}
+                      {s.c2 && dist(s.c2, s.b) > 1e-8 && pointIsActiveOn(s, "c2") && <circle cx={P(s.c2.z, s.c2.r)[0]} cy={P(s.c2.z, s.c2.r)[1]} r={2.1} fill={themeColors.controlHandle} />}
+                      {s.via && pointIsActiveOn(s, "via") && <circle cx={P(s.via.z, s.via.r)[0]} cy={P(s.via.z, s.via.r)[1]} r={2.1} fill={themeColors.arcViaPoint} />}
+                      {endpointIsActiveOn(s, "a") && <circle cx={ax} cy={ay} r={2.1} fill={themeColors.pointRing} />}
+                      {endpointIsActiveOn(s, "b") && <circle cx={bx} cy={by} r={2.1} fill={themeColors.pointRing} />}
                     </g>
                   );
                 })}
@@ -5992,33 +5988,33 @@ export default function ProfileEditor({
         {previewSeg && (
           <g>
             {tool==="paint"&&draft.length>1
-              ? draft.slice(1).map((point,index)=><line key={index} x1={P(draft[index].z,draft[index].r)[0]} y1={P(draft[index].z,draft[index].r)[1]} x2={P(point.z,point.r)[0]} y2={P(point.z,point.r)[1]} stroke="#ef4444" strokeWidth={profileLineWidth} markerEnd="url(#paintPreviewArrow)" pointerEvents="none" />)
-              : tool==="polyline"&&draft.length>1&&<path d={draft.map((point,index)=>`${index?"L":"M"}${P(point.z,point.r)[0]},${P(point.z,point.r)[1]}`).join(" ")} fill="none" stroke="#45b394" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
+              ? draft.slice(1).map((point,index)=><line key={index} x1={P(draft[index].z,draft[index].r)[0]} y1={P(draft[index].z,draft[index].r)[1]} x2={P(point.z,point.r)[0]} y2={P(point.z,point.r)[1]} stroke={themeColors.paintArrow} strokeWidth={profileLineWidth} markerEnd="url(#paintPreviewArrow)" pointerEvents="none" />)
+              : tool==="polyline"&&draft.length>1&&<path d={draft.map((point,index)=>`${index?"L":"M"}${P(point.z,point.r)[0]},${P(point.z,point.r)[1]}`).join(" ")} fill="none" stroke={themeColors.profileSelected} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
             }
             {tool==="paint" ? (
-              <path d={segPath(previewSeg,cam)} fill="none" stroke="#ef4444" strokeWidth={profileLineWidth} markerEnd="url(#paintPreviewArrow)" pointerEvents="none" />
+              <path d={segPath(previewSeg,cam)} fill="none" stroke={themeColors.paintArrow} strokeWidth={profileLineWidth} markerEnd="url(#paintPreviewArrow)" pointerEvents="none" />
             ) : straightDrawing && measuredLineEnd && lineCursor ? (
               <>
-                <path d={segPath(previewSeg, cam)} fill="none" stroke="#45b394" strokeWidth={2.2} strokeLinecap="round" opacity={0.95} />
-                <circle cx={P(measuredLineEnd.z, measuredLineEnd.r)[0]} cy={P(measuredLineEnd.z, measuredLineEnd.r)[1]} r={4.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2} pointerEvents="none" />
-                <line x1={P(measuredLineEnd.z, measuredLineEnd.r)[0]} y1={P(measuredLineEnd.z, measuredLineEnd.r)[1]} x2={P(lineCursor.z,lineCursor.r)[0]} y2={P(lineCursor.z,lineCursor.r)[1]} stroke="#6ab0d8" strokeWidth={1.5} strokeDasharray="5 4" strokeLinecap="round" pointerEvents="none" />
+                <path d={segPath(previewSeg, cam)} fill="none" stroke={themeColors.profileSelected} strokeWidth={2.2} strokeLinecap="round" opacity={0.95} />
+                <circle cx={P(measuredLineEnd.z, measuredLineEnd.r)[0]} cy={P(measuredLineEnd.z, measuredLineEnd.r)[1]} r={4.5} fill={themeColors.pointFill} stroke={themeColors.pointRing} strokeWidth={2} pointerEvents="none" />
+                <line x1={P(measuredLineEnd.z, measuredLineEnd.r)[0]} y1={P(measuredLineEnd.z, measuredLineEnd.r)[1]} x2={P(lineCursor.z,lineCursor.r)[0]} y2={P(lineCursor.z,lineCursor.r)[1]} stroke={themeColors.controlHandle} strokeWidth={1.5} strokeDasharray="5 4" strokeLinecap="round" pointerEvents="none" />
               </>
-            ) : <path d={segPath(previewSeg,cam)} fill="none" stroke="#45b394" strokeWidth={2.2} strokeDasharray="6 4" strokeLinecap="round" opacity={0.95} />}
+            ) : <path d={segPath(previewSeg,cam)} fill="none" stroke={themeColors.profileSelected} strokeWidth={2.2} strokeDasharray="6 4" strokeLinecap="round" opacity={0.95} />}
             {previewSeg.kind === "cubic" && previewSeg.c1 && previewSeg.c2 ? (
               <>
                 {/* خطوط اتصال دسته‌ها به نقاط انتهایی */}
-                <line x1={P(previewSeg.a.z, previewSeg.a.r)[0]} y1={P(previewSeg.a.z, previewSeg.a.r)[1]} x2={P(previewSeg.c1.z, previewSeg.c1.r)[0]} y2={P(previewSeg.c1.z, previewSeg.c1.r)[1]} stroke="#6ab0d8" strokeWidth={1.2} strokeDasharray="3 3" />
-                <line x1={P(previewSeg.b.z, previewSeg.b.r)[0]} y1={P(previewSeg.b.z, previewSeg.b.r)[1]} x2={P(previewSeg.c2.z, previewSeg.c2.r)[0]} y2={P(previewSeg.c2.z, previewSeg.c2.r)[1]} stroke="#6ab0d8" strokeWidth={1.2} strokeDasharray="3 3" />
+                <line x1={P(previewSeg.a.z, previewSeg.a.r)[0]} y1={P(previewSeg.a.z, previewSeg.a.r)[1]} x2={P(previewSeg.c1.z, previewSeg.c1.r)[0]} y2={P(previewSeg.c1.z, previewSeg.c1.r)[1]} stroke={themeColors.controlHandle} strokeWidth={1.2} strokeDasharray="3 3" />
+                <line x1={P(previewSeg.b.z, previewSeg.b.r)[0]} y1={P(previewSeg.b.z, previewSeg.b.r)[1]} x2={P(previewSeg.c2.z, previewSeg.c2.r)[0]} y2={P(previewSeg.c2.z, previewSeg.c2.r)[1]} stroke={themeColors.controlHandle} strokeWidth={1.2} strokeDasharray="3 3" />
                 {/* نقاط شروع و پایان */}
-                <circle cx={P(previewSeg.a.z, previewSeg.a.r)[0]} cy={P(previewSeg.a.z, previewSeg.a.r)[1]} r={4.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2} />
-                <circle cx={P(previewSeg.b.z, previewSeg.b.r)[0]} cy={P(previewSeg.b.z, previewSeg.b.r)[1]} r={4.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2} />
+                <circle cx={P(previewSeg.a.z, previewSeg.a.r)[0]} cy={P(previewSeg.a.z, previewSeg.a.r)[1]} r={4.5} fill={themeColors.pointFill} stroke={themeColors.pointRing} strokeWidth={2} />
+                <circle cx={P(previewSeg.b.z, previewSeg.b.r)[0]} cy={P(previewSeg.b.z, previewSeg.b.r)[1]} r={4.5} fill={themeColors.pointFill} stroke={themeColors.pointRing} strokeWidth={2} />
                 {/* دستهٔ در حال تنظیم برجسته‌تر: ابتدا c2 (پایان)، سپس c1 (شروع) */}
-                <circle cx={P(previewSeg.c1.z, previewSeg.c1.r)[0]} cy={P(previewSeg.c1.z, previewSeg.c1.r)[1]} r={draftSecondSet.current ? 6 : 4} fill="#1b2a33" stroke={draftSecondSet.current ? "#f3c26b" : "#6ab0d8"} strokeWidth={2} />
-                <circle cx={P(previewSeg.c2.z, previewSeg.c2.r)[0]} cy={P(previewSeg.c2.z, previewSeg.c2.r)[1]} r={!draftSecondSet.current ? 6 : 4} fill="#1b2a33" stroke={!draftSecondSet.current ? "#f3c26b" : "#6ab0d8"} strokeWidth={2} />
+                <circle cx={P(previewSeg.c1.z, previewSeg.c1.r)[0]} cy={P(previewSeg.c1.z, previewSeg.c1.r)[1]} r={draftSecondSet.current ? 6 : 4} fill={shadeHex(themeColors.controlHandle, -0.68)} stroke={draftSecondSet.current ? themeColors.uiAccent2 : themeColors.controlHandle} strokeWidth={2} />
+                <circle cx={P(previewSeg.c2.z, previewSeg.c2.r)[0]} cy={P(previewSeg.c2.z, previewSeg.c2.r)[1]} r={!draftSecondSet.current ? 6 : 4} fill={shadeHex(themeColors.controlHandle, -0.68)} stroke={!draftSecondSet.current ? themeColors.uiAccent2 : themeColors.controlHandle} strokeWidth={2} />
               </>
             ) : tool!=="paint" ? (
               draft.map((p, i) => (
-                <circle key={i} cx={P(p.z, p.r)[0]} cy={P(p.z, p.r)[1]} r={4.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2} />
+                <circle key={i} cx={P(p.z, p.r)[0]} cy={P(p.z, p.r)[1]} r={4.5} fill={themeColors.pointFill} stroke={themeColors.pointRing} strokeWidth={2} />
               ))
             ) : null}
           </g>
@@ -6027,7 +6023,7 @@ export default function ProfileEditor({
             صورت در موقعیت شروع Drag باقی می‌ماند و با خود هندسه اشتباه می‌شود. */}
         {tool !== "paint" && tool !== "select" && tool !== "move" && tool !== "rotate" && tool !== "copy" && tool !== "mirror" && tool !== "scale" && tool !== "boxscale" && cursor && drag.current?.mode !== "handle" &&
           !(straightDrawing && measuredLineEnd) && (
-          <circle cx={P(cursor.z, cursor.r)[0]} cy={P(cursor.z, cursor.r)[1]} r={4} fill="none" stroke="#45b394" strokeWidth={1.6} />
+          <circle cx={P(cursor.z, cursor.r)[0]} cy={P(cursor.z, cursor.r)[1]} r={4} fill="none" stroke={themeColors.pointRing} strokeWidth={1.6} />
         )}
 
         {/* نشانگر اسنپ */}
@@ -6085,8 +6081,8 @@ export default function ProfileEditor({
               width={8}
               height={8}
               transform={`rotate(45 ${x} ${y})`}
-              fill="#168cff"
-              stroke="#120e09"
+              fill={themeColors.splitMirrorPoint}
+              stroke={editOpen ? themeColors.pathEditBg : themeColors.editorBg}
               strokeWidth={1.2}
             />
             <circle cx={x} cy={y} r={1.25} fill="#ffffff" />
@@ -6105,9 +6101,9 @@ export default function ProfileEditor({
                       cx={x}
                       cy={y}
                       r={splitSelected ? 8 : 7}
-                      fill={marqueeSplitHit ? "#4aa3ff" : "#f72585"}
+                      fill={marqueeSplitHit ? themeColors.marqueeWindow : themeColors.splitPoint}
                       fillOpacity={splitSelected ? 0.2 : 0.12}
-                      stroke={splitSelected ? "#fff3dc" : marqueeSplitHit ? "#8fc5ff" : "#ff84bc"}
+                      stroke={splitSelected ? themeColors.profileHover : marqueeSplitHit ? shadeHex(themeColors.marqueeWindow, 0.35) : shadeHex(themeColors.splitPoint, 0.35)}
                       strokeWidth={splitSelected ? 1.6 : 1}
                     />
                   )}
@@ -6117,8 +6113,8 @@ export default function ProfileEditor({
                     width={8}
                     height={8}
                     transform={`rotate(45 ${x} ${y})`}
-                    fill={splitSelected ? "#ffd27a" : splitHovered ? "#ff5ba6" : "#f72585"}
-                    stroke="#120e09"
+                    fill={splitSelected ? themeColors.uiAccent2 : splitHovered ? shadeHex(themeColors.splitPoint, 0.22) : themeColors.splitPoint}
+                    stroke={editOpen ? themeColors.pathEditBg : themeColors.editorBg}
                     strokeWidth={1.2}
                   />
                   <circle cx={x} cy={y} r={1.25} fill="#ffffff" />
@@ -6138,7 +6134,7 @@ export default function ProfileEditor({
                 key={`pv-${id}`}
                 d={segPath(s, cam)}
                 fill="none"
-                stroke={marquee.remove ? "#d95848" : marquee.x1 >= marquee.x0 ? "#4aa3ff" : "#3faf5d"}
+                stroke={marquee.remove ? themeColors.uiDanger : marquee.x1 >= marquee.x0 ? themeColors.marqueeWindow : themeColors.marqueeCrossing}
                 strokeWidth={4.5}
                 strokeLinecap="round"
                 strokeDasharray={marquee.remove ? "7 4" : undefined}
@@ -6154,7 +6150,7 @@ export default function ProfileEditor({
             const pt = s ? s[ph.part] : null;
             if (!s || !pt) return null;
             const [x, y] = P(pt.z, pt.r);
-            const c = marquee.remove ? "#d95848" : "#ffd27a";
+            const c = marquee.remove ? themeColors.uiDanger : themeColors.uiAccent2;
             return (
               <g key={`pvp-${i}`} pointerEvents="none">
                 <circle cx={x} cy={y} r={8.5} fill="none" stroke={c} strokeWidth={1.8} strokeDasharray="3 2.5" opacity={0.9} />
@@ -6168,15 +6164,15 @@ export default function ProfileEditor({
           <g>
             {(() => {
               const crossing = marquee.x1 < marquee.x0;
-              const c = crossing ? "#3faf5d" : "#4aa3ff";
+              const c = crossing ? themeColors.marqueeCrossing : themeColors.marqueeWindow;
               const x = Math.min(marquee.x0, marquee.x1);
               const y = Math.min(marquee.y0, marquee.y1);
               const w = Math.abs(marquee.x1 - marquee.x0);
               const h = Math.abs(marquee.y1 - marquee.y0);
               return (
                 <>
-                  <rect x={x} y={y} width={w} height={h} fill={crossing ? "rgba(63,175,93,0.10)" : "rgba(74,163,255,0.10)"} stroke={c} strokeWidth={1.4} strokeDasharray={crossing ? "6 3" : undefined} />
-                  <text x={x + 6} y={y - 7} fontSize={10.5} fontFamily="Vazirmatn, sans-serif" fontWeight={700} fill={c} stroke="#120e09" strokeWidth={3} paintOrder="stroke">
+                  <rect x={x} y={y} width={w} height={h} fill={rgbaCss(c, 0.11)} stroke={c} strokeWidth={1.4} strokeDasharray={crossing ? "6 3" : undefined} />
+                  <text x={x + 6} y={y - 7} fontSize={10.5} fontFamily="Vazirmatn, sans-serif" fontWeight={700} fill={c} stroke={editOpen ? themeColors.pathEditBg : themeColors.editorBg} strokeWidth={3} paintOrder="stroke">
                     {crossing ? "متقاطع" : "پنجره‌ای"} • {editOpen ? (bufMarq?.ids.length ?? 0) : marqueeHits.length} المان، {editOpen ? (bufMarq?.vxs.length ?? 0) : marqueePointHits.length + (marqueeSplitHit ? 1 : 0)} نقطه
                     {marquee.remove ? " − حذف" : marquee.add ? " + افزودن" : ""}
                   </text>
@@ -6189,31 +6185,31 @@ export default function ProfileEditor({
         {/* پیش‌نمایش Fillet: خطوط Trim‌شده و Arc مماس پیش از Enter */}
         {tool === "fillet" && filletCalc?.result && (
           <g pointerEvents="none" filter="url(#curveGlow)">
-            <path d={segPath(filletCalc.result.first, cam)} fill="none" stroke="#ffd166" strokeWidth={3} strokeDasharray="7 3" />
-            <path d={segPath(filletCalc.result.second, cam)} fill="none" stroke="#ffd166" strokeWidth={3} strokeDasharray="7 3" />
-            <path d={segPath(filletCalc.result.arc, cam)} fill="none" stroke="#28dfc2" strokeWidth={3.5} />
+            <path d={segPath(filletCalc.result.first, cam)} fill="none" stroke={themeColors.uiAccent2} strokeWidth={3} strokeDasharray="7 3" />
+            <path d={segPath(filletCalc.result.second, cam)} fill="none" stroke={themeColors.uiAccent2} strokeWidth={3} strokeDasharray="7 3" />
+            <path d={segPath(filletCalc.result.arc, cam)} fill="none" stroke={themeColors.transformGuide} strokeWidth={3.5} />
           </g>
         )}
 
         {rotateSession && <g pointerEvents="none">
           {rotateGhost && rotateSession.base.filter(s=>rotateSession.ids.includes(s.id)).map(s=><path key={`rotate-ghost-${s.id}`} d={segPath(s,cam)} fill="none" stroke="#28dfc2" strokeWidth={2} opacity={.25}/>)}
-          <line x1={P(rotateSession.center.z,rotateSession.center.r)[0]} y1={P(rotateSession.center.z,rotateSession.center.r)[1]} x2={P(rotateSession.pointer.z,rotateSession.pointer.r)[0]} y2={P(rotateSession.pointer.z,rotateSession.pointer.r)[1]} stroke="#28dfc2" strokeWidth={1.2} strokeDasharray="5 4"/>
-          <circle cx={P(rotateSession.center.z,rotateSession.center.r)[0]} cy={P(rotateSession.center.z,rotateSession.center.r)[1]} r={4} fill="#071018" stroke="#28dfc2" strokeWidth={1.5}/>
+          <line x1={P(rotateSession.center.z,rotateSession.center.r)[0]} y1={P(rotateSession.center.z,rotateSession.center.r)[1]} x2={P(rotateSession.pointer.z,rotateSession.pointer.r)[0]} y2={P(rotateSession.pointer.z,rotateSession.pointer.r)[1]} stroke={themeColors.transformGuide} strokeWidth={1.2} strokeDasharray="5 4"/>
+          <circle cx={P(rotateSession.center.z,rotateSession.center.r)[0]} cy={P(rotateSession.center.z,rotateSession.center.r)[1]} r={4} fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth={1.5}/>
         </g>}
 
         {tool === "boxscale" && boxScaleGhost && boxRotateSession && (
-          <g pointerEvents="none" opacity={0.25}>{boxRotateSession.base.filter(s=>boxRotateSession.ids.includes(s.id)).map(s=><path key={`box-rotate-ghost-${s.id}`} d={segPath(s,cam)} fill="none" stroke="#28dfc2" strokeWidth={2}/>)}</g>
+          <g pointerEvents="none" opacity={0.25}>{boxRotateSession.base.filter(s=>boxRotateSession.ids.includes(s.id)).map(s=><path key={`box-rotate-ghost-${s.id}`} d={segPath(s,cam)} fill="none" stroke={themeColors.transformGuide} strokeWidth={2}/>)}</g>
         )}
 
         {tool === "boxscale" && boxScaleGhost && boxScaleDrag.current && (
           <g pointerEvents="none" opacity={0.25}>
             {boxScaleDrag.current.base.filter((s) => boxScaleDrag.current!.ids.includes(s.id)).map((s) => (
-              <path key={`box-scale-drag-ghost-${s.id}`} d={segPath(s, cam)} fill="none" stroke="#28dfc2" strokeWidth={2} />
+              <path key={`box-scale-drag-ghost-${s.id}`} d={segPath(s, cam)} fill="none" stroke={themeColors.transformGuide} strokeWidth={2} />
             ))}
             {(() => {
               const gb=boxScaleDrag.current!.bounds;
               const [gx0,gyTop]=P(gb.minZ,gb.maxR), [gx1,gyBottom]=P(gb.maxZ,gb.minR);
-              return <rect x={gx0} y={gyTop} width={gx1-gx0} height={gyBottom-gyTop} fill="none" stroke="#28dfc2" strokeWidth={1.1} strokeDasharray="5 4" />;
+              return <rect x={gx0} y={gyTop} width={gx1-gx0} height={gyBottom-gyTop} fill="none" stroke={themeColors.transformGuide} strokeWidth={1.1} strokeDasharray="5 4" />;
             })()}
           </g>
         )}
@@ -6221,12 +6217,12 @@ export default function ProfileEditor({
         {tool === "boxscale" && boxScaleGhost && boxScaleNumericBase.current && (boxScaleWidthText != null || boxScaleHeightText != null) && (
           <g pointerEvents="none" opacity={0.25}>
             {boxScaleNumericBase.current.segs.filter((s) => selected.includes(s.id)).map((s) => (
-              <path key={`box-scale-ghost-${s.id}`} d={segPath(s, cam)} fill="none" stroke="#28dfc2" strokeWidth={2} />
+              <path key={`box-scale-ghost-${s.id}`} d={segPath(s, cam)} fill="none" stroke={themeColors.transformGuide} strokeWidth={2} />
             ))}
             {(() => {
               const gb=boxScaleNumericBase.current!.bounds;
               const [gx0,gyTop]=P(gb.minZ,gb.maxR), [gx1,gyBottom]=P(gb.maxZ,gb.minR);
-              return <rect x={gx0} y={gyTop} width={gx1-gx0} height={gyBottom-gyTop} fill="none" stroke="#28dfc2" strokeWidth={1.1} strokeDasharray="5 4" />;
+              return <rect x={gx0} y={gyTop} width={gx1-gx0} height={gyBottom-gyTop} fill="none" stroke={themeColors.transformGuide} strokeWidth={1.1} strokeDasharray="5 4" />;
             })()}
           </g>
         )}
@@ -6237,10 +6233,10 @@ export default function ProfileEditor({
           const b = boxScaleBounds; const [x0,yTop]=P(b.minZ,b.maxR), [x1,yBottom]=P(b.maxZ,b.minR);
           const handles = [{h:"nw",x:x0,y:yTop},{h:"n",x:(x0+x1)/2,y:yTop},{h:"ne",x:x1,y:yTop},{h:"e",x:x1,y:(yTop+yBottom)/2},{h:"se",x:x1,y:yBottom},{h:"s",x:(x0+x1)/2,y:yBottom},{h:"sw",x:x0,y:yBottom},{h:"w",x:x0,y:(yTop+yBottom)/2}];
           return <g pointerEvents="all">
-            <rect x={x0} y={yTop} width={x1-x0} height={yBottom-yTop} fill="none" stroke="#28dfc2" strokeWidth={1.2} strokeDasharray="5 4" />
-            {handles.map(({h,x,y})=><rect key={h} x={x-4} y={y-4} width={8} height={8} rx={1} fill="#071018" stroke="#28dfc2" strokeWidth={1.5} style={{cursor:`${h}-resize`}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation(); if(boxRotateSession){onSegs(segs,true);setBoxRotateSession(null);setBoxRotateBox(null);} svgRef.current?.setPointerCapture?.(e.pointerId); boxScaleLastHandle.current=h; boxScaleDrag.current={handle:h,base:segs.map(s=>({...s})),ids:[...selected],bounds:{...b}};}} />)}
+            <rect x={x0} y={yTop} width={x1-x0} height={yBottom-yTop} fill="none" stroke={themeColors.transformGuide} strokeWidth={1.2} strokeDasharray="5 4" />
+            {handles.map(({h,x,y})=><rect key={h} x={x-4} y={y-4} width={8} height={8} rx={1} fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth={1.5} style={{cursor:`${h}-resize`}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation(); if(boxRotateSession){onSegs(segs,true);setBoxRotateSession(null);setBoxRotateBox(null);} svgRef.current?.setPointerCapture?.(e.pointerId); boxScaleLastHandle.current=h; boxScaleDrag.current={handle:h,base:segs.map(s=>({...s})),ids:[...selected],bounds:{...b}};}} />)}
             {[{x:x0-7,y:yTop-7},{x:x1+7,y:yTop-7},{x:x1+7,y:yBottom+7},{x:x0-7,y:yBottom+7}].map((p,i)=><circle key={`rh-${i}`} cx={p.x} cy={p.y} r={5} fill="transparent" stroke="none" style={{cursor:BOX_ROTATE_CURSORS[i]}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation();if(boxRotateSession){onSegs(segs,true);}svgRef.current?.setPointerCapture?.(e.pointerId);const pivot=boxScalePivot??{z:(b.minZ+b.maxZ)/2,r:(b.minR+b.maxR)/2};const w=toWorld(e.clientX,e.clientY);const session={base:segs.map(s=>({...s})),ids:[...selected],pivot,angle:0};boxRotateDrag.current={...session,startAngle:Math.atan2(w.r-pivot.r,w.z-pivot.z)};setBoxRotateSession(session);const rect=wrapRef.current!.getBoundingClientRect();setBoxRotateBox({x:e.clientX-rect.left+12,y:e.clientY-rect.top-48,value:"",error:""});}}/>)}
-            {(()=>{const pivot=boxScalePivot??{z:(b.minZ+b.maxZ)/2,r:(b.minR+b.maxR)/2};const [px,py]=P(pivot.z,pivot.r);return <g style={{cursor:"move"}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation();svgRef.current?.setPointerCapture?.(e.pointerId);boxPivotDrag.current=true;}}><circle cx={px} cy={py} r={9} fill="transparent"/><path d={`M${px-6} ${py}H${px+6}M${px} ${py-6}V${py+6}`} stroke="#28dfc2" strokeWidth={1.8}/></g>;})()}
+            {(()=>{const pivot=boxScalePivot??{z:(b.minZ+b.maxZ)/2,r:(b.minR+b.maxR)/2};const [px,py]=P(pivot.z,pivot.r);return <g style={{cursor:"move"}} onPointerDown={(e)=>{if(e.button!==0)return;e.stopPropagation();svgRef.current?.setPointerCapture?.(e.pointerId);boxPivotDrag.current=true;}}><circle cx={px} cy={py} r={9} fill="transparent"/><path d={`M${px-6} ${py}H${px+6}M${px} ${py-6}V${py+6}`} stroke={themeColors.transformGuide} strokeWidth={1.8}/></g>;})()}
           </g>;
         })()}
 
@@ -6260,11 +6256,11 @@ export default function ProfileEditor({
           const [x2, y2] = P(pointer.z, pointer.r);
           return (
             <g pointerEvents="none">
-              <line x1={x1} y1={y1} x2={xc} y2={yc} stroke="#28dfc2" strokeWidth={1.2} strokeDasharray="5 4" opacity={0.95} />
+              <line x1={x1} y1={y1} x2={xc} y2={yc} stroke={themeColors.transformGuide} strokeWidth={1.2} strokeDasharray="5 4" opacity={0.95} />
               {entered != null && entered > 0 && fullLength > entered && (
-                <line x1={xc} y1={yc} x2={x2} y2={y2} stroke="#28dfc2" strokeWidth={1.2} strokeDasharray="5 4" opacity={0.25} />
+                <line x1={xc} y1={yc} x2={x2} y2={y2} stroke={themeColors.transformGuide} strokeWidth={1.2} strokeDasharray="5 4" opacity={0.25} />
               )}
-              <circle cx={x1} cy={y1} r={3} fill="#071018" stroke="#28dfc2" strokeWidth={1.3} />
+              <circle cx={x1} cy={y1} r={3} fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth={1.3} />
             </g>
           );
         })()}
@@ -6275,12 +6271,12 @@ export default function ProfileEditor({
           const [x2, y2] = P(mirrorSession.cursor!.z, mirrorSession.cursor!.r);
           const horizontal = Math.abs(mirrorSession.cursor!.r - mirrorSession.p1!.r) < 1e-9;
           const vertical = Math.abs(mirrorSession.cursor!.z - mirrorSession.p1!.z) < 1e-9;
-          const guideColor = horizontal ? "#754052" : vertical ? "#3b7373" : "#28dfc2";
+          const guideColor = horizontal ? themeColors.pathEditAxisX : vertical ? themeColors.pathEditAxisY : themeColors.transformGuide;
           return (
             <g pointerEvents="none">
               <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={guideColor} strokeWidth={1.2} strokeDasharray="5 4" opacity={0.95} />
-              <circle cx={x1} cy={y1} r={3} fill="#071018" stroke={guideColor} strokeWidth={1.3} />
-              <circle cx={x2} cy={y2} r={3} fill="#071018" stroke={guideColor} strokeWidth={1.3} />
+              <circle cx={x1} cy={y1} r={3} fill={themeColors.editorBg} stroke={guideColor} strokeWidth={1.3} />
+              <circle cx={x2} cy={y2} r={3} fill={themeColors.editorBg} stroke={guideColor} strokeWidth={1.3} />
             </g>
           );
         })()}
@@ -6289,11 +6285,11 @@ export default function ProfileEditor({
         {copySession && (() => {
           const [x1, y1] = P(copySession.origin.z, copySession.origin.r);
           const [x2, y2] = P(copySession.pointer.z, copySession.pointer.r);
-          const guideColor = copySession.axis === "x" ? "#754052" : copySession.axis === "y" ? "#3b7373" : "#28dfc2";
+          const guideColor = copySession.axis === "x" ? themeColors.pathEditAxisX : copySession.axis === "y" ? themeColors.pathEditAxisY : themeColors.transformGuide;
           return (
             <g pointerEvents="none">
               <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={guideColor} strokeWidth={1.2} strokeDasharray="5 4" opacity={0.95} />
-              <circle cx={x1} cy={y1} r={3} fill="#071018" stroke={guideColor} strokeWidth={1.3} />
+              <circle cx={x1} cy={y1} r={3} fill={themeColors.editorBg} stroke={guideColor} strokeWidth={1.3} />
             </g>
           );
         })()}
@@ -6321,21 +6317,21 @@ export default function ProfileEditor({
           }
           const [x2, y2] = P(guidePoint.z, guidePoint.r);
           const guideColor = moveSession.axis === "x"
-            ? "#754052"
+            ? themeColors.pathEditAxisX
             : moveSession.axis === "y"
-              ? "#3b7373"
-              : moveSession.mode === "absolute" ? "#a99cff" : "#28dfc2";
+              ? themeColors.pathEditAxisY
+              : moveSession.mode === "absolute" ? themeColors.arcViaPoint : themeColors.transformGuide;
           return (
             <g pointerEvents="none">
               <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={guideColor} strokeWidth={1.2} strokeDasharray="5 4" opacity={0.95} />
-              <circle cx={x1} cy={y1} r={3} fill="#071018" stroke={guideColor} strokeWidth={1.3} />
+              <circle cx={x1} cy={y1} r={3} fill={themeColors.editorBg} stroke={guideColor} strokeWidth={1.3} />
             </g>
           );
         })()}
 
         {/* بالاترین لایه بوم: خطوط نمایشی جهت‌دار، انتخاب و Handle نقاط. */}
-        {imageScaleSession&&(()=>{const [x1,y1]=P(imageScaleSession.p1.z,imageScaleSession.p1.r),p2=imageScaleSession.p2??cursor;if(!p2)return <circle cx={x1} cy={y1} r="4" fill="#071018" stroke="#28dfc2" strokeWidth="2"/>;const [x2,y2]=P(p2.z,p2.r);return <g pointerEvents="none"><line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#28dfc2" strokeWidth="1.5" strokeDasharray="5 3"/><circle cx={x1} cy={y1} r="4" fill="#071018" stroke="#28dfc2" strokeWidth="2"/><circle cx={x2} cy={y2} r="4" fill="#071018" stroke="#28dfc2" strokeWidth="2"/></g>;})()}
-        {selectedImageId!=null&&(()=>{const img=displayImages.find(v=>v.id===selectedImageId);if(!img)return null;const x=cam.ox+img.z*cam.s,y=cam.oy-img.r*cam.s,w=img.width*cam.s,h=img.height*cam.s;return <g ref={selectedImageControlsRef} transform={`rotate(${img.rotation??0} ${x+w/2} ${y+h/2})`}><rect data-ref-image="true" x={x} y={y} width={w} height={h} fill="none" stroke={img.locked?"#ef4444":"#28dfc2"} strokeWidth="1.2" strokeDasharray="5 4"/>{(["nw","ne","sw","se","n","s","e","w"] as const).map(mode=>{const hx=mode.includes("w")?x:mode.includes("e")?x+w:x+w/2,hy=mode.includes("n")?y:mode.includes("s")?y+h:y+h/2;return <rect data-ref-image="true" key={mode} x={hx-4} y={hy-4} width="8" height="8" rx="1" fill="#071018" stroke="#28dfc2" strokeWidth="1.5" style={{cursor:img.locked?"not-allowed":resizeCursor(mode,img.rotation??0)}} onPointerDown={e=>{e.stopPropagation();if(img.locked)return;svgRef.current?.setPointerCapture?.(e.pointerId);const rect=svgRef.current!.getBoundingClientRect();imageDrag.current={id:img.id,start:worldPt(cam,e.clientX-rect.left,e.clientY-rect.top),base:{...img},mode};setImageDragCursor(resizeCursor(mode,img.rotation??0));}}/>;})}{[{x:x-7,y:y-7},{x:x+w+7,y:y-7},{x:x+w+7,y:y+h+7},{x:x-7,y:y+h+7}].map((p,i)=><circle data-ref-image="true" key={`rotate-${i}`} cx={p.x} cy={p.y} r="5" fill="transparent" style={{cursor:rotationCursor([180,270,0,90][i]+(img.rotation??0))}} onPointerDown={e=>{e.stopPropagation();if(img.locked)return;svgRef.current?.setPointerCapture?.(e.pointerId);const rect=svgRef.current!.getBoundingClientRect(),start=worldPt(cam,e.clientX-rect.left,e.clientY-rect.top),center={z:img.z+img.width/2,r:img.r-img.height/2};imageDrag.current={id:img.id,start,base:{...img},mode:"rotate",startAngle:Math.atan2(start.r-center.r,start.z-center.z),cursorBaseAngle:[180,270,0,90][i]};setImageDragCursor(rotationCursor([180,270,0,90][i]+Math.round((img.rotation??0)/5)*5));}}/>)}</g>;})()}
+        {imageScaleSession&&(()=>{const [x1,y1]=P(imageScaleSession.p1.z,imageScaleSession.p1.r),p2=imageScaleSession.p2??cursor;if(!p2)return <circle cx={x1} cy={y1} r="4" fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth="2"/>;const [x2,y2]=P(p2.z,p2.r);return <g pointerEvents="none"><line x1={x1} y1={y1} x2={x2} y2={y2} stroke={themeColors.transformGuide} strokeWidth="1.5" strokeDasharray="5 3"/><circle cx={x1} cy={y1} r="4" fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth="2"/><circle cx={x2} cy={y2} r="4" fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth="2"/></g>;})()}
+        {selectedImageId!=null&&(()=>{const img=displayImages.find(v=>v.id===selectedImageId);if(!img)return null;const x=cam.ox+img.z*cam.s,y=cam.oy-img.r*cam.s,w=img.width*cam.s,h=img.height*cam.s;return <g ref={selectedImageControlsRef} transform={`rotate(${img.rotation??0} ${x+w/2} ${y+h/2})`}><rect data-ref-image="true" x={x} y={y} width={w} height={h} fill="none" stroke={img.locked?themeColors.uiDanger:themeColors.transformGuide} strokeWidth="1.2" strokeDasharray="5 4"/>{(["nw","ne","sw","se","n","s","e","w"] as const).map(mode=>{const hx=mode.includes("w")?x:mode.includes("e")?x+w:x+w/2,hy=mode.includes("n")?y:mode.includes("s")?y+h:y+h/2;return <rect data-ref-image="true" key={mode} x={hx-4} y={hy-4} width="8" height="8" rx="1" fill={themeColors.editorBg} stroke={themeColors.transformGuide} strokeWidth="1.5" style={{cursor:img.locked?"not-allowed":resizeCursor(mode,img.rotation??0)}} onPointerDown={e=>{e.stopPropagation();if(img.locked)return;svgRef.current?.setPointerCapture?.(e.pointerId);const rect=svgRef.current!.getBoundingClientRect();imageDrag.current={id:img.id,start:worldPt(cam,e.clientX-rect.left,e.clientY-rect.top),base:{...img},mode};setImageDragCursor(resizeCursor(mode,img.rotation??0));}}/>;})}{[{x:x-7,y:y-7},{x:x+w+7,y:y-7},{x:x+w+7,y:y+h+7},{x:x-7,y:y+h+7}].map((p,i)=><circle data-ref-image="true" key={`rotate-${i}`} cx={p.x} cy={p.y} r="5" fill="transparent" style={{cursor:rotationCursor([180,270,0,90][i]+(img.rotation??0))}} onPointerDown={e=>{e.stopPropagation();if(img.locked)return;svgRef.current?.setPointerCapture?.(e.pointerId);const rect=svgRef.current!.getBoundingClientRect(),start=worldPt(cam,e.clientX-rect.left,e.clientY-rect.top),center={z:img.z+img.width/2,r:img.r-img.height/2};imageDrag.current={id:img.id,start,base:{...img},mode:"rotate",startAngle:Math.atan2(start.r-center.r,start.z-center.z),cursorBaseAngle:[180,270,0,90][i]};setImageDragCursor(rotationCursor([180,270,0,90][i]+Math.round((img.rotation??0)/5)*5));}}/>)}</g>;})()}
 
         {showCanvasPaintTool&&paintEdges.map(edge=>{
           const ax=cam.ox+edge.a.z*cam.s,ay=cam.oy-edge.a.r*cam.s,bx=cam.ox+edge.b.z*cam.s,by=cam.oy-edge.b.r*cam.s;
@@ -6953,8 +6949,8 @@ export default function ProfileEditor({
 
       {/* نشان ایزوله */}
       {iso && isoOp && tool === "select" && (
-        <div className="anim-in absolute top-12 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full border py-1.5 pr-3 pl-1.5 text-[11.5px] font-bold shadow-lg shadow-black/40 backdrop-blur-sm" style={{ borderColor: `${OP_INFO[isoOp.type].color}77`, background: "#1d1710ee", color: OP_INFO[isoOp.type].color }}>
-          <span className="inline-block h-2 w-2 rounded-full" style={{ background: OP_INFO[isoOp.type].color }} />
+        <div className="anim-in absolute top-12 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full border bg-panel/95 py-1.5 pr-3 pl-1.5 text-[11.5px] font-bold shadow-lg shadow-black/40 backdrop-blur-sm" style={{ borderColor: rgbaCss(opColorFromTheme(themeColors, isoOp.type), 0.5), color: opColorFromTheme(themeColors, isoOp.type) }}>
+          <span className="inline-block h-2 w-2 rounded-full" style={{ background: opColorFromTheme(themeColors, isoOp.type) }} />
           نمای ایزوله: {OP_INFO[isoOp.type].name}
           <button onClick={onClearIsolate} className="grid h-5 w-5 place-items-center rounded-full transition-colors hover:bg-white/10" title="خروج (Esc)">
             <IconX className="h-3 w-3" />
@@ -6964,7 +6960,7 @@ export default function ProfileEditor({
 
       {/* ---------- بالا-راست: منوی لایه‌ها + کلید «ویرایش مسیر» (سمت چپِ منو) ---------- */}
       <div dir="rtl" className="absolute top-2.5 right-2.5 z-20 flex items-start gap-2">
-        <LayerMenu settings={settings} onSettings={onSettings} />
+        <LayerMenu settings={settings} onSettings={onSettings} themeColors={themeColors} />
         <button
           onClick={() => onEditToggle(!editOpen)}
           title="ویرایشِ مسیرِ جی‌کد به‌صورت یک خطِ یکپارچه (مثل سیمکو) — فایل فقط با «تأیید» به‌روز می‌شود"
@@ -7100,7 +7096,7 @@ export default function ProfileEditor({
                 onBlur={() => setPickerHover(null)}
                 onClick={() => { selectEditLines([id], id, true); setSelV([]); setHitPicker(null); setPickerHover(null); }}
               >
-                <span className="h-2 w-2 rounded-full" style={{ background: showPathBySpeed ? speedStroke(l.motion, l.feed) : SEG_COLOR[l.motion === 0 ? "rapid" : l.kind] }} />
+                <span className="h-2 w-2 rounded-full" style={{ background: showPathBySpeed ? speedStroke(l.motion, l.feed) : segColorFromTheme(themeColors, l.motion === 0 ? "rapid" : l.kind) }} />
                 <span>خط {id.toLocaleString("fa-IR")} · {l.motion === 0 ? "حرکت سریع" : OP_INFO[ops.find((o) => o.id === l.opId)?.type ?? "finish"].name}</span>
               </button>
             ) : null; })}

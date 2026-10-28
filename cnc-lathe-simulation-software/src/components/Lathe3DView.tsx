@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { SketchSeg } from "../lib/sketch";
 import { chainPolyline, orderChain } from "../lib/sketch";
+import { DEFAULT_THEME_COLORS, hexToRgb01, type ThemeColors } from "../lib/theme";
 
 /* ------------------------------------------------------------------ */
 /*  نمای سه‌بعدی حرفه‌ای تراش (Lathe) — WebGL2 خام، بدون وابستگی خارجی    */
@@ -17,6 +18,8 @@ interface Props {
   blankL: number;
   /** حالت کاسه (Split): دیوارهٔ دوجداره است و سر قطعه درپوش ندارد */
   split: boolean;
+  /** پالت رنگ فعال نرم‌افزار */
+  themeColors?: ThemeColors;
 }
 
 interface P2 {
@@ -241,6 +244,8 @@ uniform float uCut;
 uniform vec2 uCutCS;
 uniform int uMode;
 uniform vec4 uColor;
+uniform vec3 uBaseColor;
+uniform vec3 uRimColor;
 out vec4 o;
 void main(){
   if(uMode==1){ o=uColor; return; }
@@ -266,12 +271,12 @@ void main(){
   float e=smoothstep(-0.35,0.7,r.y);
   vec3 env=mix(vec3(0.07,0.06,0.05),vec3(0.62,0.66,0.72),e);
   float fres=pow(1.0-max(dot(n,v),0.0),3.0);
-  vec3 base=vec3(0.69,0.72,0.77);
+  vec3 base=uBaseColor;
   vec3 amb=mix(vec3(0.07,0.06,0.05),vec3(0.20,0.21,0.24),n.y*0.5+0.5);
   vec3 c=base*(amb+d1*0.62+d2*0.26+d3*0.12);
   c=mix(c,env*base*1.15,0.38);
   c+=vec3(1.0,0.97,0.9)*sp*0.55+vec3(0.8,0.9,1.0)*sp2*0.2;
-  c+=vec3(0.89,0.66,0.31)*fres*0.28;
+  c+=uRimColor*fres*0.28;
   c=pow(c,vec3(0.93));
   o=vec4(c,1.0);
 }`;
@@ -402,10 +407,12 @@ function useLazyRef<T>(init: () => T): React.MutableRefObject<T> {
 }
 
 /* ================================================================== */
-function Lathe3DViewInner({ projectId = "default", sketch, blankD, blankL, split }: Props) {
+function Lathe3DViewInner({ projectId = "default", sketch, blankD, blankL, split, themeColors = DEFAULT_THEME_COLORS }: Props) {
   const savedInit = SAVED_VIEW_STATE.get(projectId);
   const sameBlank = savedInit != null && savedInit.blankD === blankD && savedInit.blankL === blankL;
   const initRot: RotStep = savedInit?.rot ?? 0;
+  const themeRef = useRef(themeColors);
+  themeRef.current = themeColors;
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -507,8 +514,17 @@ function Lathe3DViewInner({ projectId = "default", sketch, blankD, blankL, split
     const proj = perspective(FOV, w / h, Math.max(0.05, cam.dist * 0.02), cam.dist * 12 + 1000);
     const vp = mul(proj, view.m);
 
+    const tc = themeRef.current;
+    const [bgR, bgG, bgB] = hexToRgb01(tc.view3dBg);
+    const [partR, partG, partB] = hexToRgb01(tc.view3dPart);
+    const [rimR, rimG, rimB] = hexToRgb01(tc.view3dRim);
+    const [wireR, wireG, wireB] = hexToRgb01(tc.view3dWire);
+    const [axisR, axisG, axisB] = hexToRgb01(tc.view3dAxis);
+    const [stockR, stockG, stockB] = hexToRgb01(tc.view3dStock);
+    const [gridR, gridG, gridB] = hexToRgb01(tc.view3dGrid);
+
     gl.viewport(0, 0, w, h);
-    gl.clearColor(0.078, 0.063, 0.043, 1);
+    gl.clearColor(bgR, bgG, bgB, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
@@ -518,6 +534,8 @@ function Lathe3DViewInner({ projectId = "default", sketch, blankD, blankL, split
     gl.uniform3f(u.uEye, eye[0], eye[1], eye[2]);
     gl.uniform1f(u.uCut, o.cut ? 1 : 0);
     gl.uniform2f(u.uCutCS, Math.cos(cutAlpha), Math.sin(cutAlpha));
+    gl.uniform3f(u.uBaseColor, partR, partG, partB);
+    gl.uniform3f(u.uRimColor, rimR, rimG, rimB);
 
     /* قطعه */
     gl.uniform1i(u.uMode, 0);
@@ -531,7 +549,7 @@ function Lathe3DViewInner({ projectId = "default", sketch, blankD, blankL, split
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.uniform1i(u.uMode, 1);
     if (o.wire && st.wireCount) {
-      gl.uniform4f(u.uColor, 0.95, 0.78, 0.42, 0.55);
+      gl.uniform4f(u.uColor, wireR, wireG, wireB, 0.55);
       gl.bindVertexArray(st.wireVao);
       gl.drawElements(gl.LINES, st.wireCount, gl.UNSIGNED_INT, 0);
     }
@@ -539,16 +557,16 @@ function Lathe3DViewInner({ projectId = "default", sketch, blankD, blankL, split
     const sc = sceneRef.current;
     gl.bindVertexArray(st.sceneVao);
     if (o.axis) {
-      gl.uniform4f(u.uColor, 0.89, 0.66, 0.31, 0.75);
+      gl.uniform4f(u.uColor, axisR, axisG, axisB, 0.78);
       gl.drawArrays(gl.LINES, sc.axis[0], sc.axis[1]);
     }
     if (o.stock) {
-      gl.uniform4f(u.uColor, 0.27, 0.70, 0.58, 0.42);
+      gl.uniform4f(u.uColor, stockR, stockG, stockB, 0.45);
       gl.drawArrays(gl.LINES, sc.stock[0], sc.stock[1]);
     }
     if (o.grid) {
       gl.uniformMatrix4fv(u.uModel, false, gridModel);
-      gl.uniform4f(u.uColor, 0.55, 0.47, 0.34, 0.22);
+      gl.uniform4f(u.uColor, gridR, gridG, gridB, 0.28);
       gl.drawArrays(gl.LINES, sc.grid[0], sc.grid[1]);
     }
     gl.disable(gl.BLEND);
@@ -585,7 +603,9 @@ function Lathe3DViewInner({ projectId = "default", sketch, blankD, blankL, split
         gl.linkProgram(prog);
         if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || "link error");
         const u: Record<string, WebGLUniformLocation | null> = {};
-        for (const n of ["uVP", "uModel", "uEye", "uCut", "uCutCS", "uMode", "uColor"]) u[n] = gl.getUniformLocation(prog, n);
+        for (const n of ["uVP", "uModel", "uEye", "uCut", "uCutCS", "uMode", "uColor", "uBaseColor", "uRimColor"]) {
+          u[n] = gl.getUniformLocation(prog, n);
+        }
 
         const vbo = gl.createBuffer();
         const ibo = gl.createBuffer();
@@ -867,11 +887,34 @@ function Lathe3DViewInner({ projectId = "default", sketch, blankD, blankL, split
   };
   const toggle = (k: keyof typeof opts) => setOpts((o) => ({ ...o, [k]: !o[k] }));
 
+  /* بازرندر لحظه‌ای هنگام تغییر رنگ‌های بخش سه‌بعدی در تنظیمات تم */
+  useEffect(() => {
+    requestRender();
+  }, [
+    themeColors.view3dBg,
+    themeColors.view3dPart,
+    themeColors.view3dRim,
+    themeColors.view3dWire,
+    themeColors.view3dStock,
+    themeColors.view3dGrid,
+    themeColors.view3dAxis,
+    requestRender,
+  ]);
+
   return (
     <div
       ref={wrapRef}
       dir="rtl"
-      style={{ position: "relative", width: "100%", height: "100%", minHeight: 220, overflow: "hidden", borderRadius: 8, border: "1px solid #3b2f20", background: "#14100b" }}
+      style={{
+        position: "relative",
+        width: "100%",
+        height: "100%",
+        minHeight: 220,
+        overflow: "hidden",
+        borderRadius: 8,
+        border: "1px solid var(--color-edge)",
+        background: themeColors.view3dBg,
+      }}
     >
       <canvas ref={canvasRef} style={{ display: "block", width: "100%", height: "100%", touchAction: "none", cursor: "grab" }} />
 
@@ -912,17 +955,17 @@ function Lathe3DViewInner({ projectId = "default", sketch, blankD, blankL, split
           Ø {dims.d.toFixed(2)} × L {dims.l.toFixed(2)} mm
         </div>
       )}
-      <div style={{ ...chip, position: "absolute", bottom: 8, right: 8, color: "#6f6047" }}>
+      <div style={{ ...chip, position: "absolute", bottom: 8, right: 8, color: "var(--color-dim)" }}>
         چپ: چرخش • راست: جابه‌جایی • چرخ: زوم • دابل‌کلیک: بازنشانی
       </div>
 
       {!error && !dims && (
-        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "#a8946f", fontSize: 12.5, pointerEvents: "none" }}>
+        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "var(--color-mute)", fontSize: 12.5, pointerEvents: "none" }}>
           پروفایلی برای نمایش سه‌بعدی وجود ندارد — در پنجرهٔ طراحی پروفایل رسم کنید.
         </div>
       )}
       {error && (
-        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", padding: 16, textAlign: "center", color: "#d95848", fontSize: 12.5, background: "#14100b" }}>
+        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", padding: 16, textAlign: "center", color: "var(--color-danger)", fontSize: 12.5, background: themeColors.view3dBg }}>
           {error}
         </div>
       )}
@@ -937,15 +980,15 @@ export default Lathe3DView;
 const chip: CSSProperties = {
   padding: "3px 8px",
   borderRadius: 6,
-  background: "rgba(29,23,16,.78)",
-  border: "1px solid #3b2f20",
+  background: "rgba(var(--rgb-panel), .82)",
+  border: "1px solid var(--color-edge)",
   fontSize: 10.5,
-  color: "#a8946f",
+  color: "var(--color-mute)",
   pointerEvents: "none",
 };
 function Group({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", gap: 2, padding: 2, borderRadius: 8, background: "rgba(29,23,16,.82)", border: "1px solid #3b2f20", pointerEvents: "auto", backdropFilter: "blur(4px)" }}>
+    <div style={{ display: "flex", gap: 2, padding: 2, borderRadius: 8, background: "rgba(var(--rgb-panel), .85)", border: "1px solid var(--color-edge)", pointerEvents: "auto", backdropFilter: "blur(4px)" }}>
       {children}
     </div>
   );
@@ -964,8 +1007,8 @@ function Btn({ children, onClick, title, on }: { children: React.ReactNode; onCl
         fontSize: 11,
         fontWeight: 700,
         fontFamily: "inherit",
-        background: on ? "#e3a94e" : "transparent",
-        color: on ? "#241a0c" : "#a8946f",
+        background: on ? "var(--color-brass)" : "transparent",
+        color: on ? "var(--color-brass-ink)" : "var(--color-mute)",
       }}
     >
       {children}

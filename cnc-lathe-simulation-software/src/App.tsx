@@ -16,6 +16,7 @@ import { MIN_HOLDER2_OFFSET, PRESETS, STRATEGIES, applyGcodeOvr, deriveGcodeOvr,
 import type { EditBuf, ELine, GcodeOvrMap, GenResult, Holder2State, OpType, Params, PPoint, Preset, SplitState } from "./lib/lathe";
 import type { SketchSeg } from "./lib/sketch";
 import { autoSplitPoint, branchPathPoints, branchPoints, chainPolyline, flattenSketch, normalizeSketch, orderChain, segMid, sketchFromPoints, sketchFromWall, splitChainAt } from "./lib/sketch";
+import { applyThemeToDocument, getThemeBaseColors, normalizeHexColor, sanitizeThemeColors, shadeHex, type CustomThemePreset } from "./lib/theme";
 import { cn } from "./utils/cn";
 
 const STORE_KEY = "kharraatcode-v1";
@@ -256,13 +257,41 @@ export default function App() {
   const [saveAsName,setSaveAsName]=useState<string|null>(null);
   const saveAsResolver=useRef<((name:string|null)=>void)|null>(null);
   const [preferences, setPreferences] = useState<AppPreferences>(() => {
-    const saved = SAVED?.preferences;
+    const saved = SAVED?.preferences as (Partial<AppPreferences> & Record<string, unknown>) | undefined;
+    const savedCustomThemes: CustomThemePreset[] = Array.isArray(saved?.customThemes)
+      ? saved.customThemes
+          .filter((item): item is CustomThemePreset => Boolean(item && typeof item === "object" && typeof item.id === "string" && typeof item.name === "string"))
+          .map((item) => ({
+            id: item.id,
+            name: item.name,
+            colors: sanitizeThemeColors(item.colors),
+          }))
+      : [];
+    const savedThemeId = typeof saved?.theme === "string" && saved.theme.trim() ? saved.theme.trim() : DEFAULT_PREFERENCES.theme;
+    const baseThemeColors = getThemeBaseColors(savedThemeId, savedCustomThemes);
+    const resolvedThemeColors =
+      saved?.themeColors && typeof saved.themeColors === "object"
+        ? sanitizeThemeColors(saved.themeColors, baseThemeColors)
+        : sanitizeThemeColors(
+            {
+              profileOuter: normalizeHexColor(typeof saved?.profileColor === "string" ? saved.profileColor : "") ?? baseThemeColors.profileOuter,
+              profileSelected: normalizeHexColor(typeof saved?.selectedColor === "string" ? saved.selectedColor : "") ?? baseThemeColors.profileSelected,
+              pathEditSelected: normalizeHexColor(typeof saved?.guideColor === "string" ? saved.guideColor : "") ?? baseThemeColors.pathEditSelected,
+            },
+            baseThemeColors
+          );
     /* تنظیمات خروجی پیش‌تر در Params بودند. فقط پس از اولین ذخیره نسخه جدید،
        مقادیر Preferences معتبرند؛ وگرنه دقیقاً با پیش‌فرض‌های تصویر آغاز شوند. */
     const hasNewGcodePreferences = saved?.gcodeFormat === "modal" || saved?.gcodeFormat === "std";
     return {
       ...DEFAULT_PREFERENCES,
       ...(saved ?? {}),
+      theme: savedThemeId,
+      customThemes: savedCustomThemes,
+      themeColors: resolvedThemeColors,
+      profileColor: resolvedThemeColors.profileOuter,
+      selectedColor: resolvedThemeColors.profileSelected,
+      guideColor: resolvedThemeColors.pathEditSelected,
       ...(!hasNewGcodePreferences ? {
         gcodeFormat: "modal" as const,
         continuousPaths: true,
@@ -707,10 +736,7 @@ export default function App() {
 
   useEffect(() => {
     const root = document.documentElement;
-    root.dataset.theme = preferences.theme;
-    root.style.setProperty("--profile-line-color", preferences.profileColor);
-    root.style.setProperty("--selected-line-color", preferences.selectedColor);
-    root.style.setProperty("--guide-line-color", preferences.guideColor);
+    applyThemeToDocument(preferences.themeColors, preferences.theme);
     root.style.setProperty("--profile-line-width", String(preferences.lineWidth));
     root.style.setProperty("--profile-toolbar-scale", String(preferences.toolbarScale));
   }, [preferences]);
@@ -1696,13 +1722,14 @@ export default function App() {
       }}
     >
       <input ref={projectInputRef} type="file" accept=".kharraat,application/json" className="hidden" onChange={e=>{const file=e.target.files?.[0];if(file)void openProjectFile(file);e.currentTarget.value="";}} />
-      {showAiImport && <AIImportDialog onClose={() => setShowAiImport(false)} onImport={importAi} />}
+      {showAiImport && <AIImportDialog onClose={() => setShowAiImport(false)} onImport={importAi} themeColors={preferences.themeColors} />}
       {showPreferences && <PreferencesDialog value={preferences} snapTolerance={settings.snapTolerancePx} onChange={onPreferencesChange} onSnapTolerance={(snapTolerancePx) => setSettings((s) => ({ ...s, snapTolerancePx }))} onClose={() => setShowPreferences(false)} />}
-      {(welcomeOpen||projectTabs.length===0)&&<div className="fixed inset-0 z-[100] grid place-items-center overflow-hidden bg-[#0b0a08] p-8" dir="rtl"><div className="pointer-events-none absolute inset-0 opacity-80" style={{backgroundImage:"radial-gradient(circle at 18% 20%, rgba(227,169,78,.18), transparent 28%), radial-gradient(circle at 82% 78%, rgba(69,179,148,.13), transparent 30%), linear-gradient(rgba(227,169,78,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(227,169,78,.045) 1px, transparent 1px)",backgroundSize:"100% 100%, 100% 100%, 42px 42px, 42px 42px"}}/><div className="pointer-events-none absolute left-1/2 top-1/2 h-[min(72vw,760px)] w-[min(72vw,760px)] -translate-x-1/2 -translate-y-1/2 rounded-full border border-brass/10 shadow-[0_0_0_34px_rgba(227,169,78,.025),0_0_0_70px_rgba(69,179,148,.025),0_0_100px_rgba(0,0,0,.8)]"/><div className="pointer-events-none absolute inset-0 opacity-20" style={{backgroundImage:"repeating-conic-gradient(from 12deg at 50% 50%, rgba(227,169,78,.08) 0deg, transparent 8deg, rgba(69,179,148,.05) 16deg, transparent 26deg)"}}/><div className="relative z-10 w-full max-w-5xl"><h1 className="text-2xl font-bold text-brass2">خراط‌کد</h1><p className="mt-1 text-sm text-dim">مدیریت پروژه‌ها</p><div className="mt-8 grid gap-5 md:grid-cols-3"><section className="rounded-xl border border-edge2 bg-panel p-5"><div className="flex items-center justify-between gap-2"><h2 className="font-bold text-ink">پروژه‌های اخیر</h2>{recentProjects.length>0&&<button className="rounded-md bg-teal/15 px-2.5 py-1.5 text-[10px] font-bold text-teal hover:bg-teal/25" onClick={()=>activateRecentTabs(recentProjects)}>باز کردن همه پروژه‌ها</button>}</div>{recentProjects.length?<><div className="mt-3 grid max-h-64 grid-cols-2 gap-2 overflow-y-auto pl-1">{recentProjects.map(p=><button key={p.id} className={`rounded-md border px-3 py-2 text-right transition-colors ${p.savedSnapshot!==projectSnapshot(p.sketch,p.params,p.gcodeOvr,p.referenceImages)?"border-orange-400/80 bg-orange-500/15 hover:bg-orange-500/25":"border-edge bg-panel2 hover:border-brass/60 hover:bg-brass/10"}`} onClick={()=>{const found=recentProjects.find(x=>x.id===p.id);if(found)activateRecentTabs([found],found.id);}}><span className="block truncate text-[11px] font-bold text-ink">{p.name}</span><small className="mt-1 block font-mono text-[8px] text-dim">D{p.params.blankD} × L{p.params.blankL} mm</small></button>)}</div><button className="mt-2 w-full rounded-md border border-edge bg-panel2 px-3 py-2 text-xs font-bold text-mute hover:border-danger/60 hover:text-danger" onClick={clearRecentProjects}>تمیز کردن لیست</button></>:<p className="mt-3 text-xs leading-6 text-dim">پروژه اخیری وجود ندارد.</p>}<button className="mt-3 w-full rounded-md border border-edge px-3 py-2 text-xs text-mute" onClick={()=>{setWelcomeOpen(false);projectInputRef.current?.click()}}>باز کردن فایل پروژه</button></section><section className="rounded-xl border border-brass/60 bg-brass/10 p-5"><h2 className="font-bold text-brass2">ایجاد پروژه جدید</h2><p className="mt-3 text-xs leading-6 text-mute">یک پروژه خالی برای طراحی پروفایل بسازید.</p><button className="mt-5 w-full rounded-md bg-brass px-3 py-2 text-xs font-bold text-[#241a0c]" onClick={openNewProject}>طراحی پروفایل جدید</button></section><section className="rounded-xl border border-edge2 bg-panel p-5"><h2 className="font-bold text-ink">پیش‌تنظیم‌های طراحی</h2><div className="mt-3 grid max-h-64 grid-cols-2 gap-2 overflow-y-auto">{PRESETS.map(p=><button key={p.id} className="rounded-md border border-edge bg-panel2 px-3 py-2 text-right transition-colors hover:border-brass/60 hover:bg-brass/10" onClick={()=>applyPreset(p)}><span className="block text-[11px] font-bold text-ink">{p.name}</span><small className="mt-1 block font-mono text-[8px] text-dim">D{p.blankD} × L{p.blankL} mm</small></button>)}</div></section></div></div></div>}{confirmClearRecent&&<div className="fixed inset-0 z-[160] grid place-items-center bg-black/55 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-orange-400/60 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-orange-300">پروژه ذخیره‌نشده</h3><p className="mt-3 text-[12px] leading-6 text-mute">یک یا چند پروژه با هایلایت نارنجی ذخیره نشده‌اند. آیا می‌خواهید کل فهرست پروژه‌های اخیر پاک شود؟</p><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={()=>setConfirmClearRecent(false)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">انصراف</button><button type="button" onClick={()=>{setConfirmClearRecent(false);setRecentProjects([]);try{localStorage.removeItem("kharraat-recent-projects");}catch{}}} className="rounded-md bg-danger px-4 py-1.5 text-xs font-bold text-white">پاک کردن فهرست</button></div></div></div>}{newProjectDraft&&<div className="fixed inset-0 z-[140] grid place-items-center bg-black/50 p-4" dir="rtl"><form onSubmit={e=>{e.preventDefault();createNewProject();}} className="w-full max-w-md overflow-hidden rounded-xl border border-edge2 bg-panel shadow-2xl"><div className="border-b border-edge bg-panel2 px-5 py-4"><h3 className="text-sm font-bold text-brass2">ایجاد پروژه جدید</h3><label className="mt-3 block text-[10.5px] text-mute">نام پروژه<input autoFocus value={newProjectDraft.name} onChange={e=>setNewProjectDraft({...newProjectDraft,name:e.target.value})} onFocus={e=>e.currentTarget.select()} className="field-input mt-1.5 w-full"/></label></div><div className="p-5"><div className="grid grid-cols-2 gap-3"><label className="text-[10.5px] text-mute">قطر قطعه (mm)<input type="number" min="0.01" max="10000" step="0.01" value={newProjectDraft.diameter} onChange={e=>setNewProjectDraft({...newProjectDraft,diameter:e.target.value})} className="field-input mt-1.5 w-full"/></label><label className="text-[10.5px] text-mute">طول قطعه (mm)<input type="number" min="0.01" max="10000" step="0.01" value={newProjectDraft.length} onChange={e=>setNewProjectDraft({...newProjectDraft,length:e.target.value})} className="field-input mt-1.5 w-full"/></label></div><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={()=>setNewProjectDraft(null)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute hover:text-ink">لغو</button><button type="submit" className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[#241a0c]">ایجاد پروژه</button></div></div></form></div>}
-      {saveAsName!==null&&<div className="fixed inset-0 z-[130] grid place-items-center bg-black/45 p-4" dir="rtl"><form onSubmit={e=>{e.preventDefault();const value=saveAsName;setSaveAsName(null);saveAsResolver.current?.(value);saveAsResolver.current=null;}} className="w-full max-w-sm rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">ذخیره پروژه با نام</h3><label className="mt-4 block text-[11px] text-mute">نام پروژه<input autoFocus value={saveAsName} onChange={e=>setSaveAsName(e.target.value)} onFocus={e=>e.currentTarget.select()} className="field-input mt-2 w-full"/></label><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={()=>{setSaveAsName(null);saveAsResolver.current?.(null);saveAsResolver.current=null;}} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button type="submit" className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[#241a0c]">ذخیره</button></div></form></div>}
-      {pendingEditExit && <div className="fixed inset-0 z-[120] grid place-items-center bg-black/45 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">تغییرات تأییدنشده ویرایش مسیر</h3><p className="mt-3 text-[12px] leading-6 text-mute">تغییراتی در مسیر انجام شده که هنوز تأیید نشده‌اند. آیا می‌خواهید تغییرات را تأیید و سپس از حالت ویرایش مسیر خارج شوید؟</p><div className="mt-5 flex justify-center gap-2"><button onClick={()=>setPendingEditExit(false)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button onClick={()=>{setPendingEditExit(false);discardEdit();}} className="rounded-md border border-danger/50 bg-danger/10 px-4 py-1.5 text-xs font-bold text-danger">خیر</button><button onClick={()=>{confirmEdit();setEditBuf(null);setEditOpen(false);setPendingEditExit(false);}} className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[#241a0c]">بله</button></div></div></div>}
-      {pendingCloseProject && <div className="fixed inset-0 z-[120] grid place-items-center bg-black/45 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">تغییرات ذخیره‌نشده</h3><p className="mt-3 text-[12px] leading-6 text-mute">تغییرات پروژه «{projectTabs.find(t=>t.id===pendingCloseProject)?.name}» ذخیره نشده است. آیا می‌خواهید پیش از بستن پروژه آن را ذخیره کنید؟</p><div className="mt-5 flex justify-center gap-2"><button onClick={()=>setPendingCloseProject(null)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button onClick={()=>finishCloseProject(pendingCloseProject)} className="rounded-md border border-danger/50 bg-danger/10 px-4 py-1.5 text-xs font-bold text-danger">خیر</button><button onClick={()=>{const id=pendingCloseProject;setSaveThenCloseProject(id);if(id!==activeProjectId)switchProject(id);}} className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[#241a0c]">بله</button></div></div></div>}
+      {(welcomeOpen||projectTabs.length===0)&&<div className="fixed inset-0 z-[95] grid place-items-center overflow-hidden bg-bg p-8" dir="rtl"><div className="pointer-events-none absolute inset-0 opacity-80" style={{backgroundImage:"radial-gradient(circle at 18% 20%, rgba(var(--rgb-brass), .18), transparent 28%), radial-gradient(circle at 82% 78%, rgba(var(--rgb-teal), .13), transparent 30%), linear-gradient(rgba(var(--rgb-brass), .045) 1px, transparent 1px), linear-gradient(90deg, rgba(var(--rgb-brass), .045) 1px, transparent 1px)",backgroundSize:"100% 100%, 100% 100%, 42px 42px, 42px 42px"}}/><div className="pointer-events-none absolute left-1/2 top-1/2 h-[min(72vw,760px)] w-[min(72vw,760px)] -translate-x-1/2 -translate-y-1/2 rounded-full border border-brass/10 shadow-[0_0_0_34px_rgba(var(--rgb-brass),.025),0_0_0_70px_rgba(var(--rgb-teal),.025),0_0_100px_rgba(0,0,0,.8)]"/><div className="pointer-events-none absolute inset-0 opacity-20" style={{backgroundImage:"repeating-conic-gradient(from 12deg at 50% 50%, rgba(var(--rgb-brass), .08) 0deg, transparent 8deg, rgba(var(--rgb-teal), .05) 16deg, transparent 26deg)"}}/><div className="relative z-10 w-full max-w-5xl"><h1 className="text-2xl font-bold text-brass2">خراط‌کد</h1><p className="mt-1 text-sm text-dim">مدیریت پروژه‌ها</p><div className="mt-8 grid gap-5 md:grid-cols-3"><section className="rounded-xl border border-edge2 bg-panel p-5"><div className="flex items-center justify-between gap-2"><h2 className="font-bold text-ink">پروژه‌های اخیر</h2>{recentProjects.length>0&&<button className="rounded-md bg-teal/15 px-2.5 py-1.5 text-[10px] font-bold text-teal hover:bg-teal/25" onClick={()=>activateRecentTabs(recentProjects)}>باز کردن همه پروژه‌ها</button>}</div>{recentProjects.length?<><div className="mt-3 grid max-h-64 grid-cols-2 gap-2 overflow-y-auto pl-1">{recentProjects.map(p=><button key={p.id} className={`rounded-md border px-3 py-2 text-right transition-colors ${p.savedSnapshot!==projectSnapshot(p.sketch,p.params,p.gcodeOvr,p.referenceImages)?"border-orange-400/80 bg-orange-500/15 hover:bg-orange-500/25":"border-edge bg-panel2 hover:border-brass/60 hover:bg-brass/10"}`} onClick={()=>{const found=recentProjects.find(x=>x.id===p.id);if(found)activateRecentTabs([found],found.id);}}><span className="block truncate text-[11px] font-bold text-ink">{p.name}</span><small className="mt-1 block font-mono text-[8px] text-dim">D{p.params.blankD} × L{p.params.blankL} mm</small></button>)}</div><button className="mt-2 w-full rounded-md border border-edge bg-panel2 px-3 py-2 text-xs font-bold text-mute hover:border-danger/60 hover:text-danger" onClick={clearRecentProjects}>تمیز کردن لیست</button></>:<p className="mt-3 text-xs leading-6 text-dim">پروژه اخیری وجود ندارد.</p>}<button className="mt-3 w-full rounded-md border border-edge px-3 py-2 text-xs text-mute" onClick={()=>{setWelcomeOpen(false);projectInputRef.current?.click()}}>باز کردن فایل پروژه</button></section><section className="rounded-xl border border-brass/60 bg-brass/10 p-5"><h2 className="font-bold text-brass2">ایجاد پروژه جدید</h2><p className="mt-3 text-xs leading-6 text-mute">یک پروژه خالی برای طراحی پروفایل بسازید.</p><button className="mt-5 w-full rounded-md bg-brass px-3 py-2 text-xs font-bold text-[var(--color-brass-ink)]" onClick={openNewProject}>طراحی پروفایل جدید</button></section><section className="rounded-xl border border-edge2 bg-panel p-5"><h2 className="font-bold text-ink">پیش‌تنظیم‌های طراحی</h2><div className="mt-3 grid max-h-64 grid-cols-2 gap-2 overflow-y-auto">{PRESETS.map(p=><button key={p.id} className="rounded-md border border-edge bg-panel2 px-3 py-2 text-right transition-colors hover:border-brass/60 hover:bg-brass/10" onClick={()=>applyPreset(p)}><span className="block text-[11px] font-bold text-ink">{p.name}</span><small className="mt-1 block font-mono text-[8px] text-dim">D{p.blankD} × L{p.blankL} mm</small></button>)}</div></section></div></div></div>}{confirmClearRecent&&<div className="fixed inset-0 z-[160] grid place-items-center bg-black/55 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-orange-400/60 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-orange-300">پروژه ذخیره‌نشده</h3><p className="mt-3 text-[12px] leading-6 text-mute">یک یا چند پروژه با هایلایت نارنجی ذخیره نشده‌اند. آیا می‌خواهید کل فهرست پروژه‌های اخیر پاک شود؟</p><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={()=>setConfirmClearRecent(false)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">انصراف</button><button type="button" onClick={()=>{setConfirmClearRecent(false);setRecentProjects([]);try{localStorage.removeItem("kharraat-recent-projects");}catch{}}} className="rounded-md bg-danger px-4 py-1.5 text-xs font-bold text-white">پاک کردن فهرست</button></div></div></div>}{newProjectDraft&&<div className="fixed inset-0 z-[140] grid place-items-center bg-black/50 p-4" dir="rtl"><form onSubmit={e=>{e.preventDefault();createNewProject();}} className="w-full max-w-md overflow-hidden rounded-xl border border-edge2 bg-panel shadow-2xl"><div className="border-b border-edge bg-panel2 px-5 py-4"><h3 className="text-sm font-bold text-brass2">ایجاد پروژه جدید</h3><label className="mt-3 block text-[10.5px] text-mute">نام پروژه<input autoFocus value={newProjectDraft.name} onChange={e=>setNewProjectDraft({...newProjectDraft,name:e.target.value})} onFocus={e=>e.currentTarget.select()} className="field-input mt-1.5 w-full"/></label></div><div className="p-5"><div className="grid grid-cols-2 gap-3"><label className="text-[10.5px] text-mute">قطر قطعه (mm)<input type="number" min="0.01" max="10000" step="0.01" value={newProjectDraft.diameter} onChange={e=>setNewProjectDraft({...newProjectDraft,diameter:e.target.value})} className="field-input mt-1.5 w-full"/></label><label className="text-[10.5px] text-mute">طول قطعه (mm)<input type="number" min="0.01" max="10000" step="0.01" value={newProjectDraft.length} onChange={e=>setNewProjectDraft({...newProjectDraft,length:e.target.value})} className="field-input mt-1.5 w-full"/></label></div><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={()=>setNewProjectDraft(null)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute hover:text-ink">لغو</button><button type="submit" className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[var(--color-brass-ink)]">ایجاد پروژه</button></div></div></form></div>}
+      {saveAsName!==null&&<div className="fixed inset-0 z-[130] grid place-items-center bg-black/45 p-4" dir="rtl"><form onSubmit={e=>{e.preventDefault();const value=saveAsName;setSaveAsName(null);saveAsResolver.current?.(value);saveAsResolver.current=null;}} className="w-full max-w-sm rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">ذخیره پروژه با نام</h3><label className="mt-4 block text-[11px] text-mute">نام پروژه<input autoFocus value={saveAsName} onChange={e=>setSaveAsName(e.target.value)} onFocus={e=>e.currentTarget.select()} className="field-input mt-2 w-full"/></label><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={()=>{setSaveAsName(null);saveAsResolver.current?.(null);saveAsResolver.current=null;}} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button type="submit" className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[var(--color-brass-ink)]">ذخیره</button></div></form></div>}
+      {pendingEditExit && <div className="fixed inset-0 z-[120] grid place-items-center bg-black/45 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">تغییرات تأییدنشده ویرایش مسیر</h3><p className="mt-3 text-[12px] leading-6 text-mute">تغییراتی در مسیر انجام شده که هنوز تأیید نشده‌اند. آیا می‌خواهید تغییرات را تأیید و سپس از حالت ویرایش مسیر خارج شوید؟</p><div className="mt-5 flex justify-center gap-2"><button onClick={()=>setPendingEditExit(false)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button onClick={()=>{setPendingEditExit(false);discardEdit();}} className="rounded-md border border-danger/50 bg-danger/10 px-4 py-1.5 text-xs font-bold text-danger">خیر</button><button onClick={()=>{confirmEdit();setEditBuf(null);setEditOpen(false);setPendingEditExit(false);}} className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[var(--color-brass-ink)]">بله</button></div></div></div>}
+      {pendingCloseProject && <div className="fixed inset-0 z-[120] grid place-items-center bg-black/45 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">تغییرات ذخیره‌نشده</h3><p className="mt-3 text-[12px] leading-6 text-mute">تغییرات پروژه «{projectTabs.find(t=>t.id===pendingCloseProject)?.name}» ذخیره نشده است. آیا می‌خواهید پیش از بستن پروژه آن را ذخیره کنید؟</p><div className="mt-5 flex justify-center gap-2"><button onClick={()=>setPendingCloseProject(null)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button onClick={()=>finishCloseProject(pendingCloseProject)} className="rounded-md border border-danger/50 bg-danger/10 px-4 py-1.5 text-xs font-bold text-danger">خیر</button><button onClick={()=>{const id=pendingCloseProject;setSaveThenCloseProject(id);if(id!==activeProjectId)switchProject(id);}} className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[var(--color-brass-ink)]">بله</button></div></div></div>}
       <DesktopMenuBar
+        headerBg={preferences.themeColors.uiHeaderBg}
         projects={projectTabs.map(tab=>({id:tab.id,name:tab.name,dirty:tab.savedSnapshot!==projectSnapshot(tab.sketch,tab.params,tab.gcodeOvr,tab.referenceImages)}))}
         activeProjectId={activeProjectId}
         onSwitchProject={switchProject}
@@ -1723,12 +1750,12 @@ export default function App() {
         canRedo={future.current.length > 0||imageHistoryState.canRedo}
       />
       {/* ---------- سربرگ ---------- */}
-      <header className="relative z-40 flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-edge bg-panel px-3.5 py-2 pl-14">
+      <header className="relative z-40 flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-edge bg-[var(--color-header-bg)] px-3.5 py-2 pl-14">
         <button onClick={() => setShowPreferences(true)} title="Preferences" aria-label="Preferences" className="absolute top-2.5 left-3 grid h-8 w-8 place-items-center rounded-lg border border-edge bg-panel2 text-mute shadow-lg transition-colors hover:border-brass/50 hover:text-brass2">
           <IconSettings className="h-4.5 w-4.5" />
         </button>
         <div className="flex items-center gap-2.5">
-          <span className="grid h-9 w-9 place-items-center rounded-lg border border-brass/40 bg-gradient-to-b from-panel3 to-panel text-brass shadow-[0_0_18px_rgba(227,169,78,0.18)]">
+          <span className="grid h-9 w-9 place-items-center rounded-lg border border-brass/40 bg-gradient-to-b from-panel3 to-panel text-brass shadow-[0_0_18px_rgba(var(--rgb-brass),0.18)]">
             <IconSpindle className="h-5 w-5" />
           </span>
           <div className="leading-none">
@@ -1814,6 +1841,7 @@ export default function App() {
                   isolatedOpId={isolatedOpId}
                   onIsolate={setIsolatedOpId}
                   onNotify={showToast}
+                  themeColors={preferences.themeColors}
                 />
               </PanelErrorBoundary>
             )}
@@ -1845,6 +1873,7 @@ export default function App() {
                   blankD={params.blankD}
                   blankL={params.blankL}
                   split={params.split.enabled}
+                  themeColors={preferences.themeColors}
                 />
               </PanelErrorBoundary>
             )}
@@ -1891,9 +1920,7 @@ export default function App() {
                   profileLineWidth={preferences.lineWidth}
                   pointScale={preferences.pointScale}
                   disableSelectionGlow={preferences.disableSelectionGlow}
-                  profileColor={preferences.profileColor}
-                  selectedColor={preferences.selectedColor}
-                  guideLineColor={preferences.guideColor}
+                  themeColors={preferences.themeColors}
                   selected={selectedIds}
                   onSelected={setSelectedIds}
                   params={generationParams}
@@ -1913,7 +1940,7 @@ export default function App() {
                   canRedo={future.current.length > 0}
                 />
               ) : (
-                <SimulationView gen={gen} params={generationParams} onActiveLine={setActiveLine} />
+                <SimulationView gen={gen} params={generationParams} onActiveLine={setActiveLine} themeColors={preferences.themeColors} />
               )}
             </PanelErrorBoundary>
           </DockPanel>
@@ -2005,8 +2032,8 @@ export default function App() {
   );
 }
 
-function DesktopMenuBar({ projects, activeProjectId, onSwitchProject, onCloseProject, onCloseAllProjects, onNewProject, onOpenProject, onSaveProject, onSaveProjectAs, onImportAi, onImportImage, onExportGcode, onExportDxf, onPreferences, onUndo, onRedo, canUndo, canRedo }: {
-  projects: {id:string;name:string;dirty:boolean}[]; activeProjectId:string; onSwitchProject:(id:string)=>void; onCloseProject:(id:string)=>void; onCloseAllProjects:()=>void;
+function DesktopMenuBar({ headerBg, projects, activeProjectId, onSwitchProject, onCloseProject, onCloseAllProjects, onNewProject, onOpenProject, onSaveProject, onSaveProjectAs, onImportAi, onImportImage, onExportGcode, onExportDxf, onPreferences, onUndo, onRedo, canUndo, canRedo }: {
+  headerBg: string; projects: {id:string;name:string;dirty:boolean}[]; activeProjectId:string; onSwitchProject:(id:string)=>void; onCloseProject:(id:string)=>void; onCloseAllProjects:()=>void;
   onNewProject:()=>void; onOpenProject: () => void; onSaveProject: () => void; onSaveProjectAs: () => void;
   onImportAi: () => void; onImportImage: () => void; onExportGcode: () => void; onExportDxf: () => void; onPreferences: () => void;
   onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean;
@@ -2021,7 +2048,7 @@ function DesktopMenuBar({ projects, activeProjectId, onSwitchProject, onClosePro
     return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", key); };
   }, [open]);
   const run = (fn:()=>void) => { setOpen(null); fn(); };
-  return <div ref={ref} dir="ltr" onPointerDown={(e)=>{if(e.target===e.currentTarget)setOpen(null);}} className="relative z-[60] flex h-7 shrink-0 items-center border-b border-edge bg-[#0e0c09] px-2 text-[11px] text-mute shadow-sm">
+  return <div ref={ref} dir="ltr" onPointerDown={(e)=>{if(e.target===e.currentTarget)setOpen(null);}} className="relative z-[60] flex h-7 shrink-0 items-center border-b border-edge px-2 text-[11px] text-mute shadow-sm" style={{ backgroundColor: shadeHex(headerBg, -0.04) }}>
     <MenuTop label="File" active={open==="file"} onClick={()=>setOpen(open==="file"?null:"file")} />
     <MenuTop label="Edit" active={open==="edit"} onClick={()=>setOpen(open==="edit"?null:"edit")} />
     <div className="ml-2 flex h-full min-w-0 flex-1 items-end gap-0.5 overflow-x-auto [scrollbar-width:none]" dir="ltr">
@@ -2059,7 +2086,7 @@ function TabBtn({ on, onClick, icon, label }: { on: boolean; onClick: () => void
       onClick={onClick}
       className={cn(
         "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12.5px] font-bold transition-all",
-        on ? "bg-brass text-[#241a0c] shadow-[0_2px_10px_rgba(227,169,78,0.35)]" : "text-mute hover:text-ink"
+        on ? "bg-brass text-[var(--color-brass-ink)] shadow-[0_2px_10px_rgba(var(--rgb-brass),0.35)]" : "text-mute hover:text-ink"
       )}
     >
       {icon}

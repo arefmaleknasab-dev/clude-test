@@ -120,13 +120,31 @@ function downgradeCssForWin10Edge(rawCss: string): string {
   // ۲. باز کردن تمام @layer ها با حفظ ترتیب properties -> theme -> base -> components -> utilities
   css = unwrapCascadeLayers(css);
 
-  // ۳. فعال‌سازی بدون‌شرط متغیرهای اولیه --tw-* برای نسخه‌های قدیمی‌تر Chromium (۷۹ تا ۸۴) که @property ندارند
+  // ۳. فعال‌سازی بدون‌شرط متغیرهای اولیه --tw-* و بازنویسی color-mix متغیرهای تم برای Chromium 79+
+  const RGB_THEME_TOKENS = new Set([
+    "bg", "panel", "panel2", "panel3", "edge", "edge2",
+    "ink", "mute", "dim", "brass", "brass2", "copper",
+    "teal", "steel", "ok", "danger",
+  ]);
+  css = css.replace(
+    /color-mix\(\s*in\s+[a-z-]+\s*,\s*var\(--color-([a-z0-9-]+)\)\s*([0-9.]+)%\s*,\s*transparent\s*\)/gi,
+    (full, token: string, pctStr: string) => {
+      const key = token.toLowerCase();
+      if (!RGB_THEME_TOKENS.has(key)) return full;
+      const alpha = Math.max(0, Math.min(1, Number(pctStr) / 100));
+      return `rgba(var(--rgb-${key}), ${Number(alpha.toFixed(4))})`;
+    }
+  );
+
   let supIdx = 0;
   while ((supIdx = css.indexOf("@supports", supIdx)) !== -1) {
     const openBrace = css.indexOf("{", supIdx);
     if (openBrace === -1) break;
     const header = css.slice(supIdx, openBrace);
-    if (header.includes("-webkit-hyphens") && header.includes("margin-trim")) {
+    if (
+      (header.includes("-webkit-hyphens") && header.includes("margin-trim")) ||
+      (header.includes("color-mix") && !css.slice(openBrace + 1, findMatchingBrace(css, openBrace)).includes("color-mix("))
+    ) {
       const closeBrace = findMatchingBrace(css, openBrace);
       const inner = css.slice(openBrace + 1, closeBrace);
       css = css.slice(0, supIdx) + inner + css.slice(closeBrace + 1);

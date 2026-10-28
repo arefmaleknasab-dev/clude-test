@@ -41,7 +41,7 @@ interface RowProps { ln: number; parts: { text: string; cls: string }[]; active:
 /* سطر memo: هنگام پخش شبیه‌سازی فقط ۲ سطر (قبلی/فعلی) بازرندر می‌شوند نه ~۱۶۰۰ سطر */
 const GCodeLine = memo(function GCodeLine({ ln, parts, active, top, onClick }: RowProps) {
   return (
-    <div data-ln={ln} onClick={() => onClick?.(ln)} className={cn("gc-line", onClick && "cursor-pointer", active && "border-brass bg-brass/10")} style={{ textAlign: "left", position: "absolute", top, left: 0, right: 0, height: ROW_H, overflow: "hidden" }}>
+    <div data-ln={ln} onClick={() => onClick?.(ln)} className={cn("gc-line", onClick && "cursor-pointer", active && "gc-line-active")} style={{ textAlign: "left", position: "absolute", top, left: 0, right: 0, height: ROW_H, overflow: "hidden" }}>
       <span className="mr-2 inline-block w-7 select-none text-right text-[10px] text-dim">{ln + 1}</span>
       {parts.map((t, j) => (
         <span key={j} className={t.cls}>
@@ -120,7 +120,7 @@ export default function GCodePanel({ gen, activeLine, onLineClick }: Props) {
         <Stat label="عملیات خشن" value={String(gen.roughLayers)} />
       </div>
 
-      <div ref={bodyRef} onScroll={onScroll} onCopy={onCopyFull} className="min-h-0 min-w-0 flex-1 overflow-auto" dir="ltr">
+      <div ref={bodyRef} onScroll={onScroll} onCopy={onCopyFull} className="min-h-0 min-w-0 flex-1 overflow-auto" style={{ backgroundColor: "var(--theme-gcode-bg)" }} dir="ltr">
         <div style={{ height: highlighted.length * ROW_H, position: "relative" }}>
           {highlighted.slice(start, end).map((parts, k) => (
             <GCodeLine key={start + k} ln={start + k} parts={parts} active={start + k === activeLine} top={(start + k) * ROW_H} onClick={onLineClick} />
