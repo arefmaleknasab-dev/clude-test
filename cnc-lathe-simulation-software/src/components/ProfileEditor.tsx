@@ -3300,6 +3300,25 @@ export default function ProfileEditor({
           ids = [];
           splitBase = { ...split };
         } else {
+          const hitH = hitHandle(raw);
+          if (hitH) {
+            setSelPoints([hitH]);
+            const refs = new Map<string, { segId: number; part: SketchPointPart }>();
+            const members = hitH.part === "a" || hitH.part === "b" ? clusterOf(hitH.segId, hitH.part) : [hitH];
+            for (const member of members) refs.set(`${member.segId}:${member.part}`, member);
+            for (const member of [...refs.values()]) {
+              const segment = segs.find((item) => item.id === member.segId);
+              if (member.part === "a" && segment?.c1) refs.set(`${member.segId}:c1`, { segId: member.segId, part: "c1" });
+              if (member.part === "b" && segment?.c2) refs.set(`${member.segId}:c2`, { segId: member.segId, part: "c2" });
+            }
+            const rect = wrapRef.current!.getBoundingClientRect();
+            setMoveSession({ ids: [], pointRefs: [...refs.values()], base: segs.map((segment) => ({ ...segment })), origin: raw, pointer: raw, clientX: e.clientX, clientY: e.clientY, axis: "free", mode: "relative", dirX: 1, dirY: 1, lastClientX: e.clientX, lastClientY: e.clientY });
+            setMoveBox({ x: Math.min(rect.width - 58, Math.max(4, e.clientX - rect.left + 12)), y: Math.min(rect.height - 42, Math.max(4, e.clientY - rect.top - 48)), value: "", error: "" });
+            setLastMove(null);
+            drag.current = null;
+            e.currentTarget.setPointerCapture?.(e.pointerId);
+            return;
+          }
           const hit = hitSeg(raw);
           ids = hit ? [hit.id] : [];
           if (hit) onSelected(ids);
@@ -3683,7 +3702,10 @@ export default function ProfileEditor({
       if (!movingSinglePolylineEdge&&allowed.some((id) => segLocked(id, allowed))) {
         if (e.shiftKey) onSelected(selected.includes(s.id) ? selected.filter((x) => !objectIds.includes(x)) : [...selected, ...objectIds.filter((id) => !selected.includes(id))]);
         else if (e.ctrlKey || e.metaKey) onSelected(selected.filter((x) => !objectIds.includes(x)));
-        else if (!selected.includes(s.id)) onSelected(objectIds);
+        else {
+          setSelPoints([]);
+          if (!selected.includes(s.id)) onSelected(objectIds);
+        }
         return;
       }
       /* تصمیم نهایی کلیک در pointerup گرفته می‌شود تا درگ گروهی ممکن باشد */
@@ -4858,8 +4880,9 @@ export default function ProfileEditor({
           return;
         }
         if (tool === "select") {
-          if (e.shiftKey) setSelPoints(exists ? selPoints.filter((p) => pkey(p) !== pkey(ref)) : [...selPoints, ref]);
-          else if (e.ctrlKey || e.metaKey) setSelPoints(selPoints.filter((p) => pkey(p) !== pkey(ref)));
+          const clusterKeys = new Set(d.cluster.map(pkey));
+          if (e.shiftKey) setSelPoints(exists ? selPoints.filter((p) => !clusterKeys.has(pkey(p))) : [...selPoints, ref]);
+          else if (e.ctrlKey || e.metaKey) setSelPoints(selPoints.filter((p) => !clusterKeys.has(pkey(p))));
           else {
             const locUp = toLocal(e.clientX, e.clientY);
             if (!editOpen && split.enabled && hitSplitMarker(locUp.x, locUp.y)) {
@@ -4881,7 +4904,10 @@ export default function ProfileEditor({
           return;
         }
         /* کلیک بدون درگ روی المان */
-        if (!e.shiftKey && !e.ctrlKey && !e.metaKey) setSplitSelected(false);
+        if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+          setSplitSelected(false);
+          setSelPoints([]);
+        }
         const id = d.clicked;
         const objectIds = sketchObjectIds(id);
         // اتصال هندسیِ تازه‌شده را به‌صورت پایدار در همان Polyline ثبت می‌کنیم
@@ -5283,6 +5309,7 @@ export default function ProfileEditor({
      یا حداقل یک نقطه‌اش مستقل انتخاب شده است */
   const selectedEndpointCoords=selPoints.flatMap(point=>{
     if(point.part!=="a"&&point.part!=="b")return [];
+    if(separated.has(handleKey(point.segId,point.part)))return [];
     const segment=segs.find(s=>s.id===point.segId);
     return segment?[segment[point.part]]:[];
   });
@@ -5804,19 +5831,42 @@ export default function ProfileEditor({
                 <path d={rangePreviewPath} fill="none" stroke="#fff3dc" strokeOpacity={0.82} strokeWidth={5.2} strokeLinecap="round" pointerEvents="none" />
               </>
             )}
-            {/* رأس‌های خطوط انتخابی — هر رأس یک نقطه (اشتراک‌ها هم‌مکان‌اند، دو‌تایی نمی‌شود) */}
-            {showPathPoints && [...selVids].map((vid) => {
-              const v = vz(vid);
-              const [x, y] = P(v.z, v.x / 2);
-              const on = selV.includes(vid);
-              const shared = (vertexLineCount.get(vid) ?? 0) > 1;
+            {/* رأس‌های خطوط انتخابی — ابتدا دایرهٔ پایهٔ همهٔ رأس‌ها و سپس دات داخلیِ رأس‌های فعال رسم می‌شود تا هم‌پوشانی هیچ داتی را نپوشاند */}
+            {showPathPoints && (() => {
+              const allVids = [...selVids];
+              const activeCoords = selV.map((id) => vz(id));
               return (
-                <g key={`bv${vid}`} opacity={pickerHover ? 0.1 : 1}>
-                  <circle className="pt-hover" cx={x} cy={y} r={5.5} fill={shared ? "#0f2a22" : "#120e09"} stroke="#45b394" strokeWidth={2.4} />
-                  {on && <circle cx={x} cy={y} r={2.1} fill="#45b394" pointerEvents="none" />}
-                </g>
+                <>
+                  {allVids.map((vid) => {
+                    const v = vz(vid);
+                    const [x, y] = P(v.z, v.x / 2);
+                    const shared = (vertexLineCount.get(vid) ?? 0) > 1;
+                    return (
+                      <g key={`bv${vid}`} opacity={pickerHover ? 0.1 : 1}>
+                        <circle className="pt-hover" cx={x} cy={y} r={5.5} fill={shared ? "#0f2a22" : "#120e09"} stroke="#45b394" strokeWidth={2.4} />
+                      </g>
+                    );
+                  })}
+                  {allVids.map((vid) => {
+                    const v = vz(vid);
+                    const on = selV.includes(vid) || activeCoords.some((ac) => Math.hypot(ac.z - v.z, ac.x - v.x) < 1e-7);
+                    if (!on) return null;
+                    const [x, y] = P(v.z, v.x / 2);
+                    return (
+                      <circle
+                        key={`bvd${vid}`}
+                        cx={x}
+                        cy={y}
+                        r={2.1}
+                        fill="#45b394"
+                        opacity={pickerHover ? 0.1 : 1}
+                        pointerEvents="none"
+                      />
+                    );
+                  })}
+                </>
               );
-            })}
+            })()}
           </g>
         )}
 
@@ -5876,45 +5926,65 @@ export default function ProfileEditor({
             />
           )}
 
-          {/* دسته‌ها و نقاط المان‌های انتخاب‌شده یا دارای نقطهٔ مستقلِ انتخاب‌شده */}
-          {(mirrorSession ? [] : handleSegs).map((s) => {
-            const [ax, ay] = P(s.a.z, s.a.r);
-            const [bx, by] = P(s.b.z, s.b.r);
-            const pointIsActive = (part: HandleRef["part"]) =>
+          {/* دسته‌ها و نقاط المان‌های انتخاب‌شده یا دارای نقطهٔ مستقلِ انتخاب‌شده:
+              ابتدا تمام حلقه‌های پایهٔ همهٔ المان‌ها و سپس دات داخلیِ نقاط انتخاب‌شده رسم می‌شود
+              تا در رأس‌های مشترک (مثل نقاط میانی پلی‌لاین) حلقهٔ ضلع بعدی دات داخل نقطه را نپوشاند. */}
+          {(() => {
+            const visibleHandleSegs = mirrorSession ? [] : handleSegs;
+            const pointIsActiveOn = (s: SketchSeg, part: HandleRef["part"]) =>
               selPoints.some((point) => point.segId === s.id && point.part === part) ||
               (drag.current?.mode === "handle" && drag.current.ref.segId === s.id && drag.current.ref.part === part);
-            const endpointIsActive=(part:"a"|"b")=>selectedEndpointCoords.some(point=>dist(s[part],point)<1e-8);
-            const whole=selected.includes(s.id),showA=whole||endpointIsActive("a"),showB=whole||endpointIsActive("b");
-            const showC1=whole||pointIsActive("c1")||endpointIsActive("a"),showC2=whole||pointIsActive("c2")||endpointIsActive("b");
-            const showVia=whole||pointIsActive("via");
+            const endpointIsActiveOn = (s: SketchSeg, part: "a" | "b") =>
+              pointIsActiveOn(s, part) ||
+              (!separated.has(handleKey(s.id, part)) && selectedEndpointCoords.some((point) => dist(s[part], point) < 1e-8));
             return (
-              <g key={`h${s.id}`}>
-                {s.c1 && dist(s.c1,s.a)>1e-8 && showC1 && (
-                  <>
-                    <line x1={ax} y1={ay} x2={P(s.c1.z, s.c1.r)[0]} y2={P(s.c1.z, s.c1.r)[1]} stroke="#6ab0d8" strokeWidth={1} strokeDasharray="3 3" />
-                    <circle className="pt-hover" cx={P(s.c1.z, s.c1.r)[0]} cy={P(s.c1.z, s.c1.r)[1]} r={5} fill="#1b2a33" stroke="#6ab0d8" strokeWidth={2} />
-                  </>
-                )}
-                {s.c2 && dist(s.c2,s.b)>1e-8 && showC2 && (
-                  <>
-                    <line x1={bx} y1={by} x2={P(s.c2.z, s.c2.r)[0]} y2={P(s.c2.z, s.c2.r)[1]} stroke="#6ab0d8" strokeWidth={1} strokeDasharray="3 3" />
-                    <circle className="pt-hover" cx={P(s.c2.z, s.c2.r)[0]} cy={P(s.c2.z, s.c2.r)[1]} r={5} fill="#1b2a33" stroke="#6ab0d8" strokeWidth={2} />
-                  </>
-                )}
-                {s.via && showVia && (
-                  <circle className="pt-hover" cx={P(s.via.z, s.via.r)[0]} cy={P(s.via.z, s.via.r)[1]} r={5} fill="#2b1f33" stroke="#b48ee0" strokeWidth={2} />
-                )}
-                {showA&&<circle className="pt-hover" cx={ax} cy={ay} r={5.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2.4} />}
-                {showB&&<circle className="pt-hover" cx={bx} cy={by} r={5.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2.4} />}
-                {/* نقطه فعال داخل Handle و روی همه لایه‌های پایه رسم می‌شود. */}
-                {s.c1 && pointIsActive("c1") && <circle cx={P(s.c1.z, s.c1.r)[0]} cy={P(s.c1.z, s.c1.r)[1]} r={2.1} fill="#6ab0d8" pointerEvents="none" />}
-                {s.c2 && pointIsActive("c2") && <circle cx={P(s.c2.z, s.c2.r)[0]} cy={P(s.c2.z, s.c2.r)[1]} r={2.1} fill="#6ab0d8" pointerEvents="none" />}
-                {s.via && pointIsActive("via") && <circle cx={P(s.via.z, s.via.r)[0]} cy={P(s.via.z, s.via.r)[1]} r={2.1} fill="#b48ee0" pointerEvents="none" />}
-                {pointIsActive("a") && <circle cx={ax} cy={ay} r={2.1} fill="#45b394" pointerEvents="none" />}
-                {pointIsActive("b") && <circle cx={bx} cy={by} r={2.1} fill="#45b394" pointerEvents="none" />}
-              </g>
+              <>
+                {visibleHandleSegs.map((s) => {
+                  const [ax, ay] = P(s.a.z, s.a.r);
+                  const [bx, by] = P(s.b.z, s.b.r);
+                  const activeA = endpointIsActiveOn(s, "a");
+                  const activeB = endpointIsActiveOn(s, "b");
+                  const whole = selected.includes(s.id), showA = whole || activeA, showB = whole || activeB;
+                  const showC1 = whole || pointIsActiveOn(s, "c1") || activeA, showC2 = whole || pointIsActiveOn(s, "c2") || activeB;
+                  const showVia = whole || pointIsActiveOn(s, "via");
+                  return (
+                    <g key={`h${s.id}`}>
+                      {s.c1 && dist(s.c1, s.a) > 1e-8 && showC1 && (
+                        <>
+                          <line x1={ax} y1={ay} x2={P(s.c1.z, s.c1.r)[0]} y2={P(s.c1.z, s.c1.r)[1]} stroke="#6ab0d8" strokeWidth={1} strokeDasharray="3 3" />
+                          <circle className="pt-hover" cx={P(s.c1.z, s.c1.r)[0]} cy={P(s.c1.z, s.c1.r)[1]} r={5} fill="#1b2a33" stroke="#6ab0d8" strokeWidth={2} />
+                        </>
+                      )}
+                      {s.c2 && dist(s.c2, s.b) > 1e-8 && showC2 && (
+                        <>
+                          <line x1={bx} y1={by} x2={P(s.c2.z, s.c2.r)[0]} y2={P(s.c2.z, s.c2.r)[1]} stroke="#6ab0d8" strokeWidth={1} strokeDasharray="3 3" />
+                          <circle className="pt-hover" cx={P(s.c2.z, s.c2.r)[0]} cy={P(s.c2.z, s.c2.r)[1]} r={5} fill="#1b2a33" stroke="#6ab0d8" strokeWidth={2} />
+                        </>
+                      )}
+                      {s.via && showVia && (
+                        <circle className="pt-hover" cx={P(s.via.z, s.via.r)[0]} cy={P(s.via.z, s.via.r)[1]} r={5} fill="#2b1f33" stroke="#b48ee0" strokeWidth={2} />
+                      )}
+                      {showA && <circle className="pt-hover" cx={ax} cy={ay} r={5.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2.4} />}
+                      {showB && <circle className="pt-hover" cx={bx} cy={by} r={5.5} fill="#0f2a22" stroke="#45b394" strokeWidth={2.4} />}
+                    </g>
+                  );
+                })}
+                {visibleHandleSegs.map((s) => {
+                  const [ax, ay] = P(s.a.z, s.a.r);
+                  const [bx, by] = P(s.b.z, s.b.r);
+                  return (
+                    <g key={`hd${s.id}`} pointerEvents="none">
+                      {s.c1 && dist(s.c1, s.a) > 1e-8 && pointIsActiveOn(s, "c1") && <circle cx={P(s.c1.z, s.c1.r)[0]} cy={P(s.c1.z, s.c1.r)[1]} r={2.1} fill="#6ab0d8" />}
+                      {s.c2 && dist(s.c2, s.b) > 1e-8 && pointIsActiveOn(s, "c2") && <circle cx={P(s.c2.z, s.c2.r)[0]} cy={P(s.c2.z, s.c2.r)[1]} r={2.1} fill="#6ab0d8" />}
+                      {s.via && pointIsActiveOn(s, "via") && <circle cx={P(s.via.z, s.via.r)[0]} cy={P(s.via.z, s.via.r)[1]} r={2.1} fill="#b48ee0" />}
+                      {endpointIsActiveOn(s, "a") && <circle cx={ax} cy={ay} r={2.1} fill="#45b394" />}
+                      {endpointIsActiveOn(s, "b") && <circle cx={bx} cy={by} r={2.1} fill="#45b394" />}
+                    </g>
+                  );
+                })}
+              </>
             );
-          })}
+          })()}
 
         </g>
 
