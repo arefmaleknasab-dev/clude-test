@@ -16,7 +16,7 @@ import { MAX_INNER_DISTANCE, MIN_HOLDER2_OFFSET, MIN_INNER_DISTANCE, PRESETS, ST
 import type { EditBuf, ELine, GcodeOvrMap, GenResult, Holder2State, OpType, Params, PPoint, Preset, SplitState } from "./lib/lathe";
 import type { SketchSeg } from "./lib/sketch";
 import { autoSplitPoint, branchPathPoints, branchPoints, chainPolyline, flattenSketch, normalizeSketch, orderChain, segMid, sketchFromPoints, sketchFromWall, splitChainAt } from "./lib/sketch";
-import { applyThemeToDocument, getThemeBaseColors, normalizeHexColor, sanitizeThemeColors, shadeHex, type CustomThemePreset } from "./lib/theme";
+import { applyThemeToDocument, getThemeBaseColors, hexToRgb, normalizeHexColor, rgbaCss, sanitizeThemeColors, shadeHex, type CustomThemePreset } from "./lib/theme";
 import { cn } from "./utils/cn";
 
 const STORE_KEY = "kharraatcode-v1";
@@ -1826,6 +1826,10 @@ export default function App() {
   /* وقتی پنجره نمای سه‌بعدی بسته یا جمع شده است، هیچ محاسبه مش، پروفایل سه‌بعدی یا WebGL اجرا نمی‌شود */
   const view3dActive = layout.view3d.open && !layout.view3d.collapsed;
   const view3dSketch = view3dActive ? (editOpen && editBuf ? editBuf.sketch : sketch) : null;
+  const tabChrome = useMemo(
+    () => computeTabChromeColors(preferences.themeColors.uiHeaderBg, preferences.themeColors.uiInk),
+    [preferences.themeColors.uiHeaderBg, preferences.themeColors.uiInk]
+  );
 
   const editorTitle = mode === "design" ? "طراحی پروفایل" : "شبیه‌سازی تراش";
   const panelTitleMap: Record<PanelId, string> = {
@@ -1949,7 +1953,7 @@ export default function App() {
       {pendingEditExit && <div className="fixed inset-0 z-[120] grid place-items-center bg-black/45 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">تغییرات تأییدنشده ویرایش مسیر</h3><p className="mt-3 text-[12px] leading-6 text-mute">تغییراتی در مسیر یا تنظیمات انجام شده که هنوز تأیید نشده‌اند. آیا می‌خواهید تغییرات را تأیید و سپس از حالت ویرایش مسیر خارج شوید؟</p><div className="mt-5 flex justify-center gap-2"><button onClick={()=>{pendingExitActionRef.current=null;setPendingEditExit(false);}} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button onClick={revertEditAndExit} className="rounded-md border border-danger/50 bg-danger/10 px-4 py-1.5 text-xs font-bold text-danger">خیر</button><button onClick={confirmEditAndExit} className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[var(--color-brass-ink)]">بله</button></div></div></div>}
       {pendingCloseProject && <div className="fixed inset-0 z-[120] grid place-items-center bg-black/45 p-4" dir="rtl"><div className="w-full max-w-md rounded-xl border border-edge2 bg-panel p-5 shadow-2xl"><h3 className="text-sm font-bold text-brass2">تغییرات ذخیره‌نشده</h3><p className="mt-3 text-[12px] leading-6 text-mute">تغییرات پروژه «{projectTabs.find(t=>t.id===pendingCloseProject)?.name}» ذخیره نشده است. آیا می‌خواهید پیش از بستن پروژه آن را ذخیره کنید؟</p><div className="mt-5 flex justify-center gap-2"><button onClick={()=>setPendingCloseProject(null)} className="rounded-md border border-edge px-4 py-1.5 text-xs text-mute">لغو</button><button onClick={()=>finishCloseProject(pendingCloseProject)} className="rounded-md border border-danger/50 bg-danger/10 px-4 py-1.5 text-xs font-bold text-danger">خیر</button><button onClick={()=>{const id=pendingCloseProject;setSaveThenCloseProject(id);if(id!==activeProjectId)switchProject(id);}} className="rounded-md bg-brass px-4 py-1.5 text-xs font-bold text-[var(--color-brass-ink)]">بله</button></div></div></div>}
       <DesktopMenuBar
-        headerBg={preferences.themeColors.uiHeaderBg}
+        tabChrome={tabChrome}
         projects={projectTabs.map(tab=>({id:tab.id,name:tab.name,dirty:tab.savedSnapshot!==projectSnapshot(tab.sketch,tab.params,tab.gcodeOvr,tab.referenceImages)}))}
         activeProjectId={activeProjectId}
         onSwitchProject={switchProject}
@@ -1970,7 +1974,10 @@ export default function App() {
         canRedo={future.current.length > 0||imageHistoryState.canRedo}
       />
       {/* ---------- سربرگ ---------- */}
-      <header className="relative z-40 flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-edge bg-[var(--color-header-bg)] px-3.5 py-2 pl-14">
+      <header
+        className="relative z-40 flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-edge px-3.5 py-2 pl-14"
+        style={{ backgroundColor: tabChrome.toolbarBg }}
+      >
         <button onClick={() => setShowPreferences(true)} title="Preferences" aria-label="Preferences" className="absolute top-2.5 left-3 grid h-8 w-8 place-items-center rounded-lg border border-edge bg-panel2 text-mute shadow-lg transition-colors hover:border-brass/50 hover:text-brass2">
           <IconSettings className="h-4.5 w-4.5" />
         </button>
@@ -2248,13 +2255,69 @@ export default function App() {
   );
 }
 
-function DesktopMenuBar({ headerBg, projects, activeProjectId, onSwitchProject, onCloseProject, onCloseAllProjects, onNewProject, onOpenProject, onSaveProject, onSaveProjectAs, onImportAi, onImportImage, onExportGcode, onExportDxf, onPreferences, onUndo, onRedo, canUndo, canRedo }: {
-  headerBg: string; projects: {id:string;name:string;dirty:boolean}[]; activeProjectId:string; onSwitchProject:(id:string)=>void; onCloseProject:(id:string)=>void; onCloseAllProjects:()=>void;
+interface TabChromeColors {
+  stripBg: string;
+  toolbarBg: string;
+  hoverPillBg: string;
+  dividerBg: string;
+  iconBadgeBg: string;
+  controlHoverBg: string;
+}
+
+function mixHexColors(aHex: string, bHex: string, t: number): string {
+  const [ar, ag, ab] = hexToRgb(aHex);
+  const [br, bg, bb] = hexToRgb(bHex);
+  const k = Math.max(0, Math.min(1, t));
+  const ch = (a: number, b: number) =>
+    Math.max(0, Math.min(255, Math.round(a + (b - a) * k)))
+      .toString(16)
+      .padStart(2, "0");
+  return `#${ch(ar, br)}${ch(ag, bg)}${ch(ab, bb)}`;
+}
+
+function computeTabChromeColors(headerBg: string, inkHex: string): TabChromeColors {
+  const [r, g, b] = hexToRgb(headerBg);
+  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+  if (lum >= 140) {
+    const toolbarBg = headerBg;
+    const stripBg = shadeHex(headerBg, -0.14);
+    return {
+      stripBg,
+      toolbarBg,
+      hoverPillBg: mixHexColors(stripBg, toolbarBg, 0.58),
+      dividerBg: rgbaCss(inkHex, 0.24),
+      iconBadgeBg: rgbaCss("#000000", 0.08),
+      controlHoverBg: rgbaCss(inkHex, 0.11),
+    };
+  }
+  const stripBg = lum < 28 ? shadeHex(headerBg, -0.58) : shadeHex(headerBg, -0.44);
+  const [sr, sg, sb] = hexToRgb(stripBg);
+  const stripLum = 0.299 * sr + 0.587 * sg + 0.114 * sb;
+  const minDelta = 20;
+  const toolbarBg =
+    lum - stripLum < minDelta
+      ? shadeHex(headerBg, Math.min(0.16, (minDelta - (lum - stripLum)) / 220))
+      : headerBg;
+  return {
+    stripBg,
+    toolbarBg,
+    hoverPillBg: mixHexColors(stripBg, toolbarBg, 0.56),
+    dividerBg: rgbaCss(inkHex, 0.22),
+    iconBadgeBg: rgbaCss("#000000", 0.35),
+    controlHoverBg: rgbaCss(inkHex, 0.13),
+  };
+}
+
+function DesktopMenuBar({ tabChrome, projects, activeProjectId, onSwitchProject, onCloseProject, onCloseAllProjects, onNewProject, onOpenProject, onSaveProject, onSaveProjectAs, onImportAi, onImportImage, onExportGcode, onExportDxf, onPreferences, onUndo, onRedo, canUndo, canRedo }: {
+  tabChrome: TabChromeColors; projects: {id:string;name:string;dirty:boolean}[]; activeProjectId:string; onSwitchProject:(id:string)=>void; onCloseProject:(id:string)=>void; onCloseAllProjects:()=>void;
   onNewProject:()=>void; onOpenProject: () => void; onSaveProject: () => void; onSaveProjectAs: () => void;
   onImportAi: () => void; onImportImage: () => void; onExportGcode: () => void; onExportDxf: () => void; onPreferences: () => void;
   onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean;
 }) {
   const [open, setOpen] = useState<"file" | "edit" | null>(null);
+  const [hoveredTabId, setHoveredTabId] = useState<string | null>(null);
+  const [hoveredCloseId, setHoveredCloseId] = useState<string | null>(null);
+  const [plusHovered, setPlusHovered] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -2263,37 +2326,173 @@ function DesktopMenuBar({ headerBg, projects, activeProjectId, onSwitchProject, 
     document.addEventListener("pointerdown", close); document.addEventListener("keydown", key);
     return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", key); };
   }, [open]);
-  const run = (fn:()=>void) => { setOpen(null); fn(); };
-  return <div ref={ref} dir="ltr" onPointerDown={(e)=>{if(e.target===e.currentTarget)setOpen(null);}} className="relative z-[60] flex h-7 shrink-0 items-center border-b border-edge px-2 text-[11px] text-mute shadow-sm" style={{ backgroundColor: shadeHex(headerBg, -0.04) }}>
-    <MenuTop label="File" active={open==="file"} onClick={()=>setOpen(open==="file"?null:"file")} />
-    <MenuTop label="Edit" active={open==="edit"} onClick={()=>setOpen(open==="edit"?null:"edit")} />
-    <div className="ml-2 flex h-full min-w-0 flex-1 items-end gap-0.5 overflow-x-auto [scrollbar-width:none]" dir="ltr">
-      {projects.map(project=><div key={project.id} className={cn("flex h-[24px] min-w-[115px] max-w-[200px] items-center rounded-t-md border border-b-0 transition-colors",project.id===activeProjectId?"border-edge2 bg-panel text-ink":"border-edge/70 bg-panel2/55 text-dim hover:bg-panel2 hover:text-mute")}><button onClick={()=>{setOpen(null);onSwitchProject(project.id);}} title={project.name} className="min-w-0 flex-1 truncate px-2 text-[10.5px]">{project.dirty&&<span className="ml-1 text-brass">•</span>}{project.name}</button><button onClick={e=>{e.stopPropagation();onCloseProject(project.id);}} title="بستن پروژه" className="grid h-full w-6 shrink-0 place-items-center rounded-sm text-dim hover:bg-danger/15 hover:text-danger">×</button></div>)}
-      <button onClick={()=>{setOpen(null);onNewProject();}} title="ایجاد پروژه جدید" aria-label="ایجاد پروژه جدید" className="mb-px grid h-[23px] w-7 shrink-0 place-items-center rounded-t-md border border-b-0 border-edge/80 bg-panel2/70 text-[18px] leading-none text-mute transition-colors hover:border-brass/60 hover:bg-panel3 hover:text-brass2">+</button>
+  const run = (fn: () => void) => { setOpen(null); fn(); };
+  return (
+    <div
+      ref={ref}
+      dir="ltr"
+      onPointerDown={(e) => { if (e.target === e.currentTarget) setOpen(null); }}
+      className="relative z-[60] flex h-[38px] shrink-0 select-none items-center px-2 text-[11px] text-mute"
+      style={{ backgroundColor: tabChrome.stripBg }}
+    >
+      <div className="flex shrink-0 items-center gap-0.5 pr-1.5">
+        <MenuTop label="File" active={open === "file"} hoverBg={tabChrome.hoverPillBg} onClick={() => setOpen(open === "file" ? null : "file")} />
+        <MenuTop label="Edit" active={open === "edit"} hoverBg={tabChrome.hoverPillBg} onClick={() => setOpen(open === "edit" ? null : "edit")} />
+      </div>
+      <span className="h-4 w-px shrink-0 rounded-full" style={{ backgroundColor: tabChrome.dividerBg }} />
+
+      <div className="-mb-px flex h-[39px] min-w-0 flex-1 items-stretch self-start overflow-x-auto overflow-y-hidden px-[10px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" dir="ltr">
+        {projects.map((project, index) => {
+          const isActive = project.id === activeProjectId;
+          const isHovered = hoveredTabId === project.id;
+          const prevProject = index > 0 ? projects[index - 1] : null;
+          /* خط جداکننده | دقیقاً مثل کروم بین تب‌های غیرفعال نمایش داده می‌شود */
+          const showDivider = !!prevProject && !isActive && prevProject.id !== activeProjectId;
+          return (
+            <div key={project.id} className="flex h-full shrink-0 items-stretch">
+              {index > 0 && (
+                <div className="mb-px flex w-[11px] shrink-0 items-center justify-center self-center" aria-hidden="true">
+                  <span
+                    className="h-4 w-px rounded-full transition-opacity duration-150"
+                    style={{ backgroundColor: tabChrome.dividerBg, opacity: showDivider ? 1 : 0 }}
+                  />
+                </div>
+              )}
+
+              <div
+                onMouseEnter={() => setHoveredTabId(project.id)}
+                onMouseLeave={() => {
+                  setHoveredTabId((cur) => (cur === project.id ? null : cur));
+                  setHoveredCloseId((cur) => (cur === project.id ? null : cur));
+                }}
+                onClick={() => { setOpen(null); onSwitchProject(project.id); }}
+                title={project.name}
+                style={
+                  isActive
+                    ? { backgroundColor: tabChrome.toolbarBg }
+                    : isHovered
+                      ? { backgroundColor: tabChrome.hoverPillBg }
+                      : undefined
+                }
+                className={cn(
+                  "group relative mt-[5px] flex min-w-[138px] max-w-[216px] cursor-pointer transition-colors duration-150",
+                  isActive
+                    ? "z-10 h-[34px] rounded-t-[10px] pb-[6px] text-ink"
+                    : "mb-[6px] h-[28px] rounded-[10px] text-ink/75 hover:text-ink"
+                )}
+              >
+                {/* انحنای مقعر بیرونی پایین تب فعال برای ادغام یکپارچه با نوار بالایی */}
+                {isActive && (
+                  <>
+                    <svg
+                      viewBox="0 0 10 11"
+                      aria-hidden="true"
+                      className="pointer-events-none absolute bottom-0 -left-[10px] h-[11px] w-[10px]"
+                    >
+                      <path d="M10 0 A10 10 0 0 1 0 10 L0 11 L10 11 Z" fill={tabChrome.toolbarBg} />
+                    </svg>
+                    <svg
+                      viewBox="0 0 10 11"
+                      aria-hidden="true"
+                      className="pointer-events-none absolute bottom-0 -right-[10px] h-[11px] w-[10px]"
+                    >
+                      <path d="M0 0 A10 10 0 0 0 10 10 L10 11 L0 11 Z" fill={tabChrome.toolbarBg} />
+                    </svg>
+                  </>
+                )}
+
+                <div className="flex h-[28px] w-full min-w-0 items-center gap-2 pr-1.5 pl-2.5">
+                  <span
+                    className="grid h-4 w-4 shrink-0 place-items-center rounded-[4px]"
+                    style={{ backgroundColor: tabChrome.iconBadgeBg }}
+                  >
+                    <IconSpindle className="h-3 w-3 text-brass" />
+                  </span>
+                  <span dir="auto" className="min-w-0 flex-1 truncate text-[11.5px] font-medium leading-none">
+                    {project.dirty && <span className="mr-1 inline-block text-brass">•</span>}
+                    {project.name}
+                  </span>
+                  <button
+                    type="button"
+                    onMouseEnter={() => setHoveredCloseId(project.id)}
+                    onMouseLeave={() => setHoveredCloseId((cur) => (cur === project.id ? null : cur))}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCloseProject(project.id);
+                    }}
+                    title="بستن پروژه"
+                    aria-label="بستن پروژه"
+                    style={hoveredCloseId === project.id ? { backgroundColor: tabChrome.controlHoverBg } : undefined}
+                    className="grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full text-ink/70 transition-colors hover:text-ink"
+                  >
+                    <svg viewBox="0 0 12 12" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round">
+                      <path d="M2.5 2.5l7 7M9.5 2.5l-7 7" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {/* دکمهٔ + بدون کادر، دقیقاً در وسط عمودی نوار تب‌ها */}
+        <button
+          type="button"
+          onClick={() => { setOpen(null); onNewProject(); }}
+          onMouseEnter={() => setPlusHovered(true)}
+          onMouseLeave={() => setPlusHovered(false)}
+          title="ایجاد پروژه جدید"
+          aria-label="ایجاد پروژه جدید"
+          style={plusHovered ? { backgroundColor: tabChrome.controlHoverBg } : undefined}
+          className="mb-px ml-3 grid h-7 w-7 shrink-0 self-center place-items-center rounded-full border-0 bg-transparent text-ink/80 transition-colors hover:text-ink"
+        >
+          <svg viewBox="0 0 14 14" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round">
+            <path d="M7 1.75v10.5M1.75 7h10.5" />
+          </svg>
+        </button>
+      </div>
+
+      {open === "file" && <div className="absolute top-full left-1 z-50 w-52 overflow-hidden rounded-b-md border border-edge2 bg-panel/98 py-1 shadow-2xl shadow-black/60" dir="rtl">
+        <MenuItem label="ایجاد پروژه جدید…" hint="New" onClick={() => run(onNewProject)} />
+        <MenuItem label="بازکردن پروژه…" hint="Ctrl+O" onClick={() => run(onOpenProject)} />
+        <MenuItem label="ذخیره" hint="Ctrl+S" onClick={() => run(onSaveProject)} />
+        <MenuItem label="ذخیره با نام…" hint="Ctrl+Shift+S" onClick={() => run(onSaveProjectAs)} />
+        <div className="my-1 border-t border-edge" />
+        <MenuItem label="ورود فایل AI…" hint="Import" onClick={() => run(onImportAi)} />
+        <MenuItem label="وارد کردن عکس…" onClick={() => run(onImportImage)} />
+        <div className="my-1 border-t border-edge" />
+        <MenuItem label="خروجی G-code…" hint="CNC" onClick={() => run(onExportGcode)} />
+        <MenuItem label="خروجی DXF…" hint="DXF" onClick={() => run(onExportDxf)} />
+        <div className="my-1 border-t border-edge" />
+        <MenuItem label="Preferences…" onClick={() => run(onPreferences)} />
+      </div>}
+      {open === "edit" && <div className="absolute top-full left-[46px] z-50 w-52 overflow-hidden rounded-b-md border border-edge2 bg-panel/98 py-1 shadow-2xl shadow-black/60" dir="rtl">
+        <MenuItem label="واگرد" hint="Ctrl+Z" disabled={!canUndo} onClick={() => run(onUndo)} />
+        <MenuItem label="بازانجام" hint="Ctrl+Y" disabled={!canRedo} onClick={() => run(onRedo)} />
+        <div className="my-1 border-t border-edge" />
+        <MenuItem label="بستن همه پروژه‌ها" onClick={() => run(onCloseAllProjects)} />
+      </div>}
     </div>
-    {open==="file" && <div className="absolute top-full left-1 z-50 w-52 overflow-hidden rounded-b-md border border-edge2 bg-panel/98 py-1 shadow-2xl shadow-black/60" dir="rtl">
-      <MenuItem label="ایجاد پروژه جدید…" hint="New" onClick={()=>run(onNewProject)} />
-      <MenuItem label="بازکردن پروژه…" hint="Ctrl+O" onClick={()=>run(onOpenProject)} />
-      <MenuItem label="ذخیره" hint="Ctrl+S" onClick={()=>run(onSaveProject)} />
-      <MenuItem label="ذخیره با نام…" hint="Ctrl+Shift+S" onClick={()=>run(onSaveProjectAs)} />
-      <div className="my-1 border-t border-edge" />
-      <MenuItem label="ورود فایل AI…" hint="Import" onClick={()=>run(onImportAi)} />
-      <MenuItem label="وارد کردن عکس…" onClick={()=>run(onImportImage)} />
-      <div className="my-1 border-t border-edge" />
-      <MenuItem label="خروجی G-code…" hint="CNC" onClick={()=>run(onExportGcode)} />
-      <MenuItem label="خروجی DXF…" hint="DXF" onClick={()=>run(onExportDxf)} />
-      <div className="my-1 border-t border-edge" />
-      <MenuItem label="Preferences…" onClick={()=>run(onPreferences)} />
-    </div>}
-    {open==="edit" && <div className="absolute top-full left-[42px] z-50 w-52 overflow-hidden rounded-b-md border border-edge2 bg-panel/98 py-1 shadow-2xl shadow-black/60" dir="rtl">
-      <MenuItem label="واگرد" hint="Ctrl+Z" disabled={!canUndo} onClick={()=>run(onUndo)} />
-      <MenuItem label="بازانجام" hint="Ctrl+Y" disabled={!canRedo} onClick={()=>run(onRedo)} />
-      <div className="my-1 border-t border-edge" />
-      <MenuItem label="بستن همه پروژه‌ها" onClick={()=>run(onCloseAllProjects)} />
-    </div>}
-  </div>;
+  );
 }
-function MenuTop({label,active,onClick}:{label:string;active:boolean;onClick:()=>void}) { return <button onClick={onClick} className={cn("h-full px-3 transition-colors",active?"bg-panel3 text-ink":"hover:bg-panel2 hover:text-ink")}>{label}</button>; }
+function MenuTop({ label, active, hoverBg, onClick }: { label: string; active: boolean; hoverBg: string; onClick: () => void }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={active || hovered ? { backgroundColor: hoverBg } : undefined}
+      className={cn(
+        "h-[26px] rounded-[7px] px-2.5 text-[11px] font-medium transition-colors",
+        active ? "text-ink" : "text-ink/75 hover:text-ink"
+      )}
+    >
+      {label}
+    </button>
+  );
+}
 function MenuItem({label,hint,onClick,disabled=false}:{label:string;hint?:string;onClick:()=>void;disabled?:boolean}) { return <button disabled={disabled} onClick={onClick} className="flex w-full items-center justify-between px-3 py-1.5 text-right text-[11px] text-ink hover:bg-panel3 disabled:opacity-35 disabled:hover:bg-transparent"><span>{label}</span>{hint&&<span dir="ltr" className="font-mono text-[9px] text-dim">{hint}</span>}</button>; }
 
 function TabBtn({ on, onClick, icon, label }: { on: boolean; onClick: () => void; icon: ReactNode; label: string }) {
