@@ -29,6 +29,13 @@ import {
   snapCandidates,
   splitChainAt,
 } from "../lib/sketch";
+import {
+  applyTrimSelectionBox,
+  applyTrimSubSegment,
+  computeTrimGraph,
+  trimSubSegHitsRect,
+  type TrimSubSeg,
+} from "../lib/trim";
 import { cn } from "../utils/cn";
 import {
   IconArc3,
@@ -58,6 +65,7 @@ import {
   IconRedo,
   IconSplit,
   IconTrash,
+  IconTrim,
   IconUndo,
   IconX,
 } from "./icons";
@@ -100,7 +108,7 @@ export interface EdSettings {
   editGridDivisions: number;
 }
 
-type Tool = "select" | "paint" | "move" | "rotate" | "boxscale" | "copy" | "mirror" | "scale" | "fillet" | "line" | "polyline" | "quad" | "cubic" | "arc" | "split";
+type Tool = "select" | "paint" | "move" | "rotate" | "boxscale" | "copy" | "mirror" | "scale" | "fillet" | "trim" | "line" | "polyline" | "quad" | "cubic" | "arc" | "split";
 
 const TOOLS: { id: Tool; name: string; key: string; icon: React.ReactNode; hint: string }[] = [
   { id: "select", name: "انتخاب", key: "V", icon: <IconCursor className="h-4 w-4" />, hint: "انتخاب" },
@@ -111,6 +119,7 @@ const TOOLS: { id: Tool; name: string; key: string; icon: React.ReactNode; hint:
   { id: "copy", name: "کپی (Copy)", key: "K", icon: <IconCopy className="h-4 w-4" />, hint: "کپی متوالی؛ الگوهای *عدد و /عدد" },
   { id: "mirror", name: "قرینه (Mirror)", key: "I", icon: <IconMirror className="h-[19px] w-[19px]" />, hint: "قرینه‌سازی حول محور دو نقطه‌ای" },
   { id: "fillet", name: "فیلت", key: "F", icon: <IconFillet className="h-4 w-4" />, hint: "ایجاد قوس مماس بین دو خط" },
+  { id: "trim", name: "برش (Trim)", key: "T", icon: <IconTrim className="h-4 w-4" />, hint: "حذف بخش‌های اضافی در تقاطع‌ها و اتصال به یک Polyline واحد" },
   { id: "line", name: "خط", key: "L", icon: <IconLine className="h-4 w-4" />, hint: "خط مستقیم: نقطهٔ شروع و پایان" },
   { id: "polyline", name: "Polyline", key: "P", icon: <IconPolyline className="h-4 w-4" />, hint: "چندخطی پیوسته: Enter برای پایان، Esc برای لغو" },
   { id: "quad", name: "منحنی", key: "C", icon: <IconQuad className="h-4 w-4" />, hint: "منحنی ساده: شروع، پایان، یک نقطهٔ کنترل" },
@@ -120,7 +129,7 @@ const TOOLS: { id: Tool; name: string; key: string; icon: React.ReactNode; hint:
   { id: "split", name: "نقطه Split", key: "S", icon: <IconSplit className="h-4 w-4" />, hint: "قرار دادن نقطه تعیین‌کننده داخل/خارج روی پروفیل" },
 ];
 
-const NEED_PTS: Record<Tool, number> = { select: 0, paint: 0, move: 0, rotate: 0, boxscale: 0, copy: 0, mirror: 0, scale: 0, fillet: 0, line: 2, polyline: 0, quad: 3, cubic: 4, arc: 3, split: 1 };
+const NEED_PTS: Record<Tool, number> = { select: 0, paint: 0, move: 0, rotate: 0, boxscale: 0, copy: 0, mirror: 0, scale: 0, fillet: 0, trim: 0, line: 2, polyline: 0, quad: 3, cubic: 4, arc: 3, split: 1 };
 
 const STEP_HINT: Record<Tool, string[]> = {
   select: [],
@@ -132,6 +141,7 @@ const STEP_HINT: Record<Tool, string[]> = {
   mirror: [],
   scale: [],
   fillet: [],
+  trim: [],
   line: ["نقطهٔ شروع خط", "نقطهٔ پایان خط"],
   polyline: ["نقطهٔ شروع Polyline", "نقطهٔ بعدی — Enter پایان، Esc لغو"],
   quad: ["نقطهٔ شروع", "نقطهٔ پایان", "نقطهٔ کنترل منحنی"],
@@ -1139,6 +1149,15 @@ export default function ProfileEditor({
       setBoxRotateBox(null);
       setBoxScalePivot(null);
     }
+    if (next === "trim") {
+      /* فعال‌سازی Trim نباید رنگ اصلی خطوط را تغییر دهد؛ انتخاب‌های قبلی پاک می‌شوند */
+      onSelected([]);
+      setSelPoints([]);
+      setSplitSelected(false);
+      setHoverId(null);
+      setCursor(null);
+      setSnapHit(null);
+    }
     previousToolRef.current = toolRef.current;
     toolRef.current = next;
     setTool(next);
@@ -1146,6 +1165,9 @@ export default function ProfileEditor({
   const [filletPicks, setFilletPicks] = useState<FilletPick[]>([]);
   const [filletBox, setFilletBox] = useState<{ x: number; y: number; value: string; error: string } | null>(null);
   const filletInputRef = useRef<HTMLInputElement>(null);
+  const [trimHoverKey, setTrimHoverKey] = useState<string | null>(null);
+  const [trimMarqueeKeys, setTrimMarqueeKeys] = useState<string[]>([]);
+  const trimMarqueeOrderRef = useRef<string[]>([]);
   const [moveBox, setMoveBox] = useState<{ x: number; y: number; value: string; error: string } | null>(null);
   const [moveSession, setMoveSession] = useState<MoveSession | null>(null);
   const [copySession, setCopySession] = useState<CopySession | null>(null);
@@ -1461,6 +1483,11 @@ export default function ProfileEditor({
   }, [activeSplit.enabled]);
   useEffect(() => {
     if (tool !== "fillet") { setFilletPicks([]); setFilletBox(null); }
+    if (tool !== "trim") {
+      setTrimHoverKey(null);
+      setTrimMarqueeKeys([]);
+      trimMarqueeOrderRef.current = [];
+    }
   }, [tool]);
   useEffect(() => {
     if (tool !== "select" && tool !== "move") {
@@ -1771,6 +1798,18 @@ export default function ProfileEditor({
           setMarqueeHits([]);
           setMarqueePointHits([]);
           setMarqueeSplitHit(false);
+          return;
+        }
+        if (drag.current?.mode === "trimMarquee") {
+          drag.current = null;
+          setMarquee(null);
+          trimMarqueeOrderRef.current = [];
+          setTrimMarqueeKeys([]);
+          return;
+        }
+        if (tool === "trim") {
+          setTrimHoverKey(null);
+          chooseTool("select");
           return;
         }
         if (speedMenu) {
@@ -2187,6 +2226,38 @@ export default function ProfileEditor({
 
   /* ---------- انتخاب ---------- */
   const filterAllows = (kind: SketchKind) => selFilter[kind];
+
+  /* گراف تقاطع‌ها و بخش‌های قابل‌برش هنگام فعال بودن ابزار Trim */
+  const trimGraph = useMemo(
+    () => (tool === "trim" && !editOpen ? computeTrimGraph(segs, separated) : null),
+    [tool, editOpen, segs, separated]
+  );
+
+  const trimDimmedSubKeys = useMemo(() => {
+    if (tool !== "trim" || editOpen) return new Set<string>();
+    if (trimMarqueeKeys.length > 0) return new Set<string>(trimMarqueeKeys);
+    if (trimHoverKey) return new Set<string>([trimHoverKey]);
+    return new Set<string>();
+  }, [tool, editOpen, trimMarqueeKeys, trimHoverKey]);
+
+  const hitTrimSubSeg = (w: SPoint): TrimSubSeg | null => {
+    const c = camRef.current;
+    if (!c || !trimGraph) return null;
+    const tol = 7 / c.s;
+    let best: TrimSubSeg | null = null;
+    let bestScore = Infinity;
+    for (const sub of trimGraph.trimmableSubSegs) {
+      if (!filterAllows(sub.geom.kind)) continue;
+      const d = distToSeg(sub.geom, w);
+      if (d >= tol) continue;
+      const score = d + 1e-6 * dist(segMid(sub.geom), w);
+      if (score < bestScore) {
+        bestScore = score;
+        best = sub;
+      }
+    }
+    return best;
+  };
 
   const pointInRectW = (p: SPoint, r: { z0: number; z1: number; r0: number; r1: number }) =>
     p.z >= r.z0 - 1e-9 && p.z <= r.z1 + 1e-9 && p.r >= r.r0 - 1e-9 && p.r <= r.r1 + 1e-9;
@@ -2977,6 +3048,7 @@ export default function ProfileEditor({
     | { mode: "split"; start: SPoint; baseSplit: SplitState; baseSegs: SketchSeg[]; segIds: number[]; pointRefs: { segId: number; part: SketchPointPart }[]; sx: number; sy: number; moved: boolean; hadMulti: boolean }
     | { mode: "draw"; sx: number; sy: number; cam0: Cam; moved: boolean }
     | { mode: "marquee"; sx: number; sy: number; base: number[]; moved: boolean }
+    | { mode: "trimMarquee"; sx: number; sy: number; w0: SPoint; moved: boolean }
     | { mode: "rwait"; sx: number; sy: number; cam0: Cam; moved: boolean }
     | {
         mode: "eline";
@@ -3052,6 +3124,17 @@ export default function ProfileEditor({
       }
     }
     if(imageHistoryFocus.current){imageHistoryFocus.current=false;setImageHistoryVersion(v=>v+1);}
+    if (tool === "trim" && e.button === 0 && !editOpen && !panMode) {
+      const loc = toLocal(e.clientX, e.clientY);
+      drag.current = { mode: "trimMarquee", sx: loc.x, sy: loc.y, w0: raw, moved: false };
+      trimMarqueeOrderRef.current = [];
+      setTrimMarqueeKeys([]);
+      setMarquee({ x0: loc.x, y0: loc.y, x1: loc.x, y1: loc.y, add: false, remove: false });
+      setMarqueeHits([]);
+      setMarqueePointHits([]);
+      setMarqueeSplitHit(false);
+      return;
+    }
     if (tool === "fillet" && e.button === 0 && !editOpen) {
       const hit = hitSeg(raw);
       if (!hit || hit.kind !== "line") {
@@ -3361,7 +3444,7 @@ export default function ProfileEditor({
       ? hitSplitMarker(locForSplitBeforeHandle.x, locForSplitBeforeHandle.y) &&
         !(rawCandidateSelected && splitSelected && split.enabled && !e.shiftKey && !e.ctrlKey && !e.metaKey)
       : false;
-    const drawingHandle = !editOpen && !onMainSplitBeforeHandle ? rawCandidateHandle : null;
+    const drawingHandle = !editOpen && tool !== "trim" && !panMode && !onMainSplitBeforeHandle ? rawCandidateHandle : null;
     if (drawingHandle) {
       const cluster = drawingHandle.part === "a" || drawingHandle.part === "b"
         ? clusterOf(drawingHandle.segId, drawingHandle.part)
@@ -4015,6 +4098,13 @@ export default function ProfileEditor({
           setHoverId(s ? s.id : null);
         }
         setSnapHit(null);
+      } else if (tool === "trim") {
+        setSplitHovered(false);
+        setHoverId(null);
+        setCursor(null);
+        setSnapHit(null);
+        const hitSub = editOpen ? null : hitTrimSubSeg(raw);
+        setTrimHoverKey(hitSub ? hitSub.key : null);
       } else if (tool === "split") {
         setSplitHovered(false);
         /* ابزار Split مغناطیسی به پروفیل می‌چسبد */
@@ -4245,6 +4335,42 @@ export default function ProfileEditor({
         setMarqueeSplitHit(marqueeHitsSplit(rectW));
         const paintPreview=paintHitsInRect(rectW,mode);
         setPaintMarqueeHits(paintPreview.ids);setPaintMarqueePoints(paintPreview.points);
+      }
+      return;
+    }
+    if (d.mode === "trimMarquee") {
+      const loc = toLocal(e.clientX, e.clientY);
+      if (!d.moved && Math.hypot(loc.x - d.sx, loc.y - d.sy) < 4) return;
+      d.moved = true;
+      setTrimHoverKey(null);
+      const c = camRef.current!;
+      const w0 = worldPt(c, d.sx, d.sy);
+      const w1 = worldPt(c, loc.x, loc.y);
+      const rectW = {
+        z0: Math.min(w0.z, w1.z),
+        z1: Math.max(w0.z, w1.z),
+        r0: Math.min(w0.r, w1.r),
+        r1: Math.max(w0.r, w1.r),
+      };
+      const mode: "window" | "crossing" = loc.x >= d.sx ? "window" : "crossing";
+      setMarquee({ x0: d.sx, y0: d.sy, x1: loc.x, y1: loc.y, add: false, remove: false });
+      if (!editOpen && trimGraph) {
+        const hitSubs = trimGraph.trimmableSubSegs.filter(
+          (sub) => filterAllows(sub.geom.kind) && trimSubSegHitsRect(sub, rectW, mode)
+        );
+        const hitSet = new Set(hitSubs.map((sub) => sub.key));
+        const keptOrder = trimMarqueeOrderRef.current.filter((k) => hitSet.has(k));
+        const keptSet = new Set(keptOrder);
+        const newlyAdded = hitSubs
+          .filter((sub) => !keptSet.has(sub.key))
+          .sort((a, b) => distToSeg(a.geom, d.w0) - distToSeg(b.geom, d.w0))
+          .map((sub) => sub.key);
+        const nextOrder = [...keptOrder, ...newlyAdded];
+        trimMarqueeOrderRef.current = nextOrder;
+        setTrimMarqueeKeys(nextOrder);
+      } else {
+        trimMarqueeOrderRef.current = [];
+        setTrimMarqueeKeys([]);
       }
       return;
     }
@@ -4727,6 +4853,54 @@ export default function ProfileEditor({
           if(rightClickToolToggle&&empty){const previous=previousToolRef.current;if(!editOpen||previous==="select"||previous==="move")chooseTool(previous);}
           else if (editOpen) openSpeedMenu(e.clientX, e.clientY);
           else openJoinMenu(e.clientX, e.clientY);
+        }
+      }
+      return;
+    }
+
+    if (d?.mode === "trimMarquee") {
+      const loc = toLocal(e.clientX, e.clientY);
+      const wasClick = !d.moved && Math.hypot(loc.x - d.sx, loc.y - d.sy) < 4;
+      const orderedKeys = [...trimMarqueeOrderRef.current];
+      setMarquee(null);
+      trimMarqueeOrderRef.current = [];
+      setTrimMarqueeKeys([]);
+      if (editOpen) return;
+      const rawUp = toWorld(e.clientX, e.clientY);
+      if (wasClick) {
+        const hitSub = hitTrimSubSeg(rawUp);
+        if (hitSub) {
+          const res = applyTrimSubSegment(segs, hitSub.key, separated);
+          if (res.changed) {
+            if (res.joinedHandles.length) {
+              setSeparated((prev) => {
+                const next = new Set(prev);
+                for (const hk of res.joinedHandles) next.delete(hk);
+                return next;
+              });
+            }
+            commit(res.segs);
+            onSelected([]);
+            setSelPoints([]);
+            setTrimHoverKey(null);
+          }
+        }
+        return;
+      }
+      if (orderedKeys.length > 0) {
+        const res = applyTrimSelectionBox(segs, orderedKeys, separated);
+        if (res.changed) {
+          if (res.joinedHandles.length) {
+            setSeparated((prev) => {
+              const next = new Set(prev);
+              for (const hk of res.joinedHandles) next.delete(hk);
+              return next;
+            });
+          }
+          commit(res.segs);
+          onSelected([]);
+          setSelPoints([]);
+          setTrimHoverKey(null);
         }
       }
       return;
@@ -5503,6 +5677,7 @@ export default function ProfileEditor({
             setHoverBuf(null);
             setHoverPathEndpoint(null);
             setSplitHovered(false);
+            setTrimHoverKey(null);
           }
         }}
         onDoubleClick={onDoubleClick}
@@ -5863,7 +6038,7 @@ export default function ProfileEditor({
           {/* رنگ شاخه‌ها مستقیماً از زنجیرهٔ تقسیم‌شده رسم می‌شود. بنابراین اگر
               Split وسط یک Arc/Bezier باشد، رنگ داخلی دقیقاً تا خود Split می‌رسد
               و کل منحنی جدید به اشتباه در یک سمت طبقه‌بندی نمی‌شود. */}
-          {split.enabled && (() => {
+          {split.enabled && !(tool === "trim" && trimDimmedSubKeys.size > 0) && (() => {
             const divided = splitChainAt(chainPolyline(orderChain(segs)), { z: split.z, r: split.r });
             const pathOf = (points: SPoint[], mirror = false) => points.map((point, i) => {
               const [x, y] = P(point.z, mirror ? -point.r : point.r);
@@ -5876,22 +6051,64 @@ export default function ProfileEditor({
               <path d={pathOf(divided.inner)} fill="none" stroke={split.swapped ? themeColors.profileOuter : themeColors.profileInner} strokeWidth={2.4} strokeLinecap="round" />
             </>;
           })()}
-          {/* بدون Split، رنگ معمول هر المان استفاده می‌شود. */}
-          {!split.enabled && segs.map((s) => {
+          {/* بدون Split (یا هنگام پیش‌نمایش کمرنگ‌شدن بخش‌های Trim)، رنگ اصلی هر المان استفاده می‌شود. */}
+          {(!split.enabled || (tool === "trim" && trimDimmedSubKeys.size > 0)) && segs.map((s) => {
             const mirrorDimmed = !!mirrorSession && !mirrorSession.keepCopy && mirrorSession.ids.includes(s.id);
-            return <path key={`m${s.id}`} d={segPath(s, cam, true)} fill="none" stroke={themeColors.profileOuter} strokeOpacity={mirrorDimmed ? 0.07 : 0.28} strokeWidth={1.6} strokeLinecap="round" />;
+            const mirrorStroke = split.enabled ? (segSide.get(s.id) === "inner" ? themeColors.profileInner : themeColors.profileOuter) : themeColors.profileOuter;
+            if (tool === "trim" && trimDimmedSubKeys.size > 0) {
+              const subs = trimGraph?.subSegsBySeg.get(s.id);
+              if (subs && subs.some((sub) => trimDimmedSubKeys.has(sub.key))) {
+                return (
+                  <g key={`m${s.id}`}>
+                    {subs.map((sub) => (
+                      <path
+                        key={`m-${sub.key}`}
+                        d={segPath(sub.geom, cam, true)}
+                        fill="none"
+                        stroke={mirrorStroke}
+                        strokeOpacity={trimDimmedSubKeys.has(sub.key) ? 0.07 : 0.28}
+                        strokeWidth={1.6}
+                        strokeLinecap="round"
+                      />
+                    ))}
+                  </g>
+                );
+              }
+            }
+            return <path key={`m${s.id}`} d={segPath(s, cam, true)} fill="none" stroke={mirrorStroke} strokeOpacity={mirrorDimmed ? 0.07 : 0.28} strokeWidth={1.6} strokeLinecap="round" />;
           })}
           {segs.map((s) => {
-            const sel = selected.includes(s.id);
-            const hov = selPoints.length === 0 && hoverId === s.id;
+            const isTrimMode = tool === "trim" && !editOpen;
+            const sel = !isTrimMode && selected.includes(s.id);
+            const hov = !isTrimMode && selPoints.length === 0 && hoverId === s.id;
             const mirrorDimmed = !!mirrorSession && !mirrorSession.keepCopy && mirrorSession.ids.includes(s.id);
             const base = segSide.get(s.id) === "inner" ? themeColors.profileInner : themeColors.profileOuter;
+            if (isTrimMode && trimDimmedSubKeys.size > 0) {
+              const subs = trimGraph?.subSegsBySeg.get(s.id);
+              if (subs && subs.some((sub) => trimDimmedSubKeys.has(sub.key))) {
+                return (
+                  <g key={s.id}>
+                    {subs.map((sub) => (
+                      <path
+                        key={sub.key}
+                        d={segPath(sub.geom, cam)}
+                        fill="none"
+                        stroke={base}
+                        strokeWidth={2.4}
+                        strokeOpacity={trimDimmedSubKeys.has(sub.key) ? 0.22 : 1}
+                        strokeLinecap="round"
+                      />
+                    ))}
+                  </g>
+                );
+              }
+            }
             return (
               <path
                 key={s.id}
                 d={segPath(s, cam)}
                 fill="none"
-                stroke={sel ? themeColors.profileSelected : hov ? themeColors.profileHover : split.enabled ? "transparent" : base}
+                stroke={sel ? themeColors.profileSelected : hov ? themeColors.profileHover : split.enabled && !(isTrimMode && trimDimmedSubKeys.size > 0) ? "transparent" : base}
                 strokeWidth={iso ? 2.4 : sel ? 3.2 : hov ? 3 : 2.4}
                 strokeOpacity={mirrorDimmed ? 0.2 : 1}
                 strokeLinecap="round"
@@ -5901,7 +6118,7 @@ export default function ProfileEditor({
           })}
 
           {/* نشانهٔ قفل بودن المان زیر نشانگر (متصل به المان دیگر) */}
-          {hoverSeg && hoverLocked && !selected.includes(hoverSeg.id) && (
+          {tool !== "trim" && hoverSeg && hoverLocked && !selected.includes(hoverSeg.id) && (
             <path
               d={segPath(hoverSeg, cam)}
               fill="none"
@@ -6013,7 +6230,7 @@ export default function ProfileEditor({
         )}
         {/* نشانگر سبز ابزار رسم هنگام Drag نقطه/دسته پنهان می‌شود؛ در غیر این
             صورت در موقعیت شروع Drag باقی می‌ماند و با خود هندسه اشتباه می‌شود. */}
-        {tool !== "paint" && tool !== "select" && tool !== "move" && tool !== "rotate" && tool !== "copy" && tool !== "mirror" && tool !== "scale" && tool !== "boxscale" && cursor && drag.current?.mode !== "handle" &&
+        {tool !== "paint" && tool !== "select" && tool !== "move" && tool !== "rotate" && tool !== "copy" && tool !== "mirror" && tool !== "scale" && tool !== "boxscale" && tool !== "fillet" && tool !== "trim" && cursor && drag.current?.mode !== "handle" &&
           !(straightDrawing && measuredLineEnd) && (
           <circle cx={P(cursor.z, cursor.r)[0]} cy={P(cursor.z, cursor.r)[1]} r={4} fill="none" stroke={themeColors.pointRing} strokeWidth={1.6} />
         )}
@@ -6165,8 +6382,9 @@ export default function ProfileEditor({
                 <>
                   <rect x={x} y={y} width={w} height={h} fill={rgbaCss(c, 0.11)} stroke={c} strokeWidth={1.4} strokeDasharray={crossing ? "6 3" : undefined} />
                   <text x={x + 6} y={y - 7} fontSize={10.5} fontFamily="Vazirmatn, sans-serif" fontWeight={700} fill={c} stroke={editOpen ? themeColors.pathEditBg : themeColors.editorBg} strokeWidth={3} paintOrder="stroke">
-                    {crossing ? "متقاطع" : "پنجره‌ای"} • {editOpen ? (bufMarq?.ids.length ?? 0) : marqueeHits.length} المان، {editOpen ? (bufMarq?.vxs.length ?? 0) : marqueePointHits.length + (marqueeSplitHit ? 1 : 0)} نقطه
-                    {marquee.remove ? " − حذف" : marquee.add ? " + افزودن" : ""}
+                    {tool === "trim"
+                      ? `${crossing ? "متقاطع" : "پنجره‌ای"} • ${trimMarqueeKeys.length} بخش برش`
+                      : `${crossing ? "متقاطع" : "پنجره‌ای"} • ${editOpen ? (bufMarq?.ids.length ?? 0) : marqueeHits.length} المان، ${editOpen ? (bufMarq?.vxs.length ?? 0) : marqueePointHits.length + (marqueeSplitHit ? 1 : 0)} نقطه${marquee.remove ? " − حذف" : marquee.add ? " + افزودن" : ""}`}
                   </text>
                 </>
               );

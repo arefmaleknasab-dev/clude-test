@@ -111,6 +111,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
     copy: "c",
     mirror: "i",
     fillet: "f",
+    trim: "t",
     line: "l",
     polyline: "p",
     quad: "q",
@@ -170,6 +171,7 @@ const SHORTCUT_LABELS: Record<string, string> = {
   copy: "کپی",
   mirror: "آینه",
   fillet: "فیلت",
+  trim: "برش (Trim)",
   line: "خط",
   polyline: "چندخطی",
   quad: "منحنی درجه دو",
@@ -614,7 +616,7 @@ export default function PreferencesDialog({
                 ["theme", "تم نرم‌افزار", `تم رنگ کد رنگی ذخیره بارگذاری بازنشانی ${themeSearchKeywords}`],
                 ["appearance", "خطوط و مقیاس بوم", "ظاهر ضخامت نوار ابزار دکمه اندازه نقطه glow"],
                 ["snap", "اسنپ و دقت", "حساسیت پیکسل نقاط تقاطع محور"],
-                ["shortcuts", "کلیدهای میانبر", "کیبورد ابزار انتخاب حرکت چرخش مقیاس کپی"],
+                ["shortcuts", "کلیدهای میانبر", "کیبورد ابزار انتخاب حرکت چرخش مقیاس کپی برش trim"],
                 ["post", "تنظیمات جی‌کد", "سرعت فید عملیات فانوک لینوکس واحد میلیمتر اینچ شماره خط شیفت جابجایی افست هلدر دوم فاصله شروع پایان داخل تراشی"],
               ] as const
             )

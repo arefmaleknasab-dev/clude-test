@@ -149,5 +149,17 @@ export const IconScale = (p: P) => (
 export const IconFillet = (p: P) =>
   base(p, <><path d="M4 4v16h16" /><path d="M4 7.5A12.5 12.5 0 0 0 16.5 20" strokeWidth={2.4} /></>);
 
+export const IconTrim = (p: P) =>
+  base(
+    p,
+    <>
+      <path d="M9 20V10h11" strokeWidth={2.3} />
+      <path d="M9 10V3.5" strokeWidth={1.9} strokeDasharray="2.1 2.4" opacity={0.5} />
+      <path d="M9 10H3.5" strokeWidth={1.9} strokeDasharray="2.1 2.4" opacity={0.5} />
+      <circle cx="9" cy="10" r="1.9" fill="currentColor" stroke="none" />
+      <path d="M13.5 4.2 17.5 8.2M17.5 4.2 13.5 8.2" strokeWidth={1.7} />
+    </>
+  );
+
 export const IconCube = (p: P) =>
   base(p, <><path d="M12 2.5 20.5 7v10L12 21.5 3.5 17V7z" /><path d="M3.5 7 12 11.5 20.5 7" /><path d="M12 11.5v10" /></>);
