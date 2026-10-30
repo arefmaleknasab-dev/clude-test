@@ -1741,17 +1741,18 @@ export function generate(pts: PPoint[], p: Params, innerPts?: PPoint[], outerFin
     const clipA = Math.max(loZ, minOffZ);
     const clipB = Math.min(hiZ, maxOffZ);
     if (clipB - clipA <= 1e-6) return true;
+    const rampTol = Math.min(0.08, Math.max(0.03, 0.16 * OD));
     const rampRAt = (z: number): number => fromR + (toR - fromR) * ((z - fromZ) / (toZ - fromZ));
     const epsZ = Math.min(1e-4, 0.25 * (clipB - clipA));
     const steps = Math.max(16, Math.ceil((clipB - clipA) / 1.0));
     for (let i = 0; i <= steps; i++) {
       const z = i === 0 ? clipA + epsZ : i === steps ? clipB - epsZ : clipA + (clipB - clipA) * (i / steps);
-      if (rampRAt(z) < offsetRadiusAt(z) - 0.05) return false;
+      if (rampRAt(z) < offsetRadiusAt(z) - rampTol) return false;
     }
     /* بررسی دقیق در تمام رئوس پوش آفست (از جمله لبه‌های بالای دیواره‌های عمودی +۹۰° و −۹۰° و تیغه‌های باریک) */
     for (const s of roughOffSamples) {
       if (s.z <= clipA + 1e-5 || s.z >= clipB - 1e-5) continue;
-      if (rampRAt(s.z) < s.r - 0.05) return false;
+      if (rampRAt(s.z) < s.r - rampTol) return false;
     }
     return true;
   };
@@ -2212,22 +2213,84 @@ export function generate(pts: PPoint[], p: Params, innerPts?: PPoint[], outerFin
           /* ایمنی اتصال مورب: اگر خط مستقیمِ بین انتهای مسیر قبل و ابتدای خط بعد   */
           /* با خط آفست (و در نتیجه منحنی اصلی) تداخل داشته باشد، اتصال پیوسته      */
           /* لغو و از مسیر امن G0 استفاده می‌شود تا شکل اصلی تراشیده نشود.          */
+          /* روی منحنی‌های محدب یکنواخت (مثل قوس داخلی و پیاله)، اگر تک‌وتر مستقیم به‌خاطر
+             برآمدگی ملایم قوس بیش از تلرانس به آفست نزدیک شود اما هیچ قله، پلهٔ عمودی
+             (+۹۰°/−۹۰°) یا مادهٔ تراش‌نخورده‌ای در مسیر نباشد، اتصال پیوستهٔ G1 روی پوش
+             بیرونی آفست با کمترین تعداد وتر متقارن (RDP) ساخته می‌شود تا G0 اضافه صادر نشود. */
+          const buildConvexRampPath = (fromZ: number, fromR: number, toZ: number, toR: number): Sample[] | null => {
+            if (!p.ramp || toR > fromR + 1e-6 || Math.abs(toZ - fromZ) <= 1e-6) return null;
+            if (!roughOffSamples.length) return null;
+            const minOffZ = roughOffSamples[0].z;
+            const maxOffZ = roughOffSamples[roughOffSamples.length - 1].z;
+            if (fromZ < minOffZ - 0.05 || fromZ > maxOffZ + 0.05 || toZ < minOffZ - 0.05 || toZ > maxOffZ + 0.05) return null;
+            if (Math.abs(offsetRadiusAt(fromZ) - fromR) > 0.2 || Math.abs(offsetRadiusAt(toZ) - toR) > 0.2) return null;
+            const loZ = Math.min(fromZ, toZ);
+            const hiZ = Math.max(fromZ, toZ);
+            for (const seg of physStock) {
+              if (Math.min(seg.b, hiZ) - Math.max(seg.a, loZ) > 1e-5 && seg.r > fromR + 0.05) return null;
+            }
+            for (let i = 0; i < roughOffSamples.length - 1; i++) {
+              const a = roughOffSamples[i], b = roughOffSamples[i + 1];
+              if (Math.max(a.z, b.z) < loZ + 1e-5 || Math.min(a.z, b.z) > hiZ - 1e-5) continue;
+              if (Math.abs(b.z - a.z) <= 1e-6 && Math.abs(b.r - a.r) > 0.05) return null;
+            }
+            const dir = toZ > fromZ ? 1 : -1;
+            const innerVerts = roughOffSamples
+              .filter((s) => s.z > loZ + 1e-4 && s.z < hiZ - 1e-4)
+              .sort((a, b) => (a.z - b.z) * dir);
+            let prevR = fromR;
+            const chain: Sample[] = [{ z: fromZ, r: fromR }];
+            for (const v of innerVerts) {
+              if (v.r > fromR + 0.02 || v.r < toR - 0.02) return null;
+              if (v.r > prevR + 0.02) return null;
+              prevR = Math.min(prevR, v.r);
+              chain.push({ z: v.z, r: Math.min(fromR, Math.max(toR, v.r + 0.01)) });
+            }
+            chain.push({ z: toZ, r: toR });
+            const simplifySafe = (pts: Sample[]): Sample[] | null => {
+              const first = pts[0], last = pts[pts.length - 1];
+              if (rampIsSafe(first.z, first.r, last.z, last.r)) return [first, last];
+              if (pts.length <= 2) return null;
+              let bestIdx = Math.floor(pts.length / 2);
+              let bestBulge = -Infinity;
+              const dz = last.z - first.z;
+              for (let i = 1; i < pts.length - 1; i++) {
+                const chordR = Math.abs(dz) > 1e-9
+                  ? first.r + (last.r - first.r) * ((pts[i].z - first.z) / dz)
+                  : 0.5 * (first.r + last.r);
+                const bulge = pts[i].r - chordR;
+                if (bulge > bestBulge) {
+                  bestBulge = bulge;
+                  bestIdx = i;
+                }
+              }
+              const left = simplifySafe(pts.slice(0, bestIdx + 1));
+              if (!left) return null;
+              const right = simplifySafe(pts.slice(bestIdx));
+              if (!right) return null;
+              return [...left.slice(0, -1), ...right];
+            };
+            const simplified = simplifySafe(chain);
+            return simplified && simplified.length >= 2 ? simplified.slice(1) : null;
+          };
+
           const rampOk = !Number.isNaN(curZ) && rampIsSafe(curZ, curR, startZ, c.r);
+          const convexRamp = !Number.isNaN(curZ) && !rampOk ? buildConvexRampPath(curZ, curR, startZ, c.r) : null;
           if (Number.isNaN(curZ)) {
             enterOuterPath(c.r,startZ,p.feedRough*.7,"rough");
-          } else if (!rampOk) {
+            mv(1, 2 * c.r, startZ, p.feedRough * 0.7, "rough");
+          } else if (rampOk) {
+            mv(1, 2 * c.r, startZ, p.feedRough * 0.7, "rough");
+          } else if (convexRamp && convexRamp.length) {
+            for (const wp of convexRamp) mv(1, 2 * wp.r, wp.z, p.feedRough * 0.7, "rough");
+          } else {
             /* جابه‌جایی امن: شعاع عبور با حداقل فاصله امن بالای تمام موادِ مسیر است */
             const safeR = minSafeRadius(curZ, startZ);
             const travelR = Math.max(curR, safeR);
             if (travelR > curR + 1e-6) rawRapid(2 * travelR, curZ); // جمع شعاعیِ جزئی (در صورت نیاز)
             rawRapid(2 * travelR, startZ); // جابه‌جایی طولیِ امن — بدون بازگشت به شروع
+            mv(1, 2 * c.r, startZ, p.feedRough * 0.7, "rough");
           }
-          /* در حالت اتصال پیوستهٔ امن (rampOk) هیچ G0 در میان نیست؛ حرکت برشیِ زیر */
-          /* مستقیماً و به‌صورت مورب (Ramp) ابزار را از انتهای مسیر قبل به ابتدای   */
-          /* خط بعد می‌رساند و سپس تراش طولی ادامه می‌یابد.                        */
-
-          /* فرورفتن تا شعاع لایه و تراش طولی */
-          mv(1, 2 * c.r, startZ, p.feedRough * 0.7, "rough");
           if (Math.abs(endZ - startZ) > 0.01) mv(1, 2 * c.r, endZ, p.feedRough, "rough");
           physCut(c.a, c.b, c.r); // به‌روزرسانی سطح تراش‌خورده
 
