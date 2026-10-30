@@ -1170,7 +1170,7 @@ function cutIntervals(samples: Sample[], layer: number) {
     const next: { a: number; b: number }[] = [];
     for (const iv of current) {
       if (bz > iv.a + 1e-5 && bz < iv.b - 1e-5) {
-        next.push({ a: iv.a, b: bz }, { a: bz, b: iv.b });
+        next.push({ a: iv.a, b: bz - 1e-3 }, { a: bz + 1e-3, b: iv.b });
       } else {
         next.push(iv);
       }
@@ -1643,22 +1643,67 @@ export function generate(pts: PPoint[], p: Params, innerPts?: PPoint[], outerFin
   /* ردیابی سطحِ واقعی تراش‌خورده برای محاسبهٔ امنِ جابه‌جایی‌های زیگزاگ — همانند   */
   /* شبیه‌ساز، شعاع باقی‌ماندهٔ قطعه پس از هر برش به‌روز می‌شود تا شعاعِ عبورِ طولی  */
   /* همیشه بالاتر از موادِ موجود باشد.                                             */
-  const NG = 600;
-  const physR = new Float64Array(NG + 1).fill(envRot.outR);
+  let physStock: { a: number; b: number; r: number }[] = [{ a: 0, b: p.blankL, r: envRot.outR }];
   const physCut = (a: number, b: number, r: number) => {
-    const i0 = Math.max(0, Math.ceil((Math.min(a, b) / p.blankL) * NG - 1e-6));
-    const i1 = Math.min(NG, Math.floor((Math.max(a, b) / p.blankL) * NG + 1e-6));
-    for (let i = i0; i <= i1; i++) if (r < physR[i]) physR[i] = r;
+    const lo = Math.max(0, Math.min(a, b));
+    const hi = Math.min(p.blankL, Math.max(a, b));
+    if (hi - lo <= 1e-7) return;
+    const next: { a: number; b: number; r: number }[] = [];
+    const pushSeg = (sa: number, sb: number, sr: number) => {
+      if (sb - sa <= 1e-7) return;
+      const last = next[next.length - 1];
+      if (last && Math.abs(last.b - sa) <= 1e-7 && Math.abs(last.r - sr) <= 1e-7) last.b = sb;
+      else next.push({ a: sa, b: sb, r: sr });
+    };
+    for (const seg of physStock) {
+      if (seg.r <= r + 1e-9 || seg.b <= lo + 1e-7 || seg.a >= hi - 1e-7) {
+        pushSeg(seg.a, seg.b, seg.r);
+        continue;
+      }
+      if (lo > seg.a + 1e-7) pushSeg(seg.a, lo, seg.r);
+      pushSeg(Math.max(seg.a, lo), Math.min(seg.b, hi), r);
+      if (seg.b > hi + 1e-7) pushSeg(hi, seg.b, seg.r);
+    }
+    physStock = next;
   };
   const minSafeRadius = (zFrom: number, zTo: number): number => {
     const lo = Math.min(zFrom, zTo);
     const hi = Math.max(zFrom, zTo);
-    const i0 = Math.max(0, Math.floor((lo / p.blankL) * NG));
-    const i1 = Math.min(NG, Math.ceil((hi / p.blankL) * NG));
     let mx = 0;
-    for (let i = i0; i <= i1; i++) if (physR[i] > mx) mx = physR[i];
-    for (const s of roughOffSamples) {
-      if (s.z >= lo - 1e-6 && s.z <= hi + 1e-6 && s.r > mx) mx = s.r;
+    if (hi - lo <= 2e-5) {
+      const zMid = 0.5 * (lo + hi);
+      for (const seg of physStock) {
+        if (zMid >= seg.a - 1e-7 && zMid <= seg.b + 1e-7 && seg.r > mx) mx = seg.r;
+      }
+      if (
+        roughOffSamples.length &&
+        zMid >= roughOffSamples[0].z - 1e-6 &&
+        zMid <= roughOffSamples[roughOffSamples.length - 1].z + 1e-6
+      ) {
+        const or = upperRadiusOnPoly(roughOffSamples, zMid);
+        if (or > mx) mx = or;
+      }
+    } else {
+      for (const seg of physStock) {
+        if (Math.min(seg.b, hi) - Math.max(seg.a, lo) > 1e-5 && seg.r > mx) mx = seg.r;
+      }
+      if (roughOffSamples.length) {
+        const minOffZ = roughOffSamples[0].z;
+        const maxOffZ = roughOffSamples[roughOffSamples.length - 1].z;
+        const cA = Math.max(lo, minOffZ);
+        const cB = Math.min(hi, maxOffZ);
+        if (cB - cA > 1e-5) {
+          const eps = Math.min(1e-4, 0.25 * (cB - cA));
+          mx = Math.max(
+            mx,
+            upperRadiusOnPoly(roughOffSamples, cA + eps),
+            upperRadiusOnPoly(roughOffSamples, cB - eps)
+          );
+          for (const s of roughOffSamples) {
+            if (s.z > cA + 1e-5 && s.z < cB - 1e-5 && s.r > mx) mx = s.r;
+          }
+        }
+      }
     }
     return mx + p.safety; // حداقل فاصله امن (پارامتر فاصله امن) بالای مواد
   };
@@ -1693,24 +1738,20 @@ export function generate(pts: PPoint[], p: Params, innerPts?: PPoint[], outerFin
     }
     const loZ = Math.min(fromZ, toZ);
     const hiZ = Math.max(fromZ, toZ);
-    const steps = Math.max(16, Math.ceil(Math.abs(hiZ - loZ) / 1.0));
+    const clipA = Math.max(loZ, minOffZ);
+    const clipB = Math.min(hiZ, maxOffZ);
+    if (clipB - clipA <= 1e-6) return true;
+    const rampRAt = (z: number): number => fromR + (toR - fromR) * ((z - fromZ) / (toZ - fromZ));
+    const epsZ = Math.min(1e-4, 0.25 * (clipB - clipA));
+    const steps = Math.max(16, Math.ceil((clipB - clipA) / 1.0));
     for (let i = 0; i <= steps; i++) {
-      const t = i === 0 ? 1e-4 : i === steps ? 1 - 1e-4 : i / steps;
-      const z = fromZ + (toZ - fromZ) * t;
-      const r = fromR + (toR - fromR) * t;
-      if (z < minOffZ - 0.01 || z > maxOffZ + 0.01) continue;
-      if (r < offsetRadiusAt(z) - 0.05) return false;
+      const z = i === 0 ? clipA + epsZ : i === steps ? clipB - epsZ : clipA + (clipB - clipA) * (i / steps);
+      if (rampRAt(z) < offsetRadiusAt(z) - 0.05) return false;
     }
-    /* بررسی مستقیم تقاطع با دیواره‌های عمودی یا لبه‌های تیز آفست */
-    const p1 = { z: fromZ, r: fromR }, p2 = { z: toZ, r: toR };
-    for (let i = 0; i < roughOffSamples.length - 1; i++) {
-      const a = roughOffSamples[i], b = roughOffSamples[i + 1];
-      if (Math.max(a.z, b.z) < loZ - 1e-6 || Math.min(a.z, b.z) > hiZ + 1e-6) continue;
-      const hit = segCross(p1, p2, a, b);
-      if (!hit) continue;
-      const atStart = Math.hypot(hit.z - fromZ, hit.r - fromR) < 0.05;
-      const atEnd = Math.hypot(hit.z - toZ, hit.r - toR) < 0.05;
-      if (!atStart && !atEnd && hit.r < Math.max(a.r, b.r) - 0.05) return false;
+    /* بررسی دقیق در تمام رئوس پوش آفست (از جمله لبه‌های بالای دیواره‌های عمودی +۹۰° و −۹۰° و تیغه‌های باریک) */
+    for (const s of roughOffSamples) {
+      if (s.z <= clipA + 1e-5 || s.z >= clipB - 1e-5) continue;
+      if (rampRAt(s.z) < s.r - 0.05) return false;
     }
     return true;
   };
@@ -1820,7 +1861,7 @@ export function generate(pts: PPoint[], p: Params, innerPts?: PPoint[], outerFin
             dir = dir === 1 ? -1 : 1;
           }
           cornersCleared = true;
-          physR.fill(R); // گوشه‌ها برداشته شد — سطح مبنا از این پس قطر واقعی است
+          physCut(0, p.blankL, R); // گوشه‌ها برداشته شد — سطح مبنا از این پس قطر واقعی است
           note(`ROUND DONE AT X${f2(R)} (${shName})`);
           if(!nextIsOuterPath(op.id)) mv(0,2*(R+p.safety),atZ,0,"rapid");
         }
